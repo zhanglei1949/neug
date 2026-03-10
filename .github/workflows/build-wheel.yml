@@ -58,7 +58,7 @@ jobs:
           python-version: '3.14'
 
       - name: Install cibuildwheel
-        run: python3 -m pip install cibuildwheel==2.23.3
+        run: python3 -m pip install cibuildwheel==3.1.2
 
       - name: Prepare for linux
         run: |
@@ -137,7 +137,7 @@ jobs:
           python-version: '3.14'
 
       - name: Install cibuildwheel
-        run: python3 -m pip install cibuildwheel==2.23.3
+        run: python3 -m pip install cibuildwheel==3.1.2
 
       - name: Prepare for linux
         run: |
@@ -216,7 +216,7 @@ jobs:
           bash scripts/install_deps.sh
 
       - name: Install cibuildwheel
-        run: python3 -m pip install cibuildwheel==2.23.3
+        run: python3 -m pip install cibuildwheel==3.1.2
 
       - name: Prepare for macos
         run: |
@@ -298,7 +298,7 @@ jobs:
           bash scripts/install_deps.sh
 
       - name: Install cibuildwheel
-        run: python3 -m pip install cibuildwheel==2.23.3
+        run: python3 -m pip install cibuildwheel==3.1.2
 
       - name: Prepare for macos
         run: |
