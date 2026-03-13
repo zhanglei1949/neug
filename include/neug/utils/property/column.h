@@ -35,6 +35,9 @@
 #include "neug/storages/container/file_header.h"
 #include "neug/storages/container/i_container.h"
 #include "neug/storages/file_names.h"
+#include "neug/storages/module/module.h"
+#include "neug/storages/module/type_name.h"
+#include "neug/storages/workspace.h"
 #include "neug/utils/exception/exception.h"
 #include "neug/utils/file_utils.h"
 #include "neug/utils/likely.h"
@@ -42,25 +45,24 @@
 #include "neug/utils/property/types.h"
 #include "neug/utils/serialization/out_archive.h"
 
+#include <glog/logging.h>
+
 namespace neug {
 class Table;
 
 std::string_view truncate_utf8(std::string_view str, size_t length);
 
-class ColumnBase {
+class ColumnBase : public Module {
  public:
   virtual ~ColumnBase() {}
 
+  // Legacy path-based open/dump API used by LFIndexer (bypasses Checkpoint).
   virtual void open(const std::string& name, const std::string& snapshot_dir,
-                    const std::string& work_dir) = 0;
-
-  virtual void open_in_memory(const std::string& name) = 0;
-
-  virtual void open_with_hugepages(const std::string& name) = 0;
+                    const std::string& work_dir) {}
+  virtual void open_in_memory(const std::string& name) {}
+  virtual void open_with_hugepages(const std::string& name) {}
 
   virtual void close() = 0;
-
-  virtual void dump(const std::string& filename) = 0;
 
   virtual size_t size() const = 0;
 
@@ -83,6 +85,8 @@ class ColumnBase {
   }
 
   virtual void ingest(uint32_t index, OutArchive& arc) = 0;
+
+  void Close() override { close(); }
 };
 
 template <typename T>
@@ -91,26 +95,26 @@ class TypedColumn : public ColumnBase {
   explicit TypedColumn() : size_(0) {}
   ~TypedColumn() { close(); }
 
-  void open(const std::string& name, const std::string& snapshot_dir,
-            const std::string& work_dir) override {
-    buffer_ = OpenContainer(snapshot_dir + "/" + name, work_dir + "/" + name,
-                            MemoryLevel::kSyncToFile);
-    size_ = buffer_->GetDataSize() / sizeof(T);
-  }
-
-  void open_in_memory(const std::string& name) override {
-    buffer_ = OpenContainer(name, "", MemoryLevel::kInMemory);
-    size_ = buffer_->GetDataSize() / sizeof(T);
-  }
-
-  void open_with_hugepages(const std::string& name) override {
-    buffer_ = OpenContainer(name, "", MemoryLevel::kHugePagePrefered);
+  void Open(const Checkpoint& ckp, const ModuleDescriptor& desc,
+            MemoryLevel level) override {
+    size_ = desc.size;
+    buffer_ = ckp.OpenFile(desc.path, level);
     size_ = buffer_->GetDataSize() / sizeof(T);
   }
 
   void close() override { buffer_.reset(); }
 
-  void dump(const std::string& filename) override { buffer_->Dump(filename); }
+  ModuleDescriptor Dump(const Checkpoint& ckp) override {
+    // TODO(zhanglei): When DataContainer related code is merged, we need to use
+    // IsDirty() to check whether we need to dump the column or not. If the
+    // column is not dirty, we can skip dumping and just return the existing
+    // path and size.
+    ModuleDescriptor desc = ckp.Commit(*buffer_);
+    desc.size = size_;
+    desc.type = StorageTypeName<T>::value;
+    desc.module_type = ModuleTypeName();
+    return desc;
+  }
 
   size_t size() const override { return size_; }
 
@@ -171,6 +175,20 @@ class TypedColumn : public ColumnBase {
   const IDataContainer& buffer() const { return *buffer_; }
   size_t buffer_size() const { return size_; }
 
+  std::unique_ptr<Module> Fork(const Checkpoint& ckp,
+                               MemoryLevel level) override {
+    // TODO(zhanglei): Current implementation is not correct, fix it
+    auto new_col = std::make_unique<TypedColumn<T>>();
+    auto desc = Dump(ckp);
+    // TODO(zhanglei): After dump the data is cleaned, which is not expected.
+    new_col->Open(ckp, desc, level);
+    return new_col;
+  }
+
+  std::string ModuleTypeName() const override {
+    return std::string("column_") + StorageTypeName<T>::value;
+  }
+
  private:
   std::unique_ptr<IDataContainer> buffer_;
   size_t size_;
@@ -195,11 +213,12 @@ class TypedColumn<EmptyType> : public ColumnBase {
   explicit TypedColumn() {}
   ~TypedColumn() {}
 
-  void open(const std::string& name, const std::string& snapshot_dir,
-            const std::string& work_dir) override {}
-  void open_in_memory(const std::string& name) override {}
-  void open_with_hugepages(const std::string& name) override {}
-  void dump(const std::string& filename) override {}
+  void Open(const Checkpoint& ckp, const ModuleDescriptor& desc,
+            MemoryLevel level) override {}
+
+  ModuleDescriptor Dump(const Checkpoint& ckp) override {
+    return ModuleDescriptor();
+  }
   void close() override {}
   size_t size() const override { return 0; }
   void resize(size_t size) override {}
@@ -219,8 +238,16 @@ class TypedColumn<EmptyType> : public ColumnBase {
   EmptyType get_view(size_t index) const { return EmptyType(); }
 
   void ingest(uint32_t index, OutArchive& arc) override {}
+
+  std::unique_ptr<Module> Fork(const Checkpoint& ckp,
+                               MemoryLevel level) override {
+    return std::make_unique<TypedColumn<EmptyType>>();
+  }
+
+  std::string ModuleTypeName() const override { return "column_empty"; }
 };
 
+// Compact representation of a string slot stored in the items buffer.
 struct string_item {
   uint64_t offset : 48;
   uint32_t length : 16;
@@ -247,33 +274,28 @@ class TypedColumn<std::string_view> : public ColumnBase {
 
   ~TypedColumn() { close(); }
 
-  void open(const std::string& name, const std::string& snapshot_dir,
-            const std::string& work_dir) override {
-    items_buffer_ = OpenContainer(snapshot_dir + "/" + name + ".items",
-                                  work_dir + "/" + name + ".items",
-                                  MemoryLevel::kSyncToFile);
-    data_buffer_ = OpenContainer(snapshot_dir + "/" + name + ".data",
-                                 work_dir + "/" + name + ".data",
-                                 MemoryLevel::kSyncToFile);
-    size_ = items_buffer_->GetDataSize() / sizeof(string_item);
-    init_pos(snapshot_dir + "/" + name + ".pos");
-  }
-
-  void open_in_memory(const std::string& prefix) override {
-    items_buffer_ =
-        OpenContainer(prefix + ".items", "", MemoryLevel::kInMemory);
-    data_buffer_ = OpenContainer(prefix + ".data", "", MemoryLevel::kInMemory);
-    size_ = items_buffer_->GetDataSize() / sizeof(string_item);
-    init_pos(prefix + ".pos");
-  }
-
-  void open_with_hugepages(const std::string& prefix) override {
-    items_buffer_ =
-        OpenContainer(prefix + ".items", "", MemoryLevel::kHugePagePrefered);
-    data_buffer_ =
-        OpenContainer(prefix + ".data", "", MemoryLevel::kHugePagePrefered);
-    size_ = items_buffer_->GetDataSize() / sizeof(string_item);
-    init_pos(prefix + ".pos");
+  void Open(const Checkpoint& ckp, const ModuleDescriptor& desc,
+            MemoryLevel level) override {
+    size_ = desc.size;
+    if (desc.has_sub_module("items") && desc.has_sub_module("data")) {
+      // New layout: each buffer is stored as an independent sub-module whose
+      // descriptor was produced by Checkpoint::Commit().
+      items_buffer_ = ckp.OpenFile(desc.sub_modules().at("items").path, level);
+      data_buffer_ = ckp.OpenFile(desc.sub_modules().at("data").path, level);
+    } else {
+      // Legacy layout: desc.path is a common prefix; suffixes .items/.data are
+      // appended.  Kept for reading checkpoints produced by older builds.
+      items_buffer_ = ckp.OpenFile(desc.path + ".items", level);
+      data_buffer_ = ckp.OpenFile(desc.path + ".data", level);
+    }
+    CHECK(size_ == items_buffer_->GetDataSize() / sizeof(string_item));
+    // Restore the append-position cursor.  New format stores it as an extra
+    // field; fall back to reading the legacy .pos side-car file.
+    if (auto pos_str = desc.get("pos")) {
+      pos_.store(std::stoull(*pos_str));
+    } else {
+      pos_.store(0);
+    }
   }
 
   void close() override {
@@ -285,46 +307,68 @@ class TypedColumn<std::string_view> : public ColumnBase {
     }
   }
 
-  void dump(const std::string& filename) override {
-    // Compact before dumping.  StringColumn uses an append-only strategy for
-    // updates, leaving stale copies in data_buffer_.  When there is reused
-    // data we stream the compacted bytes directly to the output file in a
-    // single forward pass, computing MD5 on-the-fly, which avoids:
-    //   1. A temporary buffer allocation (effective_size bytes).
-    //   2. The memcpy from temp_buf → data_buffer_.
-    //   3. The subsequent container Dump() copy.
-    // When there is nothing to compact we fall through and let the container
-    // handle the write as usual (e.g. reflink / copy_file_range via
-    // FileSharedMMap::Dump, or a single fwrite via MMapContainer::Dump).
-    size_t pos_val;
+  ModuleDescriptor Dump(const Checkpoint& ckp) override {
+    ModuleDescriptor desc;
+    desc.size = size_;
+    desc.type = StorageTypeName<std::string_view>::value;
+    desc.module_type = ModuleTypeName();
+
     if (size_ > 0) {
       auto plan = prepare_compaction_plan();
       if (plan.reused_size > 0) {
-        // Stream path: source (data_buffer_) and destination (snapshot file)
-        // are always different files, so there is no aliasing hazard.
-        pos_val = stream_compact_and_dump(plan, filename + ".data");
-        write_file(filename + ".pos", &pos_val, sizeof(pos_val), 1);
-        if (items_buffer_) {
-          items_buffer_->Dump(filename + ".items");
-        }
+        // ── Stream-compaction path ────────────────────────────────────────
+        // The data buffer contains stale copies from update operations.
+        // We stream the compacted bytes to a fresh UUID file under runtime/
+        // and build the data sub-module descriptor manually, because there
+        // is no IDataContainer holding the compacted bytes at this point.
+        std::string data_uuid = generate_uuid();
+        std::string data_path = ckp.runtime_dir() + "/" + data_uuid;
+        size_t pos_val = stream_compact_and_dump(plan, data_path);
+        desc.set("pos", std::to_string(pos_val));
+
+        // items_buffer_ was updated in-place by stream_compact_and_dump;
+        // commit it through the checkpoint so the path is recorded.
+        ModuleDescriptor items_desc = ckp.Commit(*items_buffer_);
+        desc.set_sub_module("items", std::move(items_desc));
+
+        // Build data sub-module descriptor manually for the compacted file.
+        ModuleDescriptor data_desc;
+        data_desc.path = data_path;
+        data_desc.size = pos_val;
+        desc.set_sub_module("data", std::move(data_desc));
         items_buffer_->Close();
         data_buffer_->Close();
-        return;
+        return desc;
       }
-      pos_val = pos_.load();
-    } else {
-      pos_val = pos_.load();
     }
-    // No-compaction path: dump containers as-is.
-    write_file(filename + ".pos", &pos_val, sizeof(pos_val), 1);
+
+    // ── No-compaction path ──────────────────────────────────────────────
+    // Both buffers are clean; delegate persistence to Checkpoint::Commit()
+    // which handles MAP_SHARED (sync-in-place) and all other containers
+    // (copy to a fresh UUID file) uniformly.
+    desc.set("pos", std::to_string(pos_.load()));
     if (items_buffer_) {
-      items_buffer_->Dump(filename + ".items");
+      desc.set_sub_module("items", ckp.Commit(*items_buffer_));
     }
     if (data_buffer_) {
-      data_buffer_->Dump(filename + ".data");
+      desc.set_sub_module("data", ckp.Commit(*data_buffer_));
     }
     items_buffer_->Close();
     data_buffer_->Close();
+  }
+
+  ModuleDescriptor Dump(const Checkpoint& ckp) override {
+    std::string uuid = generate_uuid();
+    std::string dump_path = ckp.runtime_dir() + "/" + uuid;
+    size_t pos_val = pos_.load();
+    write_file(dump_path + ".pos", &pos_val, sizeof(pos_val), 1);
+    buffer_.dump(dump_path);
+    ModuleDescriptor desc;
+    desc.path = dump_path;
+    desc.size = size_;
+    desc.type = StorageTypeName<std::string_view>::value;
+    desc.module_type = ModuleTypeName();
+    return desc;
   }
 
   size_t size() const override { return size_; }
@@ -426,17 +470,18 @@ class TypedColumn<std::string_view> : public ColumnBase {
     set_value(index, val);
   }
 
- private:
-  inline void init_pos(const std::string& file_path) {
-    if (std::filesystem::exists(file_path)) {
-      size_t pos_val = 0;
-      read_file(file_path, &pos_val, sizeof(pos_val), 1);
-      pos_.store(pos_val);
-    } else {
-      pos_.store(0);
-    }
+  std::unique_ptr<Module> Fork(const Checkpoint& ckp,
+                               MemoryLevel level) override {
+    // TODO(zhanglei): this implementation is not correct, fix it
+    auto new_col = std::make_unique<TypedColumn<std::string_view>>(width_);
+    auto desc = Dump(ckp);
+    new_col->Open(ckp, desc, level);
+    return new_col;
   }
 
+  std::string ModuleTypeName() const override { return "column_string"; }
+
+ private:
   inline string_item get_string_item(size_t idx) const {
     assert(idx < size_);
     auto raw_items =

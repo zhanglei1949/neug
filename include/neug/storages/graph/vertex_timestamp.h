@@ -20,15 +20,17 @@
 #include <memory>
 #include <set>
 
+#include "neug/storages/module/module.h"
 #include "neug/utils/likely.h"
 #include "neug/utils/property/types.h"
 
 namespace neug {
 
-class VertexTimestamp {
+class VertexTimestamp : public Module {
  public:
   static constexpr timestamp_t DELETED_TIMESTAMP =
       std::numeric_limits<timestamp_t>::max();
+  std::string ModuleTypeName() const override { return "vertex_timestamp"; }
   VertexTimestamp() : init_vertex_num_(0), max_vertex_num_(0) {}
   ~VertexTimestamp() { Reset(); }
   VertexTimestamp(VertexTimestamp&& other)
@@ -39,9 +41,11 @@ class VertexTimestamp {
 
   // TODO(zhanglei): VertexTimestamp doesn't necessarily need open from file.
   // Implement the compaction logic
-  void Open(const std::string& tracker_file_prefix);
+  // void Open(const std::string& tracker_file_prefix);
+  void Open(const Checkpoint& ckp, const ModuleDescriptor& descriptor,
+            MemoryLevel memory_level) override;
 
-  void Dump(const std::string& tracker_file_prefix);
+  ModuleDescriptor Dump(const Checkpoint& ckp) override;
 
   void Init(vid_t init_vertex_num, vid_t max_vertex_num);
 
@@ -160,6 +164,11 @@ class VertexTimestamp {
   void ResetTimestamps();
 
   const vid_t InitVertexNum() const { return init_vertex_num_; }
+
+  std::unique_ptr<Module> Fork(const Checkpoint& ckp,
+                               MemoryLevel level) override;
+
+  void Close() override;
 
  private:
   void load_meta(const std::string& meta_filename);

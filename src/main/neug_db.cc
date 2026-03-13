@@ -38,6 +38,7 @@
 #include "neug/storages/allocators.h"
 #include "neug/storages/file_names.h"
 #include "neug/storages/graph/schema.h"
+#include "neug/storages/workspace.h"
 #include "neug/transaction/compact_transaction.h"
 #include "neug/transaction/wal/wal.h"
 #include "neug/utils/exception/exception.h"
@@ -217,7 +218,17 @@ void NeugDB::openGraphAndSchema() {
 
   thread_num_ = config_.thread_num;
   try {
-    graph_.Open(work_dir_, config_.memory_level);
+    Workspace ws(work_dir_);
+    auto latest_ckp = ws.LatestCheckpoint();
+    if (latest_ckp.has_value()) {
+      LOG(INFO) << "Opening graph from checkpoint " << latest_ckp->path();
+      graph_.Open(*latest_ckp, config_.memory_level);
+    } else {
+      auto ckp = ws.CreateCheckpoint();
+      LOG(INFO) << "No checkpoint found, created new checkpoint at "
+                << ckp.path();
+      graph_.Open(ckp, config_.memory_level);
+    }
   } catch (std::exception& e) {
     LOG(ERROR) << "Exception: " << e.what();
     THROW_INTERNAL_EXCEPTION(e.what());
@@ -286,8 +297,10 @@ void NeugDB::createCheckpoint(bool force_compaction, bool reopen) {
     graph_.Compact(config_.compact_csr, config_.csr_reserve_ratio,
                    MAX_TIMESTAMP);
   }
-  graph_.Dump(reopen);
-  VLOG(1) << "Finish checkpoint";
+  Workspace ws(work_dir_);
+  Checkpoint ckp = ws.CreateCheckpoint();
+  graph_.Dump(ckp, reopen);
+  VLOG(1) << "Finish checkpoint: " << ckp.path();
 }
 
 }  // namespace neug

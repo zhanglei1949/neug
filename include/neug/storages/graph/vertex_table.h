@@ -17,6 +17,7 @@
 #include "neug/storages/graph/schema.h"
 #include "neug/storages/graph/vertex_timestamp.h"
 #include "neug/storages/loader/loader_utils.h"
+#include "neug/storages/module/module.h"
 #include "neug/utils/arrow_utils.h"
 #include "neug/utils/indexers.h"
 #include "neug/utils/property/table.h"
@@ -77,14 +78,17 @@ class VertexSet {
 };
 
 class PropertyGraph;
-class VertexTable {
+class VertexTable : public Module {
  public:
+  VertexTable()
+      : table_(std::make_unique<Table>()),
+        memory_level_(MemoryLevel::kInMemory) {}
+
   VertexTable(std::shared_ptr<const VertexSchema> vertex_schema)
       : table_(std::make_unique<Table>()),
         vertex_schema_(vertex_schema),
         v_ts_(),
-        memory_level_(MemoryLevel::kInMemory),
-        work_dir_("") {
+        memory_level_(MemoryLevel::kInMemory) {
     assert(vertex_schema->primary_keys.size() == 1);
     pk_type_ = std::get<0>(vertex_schema->primary_keys[0]);
     indexer_.init(pk_type_.id());
@@ -96,8 +100,7 @@ class VertexTable {
         pk_type_(other.pk_type_),
         vertex_schema_(other.vertex_schema_),
         v_ts_(std::move(other.v_ts_)),
-        memory_level_(other.memory_level_),
-        work_dir_(other.work_dir_) {}
+        memory_level_(other.memory_level_) {}
 
   VertexTable(const VertexTable&) = delete;
 
@@ -108,14 +111,23 @@ class VertexTable {
     std::swap(vertex_schema_, other.vertex_schema_);
     v_ts_.Swap(other.v_ts_);
     std::swap(memory_level_, other.memory_level_);
-    std::swap(work_dir_, other.work_dir_);
   }
 
-  void Open(const std::string& work_dir, MemoryLevel memory_level);
+  // Module interface (Checkpoint-based) — the single public Open.
+  void Open(const Checkpoint& ckp, const ModuleDescriptor& descriptor,
+            MemoryLevel memory_level) override;
+  ModuleDescriptor Dump(const Checkpoint& ckp) override;
 
-  void Dump(const std::string& target_dir);
+  std::string ModuleTypeName() const override { return "vertex_table"; }
+  void Close() override;
+  std::unique_ptr<Module> Fork(const Checkpoint& ckp,
+                               MemoryLevel level) override;
 
-  void Close();
+  /**
+   * @brief Dump all components to @p target_dir (a flat directory).
+   * Used internally and by legacy callers in PropertyGraph.
+   */
+  // ModuleDescriptor DumpToDir(const std::string& target_dir);
 
   void SetVertexSchema(std::shared_ptr<const VertexSchema> vertex_schema);
 
@@ -191,15 +203,18 @@ class VertexTable {
   void RenameProperties(const std::vector<std::string>& old_names,
                         const std::vector<std::string>& new_names);
 
-  std::string work_dir() const { return work_dir_; }
-
   void Compact(timestamp_t ts = MAX_TIMESTAMP);
-
-  inline std::string& work_dir() { return work_dir_; }
 
   void insert_vertices(std::shared_ptr<IRecordBatchSupplier> suppliers);
 
   const VertexTimestamp& get_vertex_timestamp() const { return v_ts_; }
+
+  /**
+   * @brief Legacy open: initialise from a work_dir that follows the
+   * checkpoint_dir() / tmp_dir() naming convention.  Used by PropertyGraph
+   * and tests for non-checkpoint start-up paths.
+   */
+  // void Open(const std::string& work_dir, MemoryLevel memory_level);
 
  private:
   vid_t insert_vertex_pk(const Property& id, timestamp_t ts);
@@ -329,8 +344,6 @@ class VertexTable {
   std::shared_ptr<const VertexSchema> vertex_schema_;
   VertexTimestamp v_ts_;
   MemoryLevel memory_level_;
-
-  std::string work_dir_;
 
   friend class PropertyGraph;
 };

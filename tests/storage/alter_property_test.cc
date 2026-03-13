@@ -266,10 +266,10 @@ void testLoadEdgeBatch(PropertyGraph& graph, std::string src_vertex_type,
       graph.BatchAddEdges(src_label_id, dst_label_id, e_label_id, casted).ok());
 }
 
-void testOpenEmptyGraph(const std::string& graph_dir,
+void testOpenEmptyGraph(const neug::Checkpoint& ckp,
                         const std::string& data_dir) {
   PropertyGraph graph;
-  graph.Open(graph_dir, MemoryLevel::kSyncToFile);
+  graph.Open(ckp, MemoryLevel::kSyncToFile);
 
   // Create vertex type PERSON
   {
@@ -396,5 +396,6 @@ TEST(DatabaseTest, TestAlterProperty) {
         "MODERN_GRAPH_DATA_DIR environment variable is not set");
   }
   LOG(INFO) << "Data directory: " << data_dir;
-  neug::testOpenEmptyGraph(data_path, data_dir);
+  neug::Workspace ws(data_path);
+  neug::testOpenEmptyGraph(ws.CreateCheckpoint(), data_dir);
 }

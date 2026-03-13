@@ -16,6 +16,7 @@
 #include <gtest/gtest.h>
 
 #include "neug/storages/graph/property_graph.h"
+#include "neug/storages/workspace.h"
 
 namespace neug {
 
@@ -32,7 +33,9 @@ class PropertyGraphTest : public ::testing::Test {
     }
     std::filesystem::create_directories(work_dir_);
     graph_ = std::make_unique<PropertyGraph>();
-    graph_->Open(work_dir_, MemoryLevel::kInMemory);
+    Workspace ws(work_dir_);
+    auto ckp = ws.CreateCheckpoint();
+    graph_->Open(ckp, MemoryLevel::kInMemory);
   }
 
   void TearDown() override {

@@ -34,6 +34,9 @@ limitations under the License.
 #include "glog/logging.h"
 #include "neug/storages/container/container_utils.h"
 #include "neug/storages/container/i_container.h"
+#include "neug/storages/container_utils.h"
+#include "neug/storages/module/module.h"
+#include "neug/storages/workspace.h"
 #include "neug/utils/bitset.h"
 #include "neug/utils/file_utils.h"
 #include "neug/utils/likely.h"
@@ -195,14 +198,8 @@ class IdIndexer;
 template <typename INDEX_T>
 class LFIndexer;
 
-template <typename KEY_T, typename INDEX_T>
-void build_lf_indexer(const IdIndexer<KEY_T, INDEX_T>& input,
-                      const std::string& filename, LFIndexer<INDEX_T>& lf,
-                      const std::string& snapshot_dir,
-                      const std::string& work_dir, DataTypeId type);
-
 template <typename INDEX_T>
-class LFIndexer {
+class LFIndexer : public Module {
   static constexpr INDEX_T sentinel = std::numeric_limits<INDEX_T>::max();
 
  public:
@@ -229,6 +226,76 @@ class LFIndexer {
   ~LFIndexer() {}
 
   static std::string prefix() { return "indexer"; }
+
+  MemoryLevel memory_level() const { return memory_level_; }
+
+  // ── Module interface ───────────────────────────────────────────────────
+  std::string ModuleTypeName() const override { return "lf_indexer"; }
+
+  void Close() override { close(); }
+
+  void Open(const Checkpoint& ckp, const ModuleDescriptor& desc,
+            MemoryLevel mem_level) override {
+    memory_level_ = mem_level;
+    // Restore meta fields (default to 0 / empty on fresh init)
+    num_elements_.store(desc.get("num_elements").has_value()
+                            ? std::stoull(desc.get("num_elements").value())
+                            : 0);
+    num_slots_minus_one_ =
+        desc.get("num_slots_minus_one").has_value()
+            ? std::stoull(desc.get("num_slots_minus_one").value())
+            : 0;
+    hash_policy_.set_mod_function_by_index(
+        desc.get("hash_policy").has_value()
+            ? std::stoul(desc.get("hash_policy").value())
+            : 0);
+    auto type =
+        desc.get("type").has_value()
+            ? static_cast<DataTypeId>(std::stoul(desc.get("type").value()))
+            : DataTypeId::kEmpty;
+    init(type);
+    // Load keys; if no sub-module recorded, keys_ gets an empty anonymous
+    // container (AnonMMap) ready for insert via reserve().
+    if (desc.has_sub_module("keys")) {
+      keys_->Open(ckp, desc.sub_modules().at("keys"), mem_level);
+    } else {
+      ModuleDescriptor fresh_keys_desc;
+      keys_->Open(ckp, fresh_keys_desc, mem_level);
+    }
+    // Load indices; if no sub-module recorded, create an empty container.
+    const std::string indices_path = desc.has_sub_module("indices")
+                                         ? desc.sub_modules().at("indices").path
+                                         : "";
+    indices_ = ckp.OpenFile(indices_path, mem_level);
+    indices_size_ = indices_->GetDataSize() / sizeof(INDEX_T);
+  }
+
+  ModuleDescriptor Dump(const Checkpoint& ckp) override {
+    ModuleDescriptor out_desc;
+    out_desc.type = ModuleTypeName();
+    out_desc.size = static_cast<uint64_t>(num_elements_.load());
+    out_desc.version = 1;
+    out_desc.set_sub_module("keys", keys_->Dump(ckp));
+    out_desc.set_sub_module("indices", ckp.Commit(*indices_));
+    out_desc.set("type", std::to_string(static_cast<uint8_t>(get_type())));
+    out_desc.set("num_elements", std::to_string(num_elements_.load()));
+    out_desc.set("num_slots_minus_one", std::to_string(num_slots_minus_one_));
+    out_desc.set("hash_policy",
+                 std::to_string(hash_policy_.get_mod_function_index()));
+    return out_desc;
+  }
+
+  /**
+   * Create an independent copy of this indexer into a UUID sub-dir of ckp.
+   * The fork descriptor's path is the absolute path to the new snapshot dir.
+   */
+  std::unique_ptr<Module> Fork(const Checkpoint& ckp,
+                               MemoryLevel level) override {
+    auto desc = Dump(ckp);
+    auto forked = std::make_unique<LFIndexer<INDEX_T>>();
+    forked->Open(ckp, desc, level);
+    return forked;
+  }
 
   void swap(LFIndexer& other) {
     indices_.swap(other.indices_);
@@ -275,19 +342,6 @@ class LFIndexer {
           std::to_string(type));
     }
     }
-  }
-
-  void build_empty_LFIndexer(const std::string& filename,
-                             const std::string& snapshot_dir,
-                             const std::string& work_dir) {
-    keys_->open(filename + ".keys", "", work_dir);
-    auto full_path = work_dir + "/" + filename + ".indices";
-    file_utils::create_file(full_path, sizeof(FileHeader));
-
-    num_elements_.store(0);
-    indices_size_ = 0;
-    dump_meta(work_dir + "/" + filename + ".meta");
-    keys_->close();
   }
 
   void reserve(size_t size) { rehash(std::max(size, num_elements_.load())); }
@@ -434,39 +488,6 @@ class LFIndexer {
     return keys_->get_prop(index);
   }
 
-  void open(const std::string& name, const std::string& checkpoint_dir,
-            const std::string& work_dir) {
-    std::filesystem::create_directories(tmp_dir(work_dir));
-    load_meta(checkpoint_dir + "/" + name + ".meta");
-    keys_->open(name + ".keys", checkpoint_dir, tmp_dir(work_dir));
-    indices_ = OpenContainer(checkpoint_dir + "/" + name + ".indices",
-                             tmp_dir(work_dir) + "/" + name + ".indices",
-                             MemoryLevel::kSyncToFile);
-    indices_size_ = indices_->GetDataSize() / sizeof(INDEX_T);
-  }
-
-  void open_in_memory(const std::string& name) {
-    load_meta(name + ".meta");
-    keys_->open_in_memory(name + ".keys");
-    indices_ = OpenContainer(name + ".indices", "", MemoryLevel::kInMemory);
-    indices_size_ = indices_->GetDataSize() / sizeof(INDEX_T);
-  }
-
-  void open_with_hugepages(const std::string& name) {
-    load_meta(name + ".meta");
-    keys_->open_with_hugepages(name + ".keys");
-    indices_ =
-        OpenContainer(name + ".indices", "", MemoryLevel::kHugePagePrefered);
-    indices_size_ = indices_->GetDataSize() / sizeof(INDEX_T);
-  }
-
-  void dump(const std::string& name, const std::string& snapshot_dir) {
-    keys_->dump(snapshot_dir + "/" + name + ".keys");
-    indices_->Dump(snapshot_dir + "/" + name + ".indices");
-    dump_meta(snapshot_dir + "/" + name + ".meta");
-    close();
-  }
-
   void close() {
     if (keys_) {
       keys_->close();
@@ -482,40 +503,40 @@ class LFIndexer {
     // TODO(zhanglei): delete files in work_dir
   }
 
-  void dump_meta(const std::string& filename) const {
-    InArchive arc;
-    arc << get_type() << num_elements_.load() << num_slots_minus_one_
-        << hash_policy_.get_mod_function_index();
-    FILE* fout = fopen(filename.c_str(), "wb");
-    fwrite(arc.GetBuffer(), sizeof(char), arc.GetSize(), fout);
-    fflush(fout);
-    fclose(fout);
-  }
+  // void dump_meta(const std::string& filename) const {
+  //   InArchive arc;
+  //   arc << get_type() << num_elements_.load() << num_slots_minus_one_
+  //       << hash_policy_.get_mod_function_index();
+  //   FILE* fout = fopen(filename.c_str(), "wb");
+  //   fwrite(arc.GetBuffer(), sizeof(char), arc.GetSize(), fout);
+  //   fflush(fout);
+  //   fclose(fout);
+  // }
 
-  void load_meta(const std::string& filename) {
-    if (!std::filesystem::exists(filename)) {
-      num_elements_.store(0);
-      return;
-    }
-    OutArchive arc;
-    FILE* fin = fopen(filename.c_str(), "r");
-    size_t meta_file_size = std::filesystem::file_size(filename);
-    std::vector<char> buf(meta_file_size);
-    CHECK_EQ(fread(buf.data(), sizeof(char), meta_file_size, fin),
-             meta_file_size);
-    arc.SetSlice(buf.data(), meta_file_size);
-    size_t mod_function_index;
-    DataTypeId type;
-    arc >> type;
-    size_t num_elements;
-    arc >> num_elements;
+  // void load_meta(const std::string& filename) {
+  //   if (!std::filesystem::exists(filename)) {
+  //     num_elements_.store(0);
+  //     return;
+  //   }
+  //   OutArchive arc;
+  //   FILE* fin = fopen(filename.c_str(), "r");
+  //   size_t meta_file_size = std::filesystem::file_size(filename);
+  //   std::vector<char> buf(meta_file_size);
+  //   CHECK_EQ(fread(buf.data(), sizeof(char), meta_file_size, fin),
+  //            meta_file_size);
+  //   arc.SetSlice(buf.data(), meta_file_size);
+  //   size_t mod_function_index;
+  //   DataTypeId type;
+  //   arc >> type;
+  //   size_t num_elements;
+  //   arc >> num_elements;
 
-    num_elements_.store(num_elements);
-    arc >> num_slots_minus_one_ >> mod_function_index;
-    init(type);
-    hash_policy_.set_mod_function_by_index(mod_function_index);
-    fclose(fin);
-  }
+  //   num_elements_.store(num_elements);
+  //   arc >> num_slots_minus_one_ >> mod_function_index;
+  //   init(type);
+  //   hash_policy_.set_mod_function_by_index(mod_function_index);
+  //   fclose(fin);
+  // }
 
   // get keys
   const ColumnBase& get_keys() const { return *keys_; }
@@ -532,13 +553,7 @@ class LFIndexer {
   ska::ska::prime_number_hash_policy hash_policy_;
   GHash<Property> hasher_;
 
-  // _KEY_T is defined in sys/_types/_key_t.h on macos
-  template <typename __KEY_T, typename _INDEX_T>
-  friend void build_lf_indexer(const IdIndexer<__KEY_T, _INDEX_T>& input,
-                               const std::string& filename,
-                               LFIndexer<_INDEX_T>& output,
-                               const std::string& snapshot_dir,
-                               const std::string& work_dir, DataTypeId type);
+  MemoryLevel memory_level_{MemoryLevel::kInMemory};
 };
 
 template <typename INDEX_T>
@@ -997,13 +1012,6 @@ class IdIndexer : public IdIndexerBase<INDEX_T> {
   size_t num_slots_minus_one_ = 0;
 
   GHash<KEY_T> hasher_;
-
-  template <typename __KEY_T, typename _INDEX_T>
-  friend void build_lf_indexer(const IdIndexer<__KEY_T, _INDEX_T>& input,
-                               const std::string& filename,
-                               LFIndexer<_INDEX_T>& output,
-                               const std::string& snapshot_dir,
-                               const std::string& work_dir, DataTypeId type);
 };
 
 template <typename KEY_T, typename INDEX_T>

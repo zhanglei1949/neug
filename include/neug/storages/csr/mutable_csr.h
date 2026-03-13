@@ -35,6 +35,7 @@
 #include "neug/storages/csr/csr_base.h"
 #include "neug/storages/csr/generic_view.h"
 #include "neug/storages/csr/nbr.h"
+#include "neug/storages/module/type_name.h"
 #include "neug/utils/file_utils.h"
 #include "neug/utils/property/types.h"
 #include "neug/utils/spinlock.h"
@@ -85,15 +86,10 @@ class MutableCsr : public TypedCsrBase<EDATA_T> {
     return res;
   }
 
-  void open(const std::string& name, const std::string& snapshot_dir,
-            const std::string& work_dir) override;
+  void Open(const Checkpoint& ckp, const ModuleDescriptor& descriptor,
+            MemoryLevel level) override;
 
-  void open_in_memory(const std::string& prefix) override;
-
-  void open_with_hugepages(const std::string& prefix) override;
-
-  void dump(const std::string& name,
-            const std::string& new_snapshot_dir) override;
+  ModuleDescriptor Dump(const Checkpoint& ckp) override;
 
   void reset_timestamp() override;
 
@@ -103,7 +99,7 @@ class MutableCsr : public TypedCsrBase<EDATA_T> {
 
   size_t capacity() const override;
 
-  void close() override;
+  void Close() override;
 
   void batch_sort_by_edge_data(timestamp_t ts) override;
 
@@ -194,6 +190,18 @@ class MutableCsr : public TypedCsrBase<EDATA_T> {
     return std::make_tuple(std::move(src_list), std::move(dst_list));
   }
 
+  std::unique_ptr<Module> Fork(const Checkpoint& ckp,
+                               MemoryLevel level) override {
+    auto desc = Dump(ckp);
+    auto new_csr = std::make_unique<MutableCsr<EDATA_T>>();
+    new_csr->Open(ckp, desc, level);
+    return new_csr;
+  }
+
+  std::string ModuleTypeName() const override {
+    return std::string("mutable_csr_") + StorageTypeName<EDATA_T>::value;
+  }
+
  private:
   void load_meta(const std::string& prefix);
 
@@ -254,15 +262,10 @@ class SingleMutableCsr : public TypedCsrBase<EDATA_T> {
     return cnt;
   }
 
-  void open(const std::string& name, const std::string& snapshot_dir,
-            const std::string& work_dir) override;
+  void Open(const Checkpoint& ckp, const ModuleDescriptor& descriptor,
+            MemoryLevel) override;
 
-  void open_in_memory(const std::string& prefix) override;
-
-  void open_with_hugepages(const std::string& prefix) override;
-
-  void dump(const std::string& name,
-            const std::string& new_snapshot_dir) override;
+  ModuleDescriptor Dump(const Checkpoint& ckp) override;
 
   void reset_timestamp() override;
 
@@ -272,7 +275,7 @@ class SingleMutableCsr : public TypedCsrBase<EDATA_T> {
 
   size_t capacity() const override;
 
-  void close() override;
+  void Close() override;
 
   void batch_sort_by_edge_data(timestamp_t ts) override;
 
@@ -316,6 +319,18 @@ class SingleMutableCsr : public TypedCsrBase<EDATA_T> {
     return {};
   }
 
+  std::unique_ptr<Module> Fork(const Checkpoint& ckp,
+                               MemoryLevel level) override {
+    auto desc = Dump(ckp);
+    auto new_csr = std::make_unique<SingleMutableCsr<EDATA_T>>();
+    new_csr->Open(ckp, desc, level);
+    return new_csr;
+  }
+
+  std::string ModuleTypeName() const override {
+    return std::string("single_mutable_csr_") + StorageTypeName<EDATA_T>::value;
+  }
+
  private:
   std::unique_ptr<IDataContainer> nbr_list_;
 
@@ -348,15 +363,14 @@ class EmptyCsr : public TypedCsrBase<EDATA_T> {
 
   size_t edge_num() const override { return 0; }
 
-  void open(const std::string& name, const std::string& snapshot_dir,
-            const std::string& work_dir) override {}
+  void Open(const Checkpoint& ckp, const ModuleDescriptor& descriptor,
+            MemoryLevel /* level */) override {}
 
-  void open_in_memory(const std::string& prefix) override {}
-
-  void open_with_hugepages(const std::string& prefix) override {}
-
-  void dump(const std::string& name,
-            const std::string& new_snapshot_dir) override {}
+  ModuleDescriptor Dump(const Checkpoint& ckp) override {
+    ModuleDescriptor desc;
+    desc.module_type = ModuleTypeName();
+    return desc;
+  }
 
   void reset_timestamp() override {}
 
@@ -366,7 +380,7 @@ class EmptyCsr : public TypedCsrBase<EDATA_T> {
 
   size_t capacity() const override { return 0; }
 
-  void close() override {}
+  void Close() override {}
 
   void batch_sort_by_edge_data(timestamp_t ts) override {}
 
@@ -397,6 +411,15 @@ class EmptyCsr : public TypedCsrBase<EDATA_T> {
   std::tuple<std::vector<vid_t>, std::vector<vid_t>> batch_export(
       std::shared_ptr<ColumnBase> prev_data_col) const override {
     return {};
+  }
+
+  std::unique_ptr<Module> Fork(const Checkpoint& ckp,
+                               MemoryLevel level) override {
+    return std::make_unique<EmptyCsr<EDATA_T>>();
+  }
+
+  std::string ModuleTypeName() const override {
+    return std::string("empty_csr_") + StorageTypeName<EDATA_T>::value;
   }
 };
 

@@ -14,44 +14,27 @@
  */
 
 #include "neug/storages/graph/vertex_table.h"
+
+#include "neug/storages/module/module_factory.h"
+#include "neug/storages/module_descriptor.h"
+#include "neug/storages/workspace.h"
 #include "neug/utils/file_utils.h"
 #include "neug/utils/likely.h"
 
 namespace neug {
 
-void VertexTable::Open(const std::string& work_dir, MemoryLevel memory_level) {
+void VertexTable::Open(const Checkpoint& ckp,
+                       const ModuleDescriptor& descriptor,
+                       MemoryLevel memory_level) {
   memory_level_ = memory_level;
-  work_dir_ = work_dir;
-  std::string tmp_dir_path = tmp_dir(work_dir_);
-  std::string checkpoint_dir_path = checkpoint_dir(work_dir_);
 
-  const auto& label_name = vertex_schema_->label_name;
-  std::string vertex_tracker_filename =
-      checkpoint_dir_path + "/" + vertex_tracker_file(label_name);
-  auto indexer_filename =
-      IndexerType::prefix() + "_" + vertex_map_prefix(label_name);
-  if (memory_level_ == MemoryLevel::kSyncToFile) {
-    indexer_.open(indexer_filename, checkpoint_dir_path, work_dir_);
-    table_->open(vertex_table_prefix(label_name), work_dir_,
-                 vertex_schema_->property_names,
-                 vertex_schema_->property_types);
-
-  } else if (memory_level_ == MemoryLevel::kInMemory) {
-    indexer_.open_in_memory(checkpoint_dir_path + "/" + indexer_filename);
-    table_->open_in_memory(vertex_table_prefix(label_name), work_dir_,
-                           vertex_schema_->property_names,
-                           vertex_schema_->property_types);
-
-  } else if (memory_level_ == MemoryLevel::kHugePagePrefered) {
-    indexer_.open_with_hugepages(checkpoint_dir_path + "/" + indexer_filename);
-    table_->open_with_hugepages(vertex_table_prefix(label_name), work_dir_,
-                                vertex_schema_->property_names,
-                                vertex_schema_->property_types);
-  } else {
-    THROW_INVALID_ARGUMENT_EXCEPTION("Invalid memory level: " +
-                                     std::to_string(memory_level_));
-  }
-  v_ts_.Open(vertex_tracker_filename);
+  const auto& indexer_desc = descriptor.get_sub_module("indexer");
+  indexer_.Open(ckp, indexer_desc, memory_level);
+  const auto& table_desc = descriptor.get_sub_module("property_table");
+  table_->Open(ckp, table_desc, memory_level, vertex_schema_->property_names,
+               vertex_schema_->property_types);
+  const auto& vts_desc = descriptor.get_sub_module("vertex_timestamp");
+  v_ts_.Open(ckp, vts_desc, memory_level);
 }
 
 void VertexTable::insert_vertices(
@@ -74,16 +57,26 @@ void VertexTable::insert_vertices(
   }
 }
 
-void VertexTable::Dump(const std::string& target_dir) {
-  const auto& label_name = vertex_schema_->label_name;
-  indexer_.dump(IndexerType::prefix() + "_" + vertex_map_prefix(label_name),
-                target_dir);
-  table_->dump(vertex_table_prefix(label_name), target_dir);
-  v_ts_.Dump(target_dir + "/" + vertex_tracker_file(label_name));
+ModuleDescriptor VertexTable::Dump(const Checkpoint& ckp) {
+  ModuleDescriptor descriptor;
+  descriptor.module_type = ModuleTypeName();
+  descriptor.set_sub_module("indexer", indexer_.Dump(ckp));
+  descriptor.set_sub_module("property_table", table_->Dump(ckp));
+  descriptor.set_sub_module("vertex_timestamp", v_ts_.Dump(ckp));
+  return descriptor;
+}
+
+/// TODO(zhanglei): FXIME
+std::unique_ptr<Module> VertexTable::Fork(const Checkpoint& ckp,
+                                          MemoryLevel level) {
+  auto forked = std::make_unique<VertexTable>(vertex_schema_);
+  ModuleDescriptor descriptor = Dump(ckp);
+  forked->Open(ckp, descriptor, level);
+  return forked;
 }
 
 void VertexTable::Close() {
-  indexer_.close();
+  indexer_.Close();
   table_->close();
   v_ts_.Clear();
 }
@@ -277,5 +270,7 @@ vid_t VertexTable::insert_vertex_pk(const Property& id, timestamp_t ts) {
   v_ts_.InsertVertex(vid, ts);
   return vid;
 }
+
+NEUG_REGISTER_MODULE("vertex_table", VertexTable);
 
 }  // namespace neug

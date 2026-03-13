@@ -26,6 +26,8 @@
 #include "neug/storages/csr/csr_base.h"
 #include "neug/storages/csr/generic_view.h"
 #include "neug/storages/graph/schema.h"
+#include "neug/storages/module/module.h"
+#include "neug/storages/workspace.h"
 #include "neug/utils/indexers.h"
 #include "neug/utils/property/property.h"
 #include "neug/utils/property/table.h"
@@ -37,21 +39,35 @@ class PropertyGraph;
 
 class IRecordBatchSupplier;
 
-class EdgeTable {
+class EdgeTable : public Module {
  public:
+  EdgeTable() = default;
   EdgeTable(std::shared_ptr<const EdgeSchema> meta);
   EdgeTable(EdgeTable&& edge_table);
 
   EdgeTable(const EdgeTable&) = delete;
-  ~EdgeTable() = default;
+  ~EdgeTable() override = default;
+
+  std::string ModuleTypeName() const override { return "edge_table"; }
 
   void Swap(EdgeTable& other);
 
   void SetEdgeSchema(std::shared_ptr<const EdgeSchema> meta);
 
-  void Open(const std::string& work_dir, MemoryLevel memory_level);
+  // Module interface (Checkpoint-based) — the single public Open.
+  void Open(const Checkpoint& ckp, const ModuleDescriptor& descriptor,
+            MemoryLevel memory_level) override;
+  ModuleDescriptor Dump(const Checkpoint& ckp) override;
 
-  void Dump(const std::string& checkpoint_dir_path);
+  void Close() override;
+  std::unique_ptr<Module> Fork(const Checkpoint& ckp,
+                               MemoryLevel level) override;
+
+  /**
+   * @brief Dump all components to @p checkpoint_dir_path (a flat directory).
+   * Used internally and by legacy callers in PropertyGraph.
+   */
+  // ModuleDescriptor DumpToDir(const std::string& checkpoint_dir_path);
 
   void SortByEdgeData(timestamp_t ts);
 
@@ -131,12 +147,17 @@ class EdgeTable {
  private:
   void dropAndCreateNewBundledCSR(std::shared_ptr<ColumnBase> prev_data_col);
   void dropAndCreateNewUnbundledCSR(bool delete_property);
-  std::string get_next_csr_path_suffix();
+
+  /**
+   * @brief Bootstrap/legacy open: initialise from a work_dir that follows
+   * the checkpoint_dir() / tmp_dir() naming convention.  Called internally
+   * by PropertyGraph for non-checkpoint start-up paths.
+   */
+  void Open(const std::string& work_dir, MemoryLevel memory_level);
 
   std::shared_ptr<const EdgeSchema> meta_;
-  std::string work_dir_;
+  Checkpoint ckp_;
   MemoryLevel memory_level_{MemoryLevel::kSyncToFile};
-  std::atomic<int32_t> csr_alter_version_{0};
   std::unique_ptr<CsrBase> out_csr_;
   std::unique_ptr<CsrBase> in_csr_;
   std::unique_ptr<Table> table_;
