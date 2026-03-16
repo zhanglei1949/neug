@@ -31,10 +31,12 @@ jobs:
   format_check:
     if: github.event_name == 'pull_request'
     uses: ./.github/workflows/format-check.yml
+    with:
+      is_pull_request: ${{ github.event_name == 'pull_request' }}
 
   build_wheels_linux_x86_64:
     needs: format_check
-    if: ${{ (github.event_name != 'pull_request') || (needs.format_check.result == 'success') }}
+    if: ${{ needs.format_check.result == 'success' || needs.format_check.result == 'skipped' }}
     runs-on: [self-hosted, linux, x64]
     steps:
       - name: checkout
@@ -108,7 +110,7 @@ jobs:
 
   build_wheels_linux_arm64:
     needs: format_check
-    if: ${{ (github.event_name != 'pull_request') || (needs.format_check.result == 'success') }}
+    if: ${{ needs.format_check.result == 'success' || needs.format_check.result == 'skipped' }}
     runs-on: [self-hosted, linux, arm64]
     steps:
       - name: checkout
@@ -184,7 +186,7 @@ jobs:
   build_wheels_macos_x86_64:
     needs: format_check
     if: false
-    # if: ${{ github.event_name != 'pull_request' || needs.format_check.result == 'success' }}
+    # if: ${{ needs.format_check.result == 'success' || needs.format_check.result == 'skipped' }}
     runs-on: macos-13
     steps:
       - name: checkout
@@ -268,7 +270,7 @@ jobs:
     needs: format_check
     runs-on: macos-14
     if: false
-    # if: ${{ github.event_name != 'pull_request' || needs.format_check.result == 'success' }}
+    # if: ${{ needs.format_check.result == 'success' || needs.format_check.result == 'skipped' }}
     steps:
       - name: checkout
         id: checkout

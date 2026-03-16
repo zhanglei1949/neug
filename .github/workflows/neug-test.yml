@@ -43,6 +43,8 @@ jobs:
   format_check:
     if: github.event_name == 'pull_request'
     uses: ./.github/workflows/format-check.yml
+    with :
+      is_pull_request: ${{ github.event_name == 'pull_request' }}
 
   # ============================================================
   # Unified Job: Build NeuG + run C++, Python, and E2E tests
