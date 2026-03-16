@@ -6,7 +6,7 @@ on:
 
 
 concurrency:
-  group: ${{ github.repository }}-${{ github.event.number || github.head_ref || github.sha || github.run_id }}-${{ github.workflow }}
+  group: ${{ github.repository }}-${{ github.event.number || github.head_ref || github.sha || github.run_id }}-format-check
   cancel-in-progress: true
 
 jobs:
