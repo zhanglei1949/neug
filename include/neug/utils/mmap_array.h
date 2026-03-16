@@ -470,7 +470,7 @@ class mmap_array {
 
 struct string_item {
   uint64_t offset : 48;
-  uint64_t length : 16;
+  uint32_t length : 16;
 };
 
 template <>
