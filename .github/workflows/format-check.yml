@@ -55,7 +55,7 @@ jobs:
       uses: marocchino/sticky-pull-request-comment@v2
       # When the previous steps fails, the workflow would stop. By adding this
       # condition you can continue the execution with the populated error message.
-      if: github.event_name == 'pull_request' && always() && (steps.pr-convention.outputs.error_message != null)
+      if: inputs.is_pull_request && always() && (steps.pr-convention.outputs.error_message != null)
       with:
         header: pr-title-lint-error
         message: |
@@ -72,7 +72,7 @@ jobs:
 
       # Delete a previous comment when the issue has been resolved
     - name: Delete Comment if PR Title is conventional
-      if: github.event_name == 'pull_request' && steps.lint_pr_title.outputs.error_message == null
+      if: inputs.is_pull_request && steps.lint_pr_title.outputs.error_message == null
       uses: marocchino/sticky-pull-request-comment@v2
       with:   
         header: pr-title-lint-error
