@@ -627,7 +627,8 @@ class mmap_array<std::string_view> {
     for (const auto& entry : plan.entries) {
       const char* src = data_.data() + entry.offset;
       char* dst = temp_buf.data() + write_offset;
-      limit_offset = std::max(limit_offset, entry.offset + entry.length);
+      limit_offset = std::max(limit_offset,
+                              static_cast<size_t>(entry.offset + entry.length));
       memcpy(dst, src, entry.length);
       items_.set(entry.index, {static_cast<uint64_t>(write_offset),
                                static_cast<uint32_t>(entry.length)});
@@ -713,7 +714,7 @@ class mmap_array<std::string_view> {
       LOG(ERROR) << ss.str();
       THROW_RUNTIME_ERROR(ss.str());
     }
-    if (ftruncate(fd, size_before_compact) != 0) {
+    if (ftruncate(fd, static_cast<off_t>(size_before_compact)) != 0) {
       std::stringstream ss;
       ss << "Failed to ftruncate file [ " << data_filename << " ], "
          << strerror(errno);
