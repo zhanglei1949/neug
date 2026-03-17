@@ -265,24 +265,23 @@ class TypedColumn<EmptyType> : public ColumnBase {
   StorageStrategy strategy_;
 };
 
-// No default value for StringColumn
 template <>
 class TypedColumn<std::string_view> : public ColumnBase {
  public:
   TypedColumn(StorageStrategy strategy, uint16_t width,
               std::string_view default_value = "")
-      : size_(0),
+      : buffer_(truncate_utf8(default_value, width)),
+        size_(0),
         pos_(0),
         strategy_(strategy),
         width_(width),
-        default_value_(default_value),
         type_(DataTypeId::kVarchar) {}
   explicit TypedColumn(StorageStrategy strategy)
-      : size_(0),
+      : buffer_(""),
+        size_(0),
         pos_(0),
         strategy_(strategy),
         width_(STRING_DEFAULT_MAX_LENGTH),
-        default_value_(""),
         type_(DataTypeId::kVarchar) {}
   TypedColumn(TypedColumn<std::string_view>&& rhs) {
     buffer_.swap(rhs.buffer_);
@@ -290,7 +289,6 @@ class TypedColumn<std::string_view> : public ColumnBase {
     pos_ = rhs.pos_.load();
     strategy_ = rhs.strategy_;
     width_ = rhs.width_;
-    default_value_ = rhs.default_value_;
     type_ = rhs.type_;
   }
 
@@ -337,14 +335,14 @@ class TypedColumn<std::string_view> : public ColumnBase {
 
   void copy_to_tmp(const std::string& cur_path,
                    const std::string& tmp_path) override {
-    mmap_array<std::string_view> tmp;
+    mmap_array<std::string_view> tmp(buffer_.default_value());
     if (!std::filesystem::exists(cur_path + ".data")) {
       return;
     }
     copy_file(cur_path + ".data", tmp_path + ".data");
     copy_file(cur_path + ".items", tmp_path + ".items");
-    if (std::filesystem::exists(cur_path + ".materialized")) {
-      copy_file(cur_path + ".materialized", tmp_path + ".materialized");
+    if (std::filesystem::exists(cur_path + ".meta")) {
+      copy_file(cur_path + ".meta", tmp_path + ".meta");
     }
     copy_file(cur_path + ".pos", tmp_path + ".pos");
 
@@ -365,16 +363,28 @@ class TypedColumn<std::string_view> : public ColumnBase {
 
   void resize(size_t size) override {
     std::unique_lock<std::shared_mutex> lock(rw_mutex_);
+    const size_t old_size = buffer_.size();
     size_ = size;
+    size_t min_data_size = pos_.load();
+    if (size_ > 0 && !buffer_.has_default_item()) {
+      min_data_size += buffer_.default_value().size();
+    }
     if (buffer_.size() != 0) {
       size_t avg_width =
           buffer_.avg_size();  // calculate average width of existing strings
       buffer_.resize(
           size_, std::max(size_ * (avg_width > 0 ? avg_width
                                                  : STRING_DEFAULT_MAX_LENGTH),
-                          pos_.load()));
+                          min_data_size));
     } else {
-      buffer_.resize(size_, std::max(size_ * width_, pos_.load()));
+      buffer_.resize(size_, std::max(size_ * width_, min_data_size));
+    }
+    if (size_ > 0) {
+      size_t next_pos = buffer_.ensure_default_item(pos_.load());
+      pos_.store(std::max(pos_.load(), next_pos));
+    }
+    if (size_ > old_size) {
+      buffer_.fill_default_items(old_size, size_);
     }
   }
 
@@ -409,9 +419,6 @@ class TypedColumn<std::string_view> : public ColumnBase {
   void set_value_safe(size_t idx, const std::string_view& value);
 
   inline std::string_view get_view(size_t idx) const {
-    if (!buffer_.is_materialized(idx)) {
-      return default_value_;
-    }
     return buffer_.get(idx);
   }
 
@@ -439,8 +446,6 @@ class TypedColumn<std::string_view> : public ColumnBase {
     buffer_.ensure_writable(work_dir);
   }
 
-  std::string_view default_value() const { return default_value_; }
-
  private:
   inline void init_pos(const std::string& file_path) {
     if (std::filesystem::exists(file_path)) {
@@ -451,13 +456,13 @@ class TypedColumn<std::string_view> : public ColumnBase {
       pos_.store(0);
     }
   }
+
   mmap_array<std::string_view> buffer_;
   size_t size_;
   std::atomic<size_t> pos_;
   StorageStrategy strategy_;
   std::shared_mutex rw_mutex_;
   uint16_t width_;
-  std::string_view default_value_;
   DataTypeId type_;
 };
 
@@ -514,16 +519,11 @@ class TypedRefColumn<std::string_view> : public RefColumnBase {
   using value_type = std::string_view;
 
   explicit TypedRefColumn(const StringColumn& column)
-      : basic_buffer(column.buffer()),
-        basic_size(column.buffer_size()),
-        default_value_(column.default_value()) {}
+      : basic_buffer(column.buffer()), basic_size(column.buffer_size()) {}
   ~TypedRefColumn() {}
 
   inline std::string_view get_view(size_t index) const {
     assert(index < basic_size);
-    if (!basic_buffer.is_materialized(index)) {
-      return default_value_;
-    }
     return basic_buffer.get(index);
   }
 
@@ -538,10 +538,6 @@ class TypedRefColumn<std::string_view> : public RefColumnBase {
  private:
   const mmap_array<std::string_view>& basic_buffer;
   size_t basic_size;
-  // NOTE: default_value_ is a non-owning view. The pointed-to string data is
-  // owned by the schema's default_property_strings and must outlive this
-  // object.
-  std::string_view default_value_;
 };
 
 // Create a reference column from a ColumnBase that contains a const reference

@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
 #include <filesystem>
 #include <string>
 #include <string_view>
@@ -29,6 +30,7 @@
 #include "glog/logging.h"
 #include "neug/storages/file_names.h"
 #include "neug/utils/exception/exception.h"
+#include "neug/utils/file_utils.h"
 
 #ifdef __ia64__
 #define ADDR (void*) (0x8000000000000000UL)
@@ -475,19 +477,62 @@ struct string_item {
 
 template <>
 class mmap_array<std::string_view> {
+ private:
+  struct CompactionPlan {
+    struct Entry {
+      size_t index;
+      uint64_t offset;
+      uint32_t length;
+    };
+    std::vector<Entry> entries;
+    size_t total_size = 0;
+  };
+
  public:
-  mmap_array() {}
+  mmap_array() : mmap_array("") {}
+  explicit mmap_array(const std::string_view& default_value)
+      : default_value_(default_value), default_item_{0, 0} {}
   mmap_array(mmap_array&& rhs) : mmap_array() { swap(rhs); }
   ~mmap_array() {}
 
   void reset() {
-    materialized_map_.reset();
+    default_value_.clear();
+    default_item_ = {0, 0};
     items_.reset();
     data_.reset();
+    is_writable_ = true;
+  }
+
+  std::string_view default_value() const { return default_value_; }
+
+  bool has_default_item() const {
+    return default_item_.offset != 0 || default_item_.length != 0 ||
+           default_value_.empty();
+  }
+
+  size_t ensure_default_item(size_t offset) {
+    if (has_default_item()) {
+      return static_cast<size_t>(default_item_.offset + default_item_.length);
+    }
+    if (offset + default_value_.size() > data_.size()) {
+      THROW_RUNTIME_ERROR("Not enough space for varchar default value");
+    }
+    if (!default_value_.empty()) {
+      memcpy(data_.data() + offset, default_value_.data(),
+             default_value_.size());
+    }
+    default_item_ = {static_cast<uint64_t>(offset),
+                     static_cast<uint32_t>(default_value_.size())};
+    return offset + default_value_.size();
+  }
+
+  void fill_default_items(size_t begin, size_t end) {
+    for (size_t i = begin; i < end; ++i) {
+      items_.set(i, default_item_);
+    }
   }
 
   void set_hugepage_prefered(bool val) {
-    materialized_map_.set_hugepage_prefered(val);
     items_.set_hugepage_prefered(val);
     data_.set_hugepage_prefered(val);
   }
@@ -497,20 +542,14 @@ class mmap_array<std::string_view> {
     is_writable_ = is_writable;
     items_.open(filename + ".items", sync_to_file, is_writable);
     data_.open(filename + ".data", sync_to_file, is_writable);
-    open_materialized_map(filename, sync_to_file, is_writable);
+    load_meta(filename + ".meta");
   }
 
   void open_with_hugepages(const std::string& filename) {
     is_writable_ = true;
     items_.open_with_hugepages(filename + ".items");
     data_.open_with_hugepages(filename + ".data");
-    open_materialized_map_with_hugepages(filename);
-  }
-
-  void touch(const std::string& filename) {
-    materialized_map_.touch(filename + ".materialized");
-    items_.touch(filename + ".items");
-    data_.touch(filename + ".data");
+    load_meta(filename + ".meta");
   }
 
   void dump(const std::string& filename) {
@@ -520,18 +559,17 @@ class mmap_array<std::string_view> {
         !data_.is_sync_to_file() && plan.total_size < data_.size();
     if (should_stream) {
       stream_compact_and_dump(plan, filename + ".data", filename + ".items",
-                              filename + ".materialized");
+                              filename + ".meta");
       return;
     }
 
-    compact();
-    materialized_map_.dump(filename + ".materialized");
+    compact(plan);
     items_.dump(filename + ".items");
     data_.dump(filename + ".data");
+    dump_meta(filename + ".meta");
   }
 
   void resize(size_t size, size_t data_size) {
-    materialized_map_.resize(size);
     items_.resize(size);
     data_.resize(data_size);
   }
@@ -543,7 +581,7 @@ class mmap_array<std::string_view> {
     size_t total_length = 0;
     size_t non_zero_count = 0;
     for (size_t i = 0; i < items_.size(); ++i) {
-      if (is_materialized(i) && items_.get(i).length > 0) {
+      if (items_.get(i).length > 0) {
         ++non_zero_count;
         total_length += items_.get(i).length;
       }
@@ -558,20 +596,9 @@ class mmap_array<std::string_view> {
                      static_cast<uint32_t>(val.size())});
     assert(data_.data() + offset + val.size() <= data_.data() + data_.size());
     memcpy(data_.data() + offset, val.data(), val.size());
-    materialized_map_.set(idx, 1);
-  }
-
-  bool is_materialized(size_t idx) const {
-    if (idx >= materialized_map_.size()) {
-      return false;
-    }
-    return materialized_map_.get(idx) != 0;
   }
 
   std::string_view get(size_t idx) const {
-    if (!is_materialized(idx)) {
-      return std::string_view{"", 0};
-    }
     const string_item& item = items_.get(idx);
     return std::string_view(data_.data() + item.offset, item.length);
   }
@@ -581,13 +608,14 @@ class mmap_array<std::string_view> {
   size_t data_size() const { return data_.size(); }
 
   void swap(mmap_array& rhs) {
-    materialized_map_.swap(rhs.materialized_map_);
+    std::swap(default_value_, rhs.default_value_);
+    std::swap(default_item_, rhs.default_item_);
     items_.swap(rhs.items_);
     data_.swap(rhs.data_);
+    std::swap(is_writable_, rhs.is_writable_);
   }
 
   void set_writable(bool is_writable) {
-    materialized_map_.set_writable(is_writable);
     items_.set_writable(is_writable);
     data_.set_writable(is_writable);
     is_writable_ = is_writable;
@@ -597,7 +625,6 @@ class mmap_array<std::string_view> {
     if (is_writable_) {
       return;
     }
-    materialized_map_.ensure_writable(work_dir);
     items_.ensure_writable(work_dir);
     data_.ensure_writable(work_dir);
     is_writable_ = true;
@@ -608,8 +635,7 @@ class mmap_array<std::string_view> {
   // Returns the compacted data size. Note that the reserved size of data buffer
   // is not changed, and new strings can still be appended after the compacted
   // data.
-  size_t compact() {
-    auto plan = prepare_compaction_plan();
+  size_t compact(const CompactionPlan& plan) {
     if (items_.size() == 0) {
       return 0;
     }
@@ -621,6 +647,18 @@ class mmap_array<std::string_view> {
     std::vector<char> temp_buf(plan.total_size);
     size_t write_offset = 0;
     size_t limit_offset = 0;
+    const auto old_default_item = default_item_;
+    const bool has_stored_default = has_default_item();
+    if (has_stored_default) {
+      default_item_ = {static_cast<uint64_t>(write_offset),
+                       old_default_item.length};
+      if (old_default_item.length > 0) {
+        const char* default_src = data_.data() + old_default_item.offset;
+        memcpy(temp_buf.data() + write_offset, default_src,
+               old_default_item.length);
+      }
+      write_offset += old_default_item.length;
+    }
     for (const auto& entry : plan.entries) {
       const char* src = data_.data() + entry.offset;
       char* dst = temp_buf.data() + write_offset;
@@ -631,6 +669,15 @@ class mmap_array<std::string_view> {
                                static_cast<uint32_t>(entry.length)});
       write_offset += entry.length;
     }
+    if (has_stored_default) {
+      for (size_t i = 0; i < items_.size(); ++i) {
+        const string_item& item = items_.get(i);
+        if (item.offset == old_default_item.offset &&
+            item.length == old_default_item.length) {
+          items_.set(i, default_item_);
+        }
+      }
+    }
     assert(write_offset == plan.total_size);
     memcpy(data_.data(), temp_buf.data(), plan.total_size);
 
@@ -640,26 +687,23 @@ class mmap_array<std::string_view> {
   }
 
  private:
-  struct CompactionPlan {
-    struct Entry {
-      size_t index;
-      uint64_t offset;
-      uint32_t length;
-    };
-    std::vector<Entry> entries;
-    size_t total_size = 0;
-  };
-
   CompactionPlan prepare_compaction_plan() const {
     CompactionPlan plan;
     plan.entries.reserve(items_.size());
+    const auto old_default_item = default_item_;
+    const bool has_stored_default = has_default_item();
+    if (has_stored_default && old_default_item.length > 0) {
+      plan.total_size += old_default_item.length;
+    }
     for (size_t i = 0; i < items_.size(); ++i) {
       const string_item& item = items_.get(i);
-      if (is_materialized(i)) {
-        plan.total_size += item.length;
-        plan.entries.push_back(
-            {i, item.offset, static_cast<uint32_t>(item.length)});
+      if (has_stored_default && item.offset == old_default_item.offset &&
+          item.length == old_default_item.length) {
+        continue;
       }
+      plan.total_size += item.length;
+      plan.entries.push_back(
+          {i, item.offset, static_cast<uint32_t>(item.length)});
     }
     return plan;
   }
@@ -667,7 +711,7 @@ class mmap_array<std::string_view> {
   void stream_compact_and_dump(const CompactionPlan& plan,
                                const std::string& data_filename,
                                const std::string& items_filename,
-                               const std::string& materialized_filename) {
+                               const std::string& meta_filename) {
     size_t size_before_compact = data_.size();
     FILE* fout = fopen(data_filename.c_str(), "wb");
     if (fout == NULL) {
@@ -679,6 +723,24 @@ class mmap_array<std::string_view> {
     }
 
     size_t write_offset = 0;
+    const auto old_default_item = default_item_;
+    const bool has_stored_default = has_default_item();
+    if (has_stored_default) {
+      default_item_ = {static_cast<uint64_t>(write_offset),
+                       old_default_item.length};
+      if (old_default_item.length > 0) {
+        const char* default_src = data_.data() + old_default_item.offset;
+        if (fwrite(default_src, 1, old_default_item.length, fout) !=
+            old_default_item.length) {
+          std::stringstream ss;
+          ss << "Failed to fwrite file [ " << data_filename << " ], "
+             << strerror(errno);
+          LOG(ERROR) << ss.str();
+          THROW_RUNTIME_ERROR(ss.str());
+        }
+      }
+      write_offset += old_default_item.length;
+    }
     for (const auto& entry : plan.entries) {
       if (entry.length > 0) {
         const char* src = data_.data() + entry.offset;
@@ -693,6 +755,15 @@ class mmap_array<std::string_view> {
       items_.set(entry.index, {static_cast<uint64_t>(write_offset),
                                static_cast<uint32_t>(entry.length)});
       write_offset += entry.length;
+    }
+    if (has_stored_default) {
+      for (size_t i = 0; i < items_.size(); ++i) {
+        const string_item& item = items_.get(i);
+        if (item.offset == old_default_item.offset &&
+            item.length == old_default_item.length) {
+          items_.set(i, default_item_);
+        }
+      }
     }
     assert(write_offset == plan.total_size);
 
@@ -741,35 +812,81 @@ class mmap_array<std::string_view> {
 
     VLOG(1) << "Compaction completed. New data size: " << plan.total_size
             << ", old data size: " << size_before_compact;
-    materialized_map_.dump(materialized_filename);
+    dump_meta(meta_filename);
     items_.dump(items_filename);
   }
 
-  void open_materialized_map(const std::string& filename, bool sync_to_file,
-                             bool is_writable) {
-    const auto materialized_file = filename + ".materialized";
-    materialized_map_.open(materialized_file, sync_to_file, is_writable);
-    validate_materialized_map_size(materialized_file);
-  }
+  void dump_meta(const std::string& meta_filename) const {
+    StringMetaHeader header{static_cast<uint64_t>(default_item_.offset),
+                            static_cast<uint32_t>(default_item_.length),
+                            static_cast<uint32_t>(default_value_.size())};
+    std::vector<char> meta_buf(sizeof(header) + default_value_.size());
+    memcpy(meta_buf.data(), &header, sizeof(header));
+    if (!default_value_.empty()) {
+      memcpy(meta_buf.data() + sizeof(header), default_value_.data(),
+             default_value_.size());
+    }
+    write_file(meta_filename, meta_buf.data(), meta_buf.size(), 1);
 
-  void open_materialized_map_with_hugepages(const std::string& filename) {
-    const auto materialized_file = filename + ".materialized";
-    materialized_map_.open_with_hugepages(materialized_file);
-    validate_materialized_map_size(materialized_file);
-  }
-
-  void validate_materialized_map_size(const std::string& materialized_file) {
-    const auto expected_size = items_.size();
-    // Is this backward compatibility logic necessary?
-    if (materialized_map_.size() != expected_size) {
-      THROW_RUNTIME_ERROR(
-          "Materialized map size does not match items size for file: " +
-          materialized_file + ", try reloading the graph");
+    std::filesystem::perms readPermission = std::filesystem::perms::owner_read;
+    std::error_code errorCode;
+    std::filesystem::permissions(meta_filename, readPermission,
+                                 std::filesystem::perm_options::add, errorCode);
+    if (errorCode) {
+      std::stringstream ss;
+      ss << "Failed to set read permission for file: " << meta_filename << " "
+         << errorCode.message() << std::endl;
+      LOG(ERROR) << ss.str();
+      THROW_RUNTIME_ERROR(ss.str());
     }
   }
 
-  mmap_array<uint8_t> materialized_map_;
+  void load_meta(const std::string& meta_filename) {
+    if (!std::filesystem::exists(meta_filename)) {
+      return;
+    }
+    default_value_.clear();
+    default_item_ = {0, 0};
+    const size_t meta_size = std::filesystem::file_size(meta_filename);
+    if (meta_size < sizeof(StringMetaHeader)) {
+      std::stringstream ss;
+      ss << "Invalid meta file [ " << meta_filename << " ], expected at least "
+         << sizeof(StringMetaHeader) << " bytes, got " << meta_size;
+      LOG(ERROR) << ss.str();
+      THROW_RUNTIME_ERROR(ss.str());
+    }
+
+    std::vector<char> meta_buf(meta_size);
+    read_file(meta_filename, meta_buf.data(), meta_size, 1);
+
+    StringMetaHeader header{};
+    memcpy(&header, meta_buf.data(), sizeof(header));
+    default_item_ = {header.default_offset, header.default_length};
+    const size_t expected_size =
+        sizeof(StringMetaHeader) + header.default_value_size;
+    if (meta_size != expected_size) {
+      std::stringstream ss;
+      ss << "Invalid meta file [ " << meta_filename << " ], expected "
+         << expected_size << " bytes, got " << meta_size;
+      LOG(ERROR) << ss.str();
+      THROW_RUNTIME_ERROR(ss.str());
+    }
+    default_value_.resize(header.default_value_size);
+    if (header.default_value_size > 0) {
+      memcpy(default_value_.data(), meta_buf.data() + sizeof(StringMetaHeader),
+             header.default_value_size);
+    }
+  }
+
+  struct StringMetaHeader {
+    uint64_t default_offset;
+    uint32_t default_length;
+    uint32_t default_value_size;
+  };
+
+  std::string default_value_;
   mmap_array<string_item> items_;
+  string_item default_item_;
   mmap_array<char> data_;
   bool is_writable_ = true;
 };
