@@ -825,8 +825,8 @@ class mmap_array<std::string_view> {
 
     VLOG(1) << "Compaction completed. New data size: " << plan.total_size
             << ", old data size: " << size_before_compact;
-    dump_meta(meta_filename);
     items_.dump(items_filename);
+    dump_meta(meta_filename);
   }
 
   void dump_meta(const std::string& meta_filename) const {
@@ -872,7 +872,6 @@ class mmap_array<std::string_view> {
 
     StringMetaHeader header{};
     memcpy(&header, meta_buf.data(), sizeof(header));
-    default_item_ = {header.default_offset, header.default_length};
     const size_t expected_size =
         sizeof(StringMetaHeader) + header.default_value_size;
     if (meta_size != expected_size) {
@@ -898,7 +897,14 @@ class mmap_array<std::string_view> {
         default_value_.assign(meta_buf.data() + sizeof(StringMetaHeader),
                               header.default_value_size);
       }
+    } else if (default_value_.size() > 0) {
+      std::stringstream ss;
+      ss << "Meta file [ " << meta_filename
+         << " ] does not contain default value, but memory has a default value";
+      LOG(ERROR) << ss.str();
+      THROW_RUNTIME_ERROR(ss.str());
     }
+    default_item_ = {header.default_offset, header.default_length};
   }
 
   struct StringMetaHeader {
