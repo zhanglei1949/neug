@@ -784,6 +784,11 @@ class mmap_array<std::string_view> {
     const auto expected_size = materialized_word_num(items_.size());
     // Is this backward compatibility logic necessary?
     if (materialized_map_.size() != expected_size) {
+      if (!is_writable_) {
+        LOG(WARNING) << "Materialized map size mismatch in read-only mode; "
+                        "default values will be used for all unset entries.";
+        return;
+      }
       LOG(WARNING) << "Invalid string materialized map file [ "
                    << materialized_file << " ], expected " << expected_size
                    << " words, got " << materialized_map_.size()
