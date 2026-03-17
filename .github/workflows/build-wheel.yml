@@ -39,8 +39,8 @@ jobs:
 
   build_wheels_linux_x86_64:
     needs: format_check
-    if: false
     runs-on: [self-hosted, linux, x64]
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     steps:
       - name: checkout
         id: checkout
@@ -303,7 +303,7 @@ jobs:
   build_wheels_macos_aarch64:
     needs: format_check
     runs-on: macos-15
-    if: false
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     steps:
       - name: checkout
         id: checkout

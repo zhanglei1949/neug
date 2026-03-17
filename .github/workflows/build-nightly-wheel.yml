@@ -22,6 +22,7 @@ concurrency:
 jobs:
   build_wheels_linux_x86_64:
     runs-on: [self-hosted, linux, x64]
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
       - name: checkout
         id: checkout
@@ -96,7 +97,7 @@ jobs:
 
   build_wheels_linux_arm64:
     runs-on: [self-hosted, linux, arm64]
-    if: true
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
       - name: checkout
         id: checkout
@@ -171,7 +172,7 @@ jobs:
           neug-cli --version
 
   build_wheels_macos_x86_64:
-    runs-on: macos-13
+    runs-on: macos-15-intel
     if: false
     steps:
       - name: checkout
@@ -194,7 +195,7 @@ jobs:
       - name: Prepare for macos
         run: |
           echo "MACOSX_DEPLOYMENT_TARGET=10.15" >> $GITHUB_ENV
-          echo "MACOSX_DEPLOYMENT_TARGET={{ env.MACOSX_DEPLOYMENT_TARGET }}"
+          echo "MACOSX_DEPLOYMENT_TARGET=$MACOSX_DEPLOYMENT_TARGET"
           source ~/.neug_env
           echo "CMAKE_BUILD_PARALLEL_LEVEL=$(sysctl -n hw.ncpu)" >> $GITHUB_ENV
 
@@ -207,7 +208,7 @@ jobs:
       - name: Build wheels
         run: |
           source ~/.neug_env
-          export CMAKE_BUILD_PARALLEL_LEVEL=$(nproc)
+          export CMAKE_BUILD_PARALLEL_LEVEL=$(sysctl -n hw.ncpu)
           export BUILD_TYPE=RELEASE
           python3 -m cibuildwheel ./tools/python_bind --output-dir wheelhouse
 
@@ -251,8 +252,8 @@ jobs:
           neug-cli --version
 
   build_wheels_macos_aarch64:
-    runs-on: macos-14
-    if: false
+    runs-on: macos-15
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
       - name: checkout
         id: checkout
@@ -273,8 +274,8 @@ jobs:
 
       - name: Prepare for macos
         run: |
-          echo "MACOSX_DEPLOYMENT_TARGET=10.15" >> $GITHUB_ENV
-          echo "MACOSX_DEPLOYMENT_TARGET={{ env.MACOSX_DEPLOYMENT_TARGET }}"
+          echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> $GITHUB_ENV
+          echo "MACOSX_DEPLOYMENT_TARGET=$MACOSX_DEPLOYMENT_TARGET"
           source ~/.neug_env
           echo "CMAKE_BUILD_PARALLEL_LEVEL=$(sysctl -n hw.ncpu)" >> $GITHUB_ENV
 
@@ -287,7 +288,7 @@ jobs:
       - name: Build wheels
         run: |
           source ~/.neug_env
-          export CMAKE_BUILD_PARALLEL_LEVEL=$(nproc)
+          export CMAKE_BUILD_PARALLEL_LEVEL=$(sysctl -n hw.ncpu)
           export BUILD_TYPE=RELEASE
           python3 -m cibuildwheel ./tools/python_bind --output-dir wheelhouse
 
