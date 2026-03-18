@@ -398,13 +398,13 @@ def test_get_varchar_default_value_2():
     conn.execute("ALTER TABLE TestNode ADD name VARCHAR(20) DEFAULT 'default_name';")
     conn.execute("CREATE (:TestNode {id: 4});")
     conn.execute("CREATE (:TestNode {id: 5, name: 'custom_name'});")
-    res = conn.execute("Match (n:TestNode) Return n.name;")
+    res = conn.execute("Match (n:TestNode) Return n.name ORDER BY n.name;")
     assert list(res) == [
-        ["default_name"],
-        ["default_name"],
-        ["default_name"],
-        ["default_name"],
         ["custom_name"],
+        ["default_name"],
+        ["default_name"],
+        ["default_name"],
+        ["default_name"],
     ]
     conn.execute("ALTER TABLE TestEdge ADD date INT64;")
     conn.execute(
