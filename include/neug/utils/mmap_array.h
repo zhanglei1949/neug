@@ -68,6 +68,9 @@ inline size_t hugepage_round_up(size_t size) { return ROUND_UP(size); }
 
 namespace neug {
 
+template <typename T>
+class TypedColumn;
+
 enum class MemoryStrategy {
   kSyncToFile,
   kMemoryOnly,
@@ -478,51 +481,14 @@ struct string_item {
 template <>
 class mmap_array<std::string_view> {
  public:
-  mmap_array() : mmap_array("") {}
-  explicit mmap_array(const std::string_view& default_value)
-      : default_value_(default_value),
-        default_item_{0, 0},
-        has_default_item_(false) {}
+  friend class TypedColumn<std::string_view>;
+  mmap_array() {}
   mmap_array(mmap_array&& rhs) : mmap_array() { swap(rhs); }
   ~mmap_array() {}
 
   void reset() {
-    default_value_.clear();
-    default_item_ = {0, 0};
     items_.reset();
     data_.reset();
-    is_writable_ = true;
-    has_default_item_ = false;
-  }
-
-  std::string_view default_value() const { return default_value_; }
-
-  bool has_default_item() const { return has_default_item_; }
-
-  size_t ensure_default_item(size_t offset) {
-    if (has_default_item()) {
-      return static_cast<size_t>(default_item_.offset + default_item_.length);
-    }
-    if (offset + default_value_.size() > data_.size()) {
-      THROW_RUNTIME_ERROR("Not enough space for varchar default value");
-    }
-    if (!default_value_.empty()) {
-      memcpy(data_.data() + offset, default_value_.data(),
-             default_value_.size());
-    }
-    default_item_ = {static_cast<uint64_t>(offset),
-                     static_cast<uint32_t>(default_value_.size())};
-    has_default_item_ = true;
-    return offset + default_value_.size();
-  }
-
-  void fill_default_items(size_t begin, size_t end) {
-    assert(has_default_item_);
-    begin = std::min(begin, items_.size());
-    end = std::min(end, items_.size());
-    for (size_t i = begin; i < end; ++i) {
-      items_.set(i, default_item_);
-    }
   }
 
   void set_hugepage_prefered(bool val) {
@@ -535,14 +501,12 @@ class mmap_array<std::string_view> {
     is_writable_ = is_writable;
     items_.open(filename + ".items", sync_to_file, is_writable);
     data_.open(filename + ".data", sync_to_file, is_writable);
-    load_meta(filename + ".meta");
   }
 
   void open_with_hugepages(const std::string& filename) {
     is_writable_ = true;
     items_.open_with_hugepages(filename + ".items");
     data_.open_with_hugepages(filename + ".data");
-    load_meta(filename + ".meta");
   }
 
   void dump(const std::string& filename) {
@@ -551,15 +515,13 @@ class mmap_array<std::string_view> {
     bool should_stream =
         !data_.is_sync_to_file() && plan.total_size < data_.size();
     if (should_stream) {
-      stream_compact_and_dump(plan, filename + ".data", filename + ".items",
-                              filename + ".meta");
+      stream_compact_and_dump(plan, filename + ".data", filename + ".items");
       return;
     }
 
     compact();
     items_.dump(filename + ".items");
     data_.dump(filename + ".data");
-    dump_meta(filename + ".meta");
     reset();
   }
 
@@ -573,17 +535,15 @@ class mmap_array<std::string_view> {
       return 0;
     }
     size_t total_length = 0;
-    size_t non_default_count = 0;
+    size_t non_zero_count = 0;
     for (size_t i = 0; i < items_.size(); ++i) {
-      const auto& item = items_.get(i);
-      if (item.length > 0 && !(item.offset == default_item_.offset &&
-                               item.length == default_item_.length)) {
-        ++non_default_count;
-        total_length += item.length;
+      if (items_.get(i).length > 0) {
+        ++non_zero_count;
+        total_length += items_.get(i).length;
       }
     }
-    return non_default_count > 0
-               ? (total_length + non_default_count - 1) / non_default_count
+    return non_zero_count > 0
+               ? (total_length + non_zero_count - 1) / non_zero_count
                : 0;
   }
 
@@ -604,12 +564,9 @@ class mmap_array<std::string_view> {
   size_t data_size() const { return data_.size(); }
 
   void swap(mmap_array& rhs) {
-    std::swap(default_value_, rhs.default_value_);
-    std::swap(default_item_, rhs.default_item_);
     items_.swap(rhs.items_);
     data_.swap(rhs.data_);
     std::swap(is_writable_, rhs.is_writable_);
-    std::swap(has_default_item_, rhs.has_default_item_);
   }
 
   void set_writable(bool is_writable) {
@@ -645,18 +602,6 @@ class mmap_array<std::string_view> {
     std::vector<char> temp_buf(plan.total_size);
     size_t write_offset = 0;
     size_t limit_offset = 0;
-    const auto old_default_item = default_item_;
-    const bool has_stored_default = has_default_item();
-    if (has_stored_default) {
-      default_item_ = {static_cast<uint64_t>(write_offset),
-                       old_default_item.length};
-      if (old_default_item.length > 0) {
-        const char* default_src = data_.data() + old_default_item.offset;
-        memcpy(temp_buf.data() + write_offset, default_src,
-               old_default_item.length);
-      }
-      write_offset += old_default_item.length;
-    }
     for (const auto& entry : plan.entries) {
       const char* src = data_.data() + entry.offset;
       char* dst = temp_buf.data() + write_offset;
@@ -666,15 +611,6 @@ class mmap_array<std::string_view> {
       items_.set(entry.index, {static_cast<uint64_t>(write_offset),
                                static_cast<uint32_t>(entry.length)});
       write_offset += entry.length;
-    }
-    if (has_stored_default) {
-      for (size_t i = 0; i < items_.size(); ++i) {
-        const string_item& item = items_.get(i);
-        if (item.offset == old_default_item.offset &&
-            item.length == old_default_item.length) {
-          items_.set(i, default_item_);
-        }
-      }
     }
     assert(write_offset == plan.total_size);
     memcpy(data_.data(), temp_buf.data(), plan.total_size);
@@ -698,22 +634,8 @@ class mmap_array<std::string_view> {
   CompactionPlan prepare_compaction_plan() const {
     CompactionPlan plan;
     plan.entries.reserve(items_.size());
-    const auto old_default_item = default_item_;
-    const bool has_stored_default = has_default_item();
-    if (has_stored_default && old_default_item.length > 0) {
-      plan.total_size += old_default_item.length;
-    }
     for (size_t i = 0; i < items_.size(); ++i) {
       const string_item& item = items_.get(i);
-      // Items pointing to old_default_item are default-initialized entries that
-      // share a single storage slot. They are safe to identify by {offset,
-      // length} because ensure_default_item() always writes the default at
-      // offset 0 before any explicit string is appended (pos_ >=
-      // default_value_.size() at all times after resize()).
-      if (has_stored_default && item.offset == old_default_item.offset &&
-          item.length == old_default_item.length) {
-        continue;
-      }
       plan.total_size += item.length;
       plan.entries.push_back(
           {i, item.offset, static_cast<uint32_t>(item.length)});
@@ -723,8 +645,7 @@ class mmap_array<std::string_view> {
 
   void stream_compact_and_dump(const CompactionPlan& plan,
                                const std::string& data_filename,
-                               const std::string& items_filename,
-                               const std::string& meta_filename) {
+                               const std::string& items_filename) {
     size_t size_before_compact = data_.size();
     FILE* fout = fopen(data_filename.c_str(), "wb");
     if (fout == NULL) {
@@ -736,25 +657,6 @@ class mmap_array<std::string_view> {
     }
 
     size_t write_offset = 0;
-    const auto old_default_item = default_item_;
-    const bool has_stored_default = has_default_item();
-    if (has_stored_default) {
-      default_item_ = {static_cast<uint64_t>(write_offset),
-                       old_default_item.length};
-      if (old_default_item.length > 0) {
-        const char* default_src = data_.data() + old_default_item.offset;
-        if (fwrite(default_src, 1, old_default_item.length, fout) !=
-            old_default_item.length) {
-          fclose(fout);
-          std::stringstream ss;
-          ss << "Failed to fwrite file [ " << data_filename << " ], "
-             << strerror(errno);
-          LOG(ERROR) << ss.str();
-          THROW_RUNTIME_ERROR(ss.str());
-        }
-      }
-      write_offset += old_default_item.length;
-    }
     for (const auto& entry : plan.entries) {
       if (entry.length > 0) {
         const char* src = data_.data() + entry.offset;
@@ -770,15 +672,6 @@ class mmap_array<std::string_view> {
       items_.set(entry.index, {static_cast<uint64_t>(write_offset),
                                static_cast<uint32_t>(entry.length)});
       write_offset += entry.length;
-    }
-    if (has_stored_default) {
-      for (size_t i = 0; i < items_.size(); ++i) {
-        const string_item& item = items_.get(i);
-        if (item.offset == old_default_item.offset &&
-            item.length == old_default_item.length) {
-          items_.set(i, default_item_);
-        }
-      }
     }
     assert(write_offset == plan.total_size);
 
@@ -831,104 +724,17 @@ class mmap_array<std::string_view> {
     VLOG(1) << "Compaction completed. New data size: " << plan.total_size
             << ", old data size: " << size_before_compact;
     items_.dump(items_filename);
-    dump_meta(meta_filename);
   }
 
-  void dump_meta(const std::string& meta_filename) const {
-    StringMetaHeader header{static_cast<uint64_t>(default_item_.offset),
-                            static_cast<uint32_t>(default_item_.length),
-                            static_cast<uint32_t>(default_value_.size())};
-    std::vector<char> meta_buf(sizeof(header) + default_value_.size());
-    memcpy(meta_buf.data(), &header, sizeof(header));
-    if (!default_value_.empty()) {
-      memcpy(meta_buf.data() + sizeof(header), default_value_.data(),
-             default_value_.size());
-    }
-    write_file(meta_filename, meta_buf.data(), meta_buf.size(), 1);
-
-    std::filesystem::perms rwPermissions = std::filesystem::perms::owner_read |
-                                           std::filesystem::perms::owner_write;
-    std::error_code errorCode;
-    std::filesystem::permissions(meta_filename, rwPermissions,
-                                 std::filesystem::perm_options::add, errorCode);
-    if (errorCode) {
-      std::stringstream ss;
-      ss << "Failed to set read permission for file: " << meta_filename << " "
-         << errorCode.message() << std::endl;
-      LOG(ERROR) << ss.str();
-      THROW_RUNTIME_ERROR(ss.str());
-    }
+  // Should only be used internally when we are sure the idx is valid
+  string_item get_string_item(size_t idx) const { return items_.get(idx); }
+  void set_string_item(size_t idx, const string_item& item) {
+    items_.set(idx, item);
   }
 
-  void load_meta(const std::string& meta_filename) {
-    if (!std::filesystem::exists(meta_filename)) {
-      return;
-    }
-    const size_t meta_size = std::filesystem::file_size(meta_filename);
-    if (meta_size < sizeof(StringMetaHeader)) {
-      std::stringstream ss;
-      ss << "Invalid meta file [ " << meta_filename << " ], expected at least "
-         << sizeof(StringMetaHeader) << " bytes, got " << meta_size;
-      LOG(ERROR) << ss.str();
-      THROW_RUNTIME_ERROR(ss.str());
-    }
-
-    std::vector<char> meta_buf(meta_size);
-    read_file(meta_filename, meta_buf.data(), meta_size, 1);
-
-    StringMetaHeader header{};
-    memcpy(&header, meta_buf.data(), sizeof(header));
-    const size_t expected_size =
-        sizeof(StringMetaHeader) + header.default_value_size;
-    if (meta_size != expected_size) {
-      std::stringstream ss;
-      ss << "Invalid meta file [ " << meta_filename << " ], expected "
-         << expected_size << " bytes, got " << meta_size;
-      LOG(ERROR) << ss.str();
-      THROW_RUNTIME_ERROR(ss.str());
-    }
-    if (header.default_value_size > 0) {
-      if (default_value_.size() > 0) {
-        if (header.default_value_size != default_value_.size() ||
-            memcmp(default_value_.data(),
-                   meta_buf.data() + sizeof(StringMetaHeader),
-                   header.default_value_size) != 0) {
-          std::stringstream ss;
-          ss << "Default value in meta file [ " << meta_filename
-             << " ] does not match the one in memory";
-          LOG(ERROR) << ss.str();
-          THROW_RUNTIME_ERROR(ss.str());
-        }
-      } else {
-        default_value_.assign(meta_buf.data() + sizeof(StringMetaHeader),
-                              header.default_value_size);
-      }
-    } else if (default_value_.size() > 0) {
-      std::stringstream ss;
-      ss << "Meta file [ " << meta_filename
-         << " ] does not contain default value, but memory has a default value";
-      LOG(ERROR) << ss.str();
-      THROW_RUNTIME_ERROR(ss.str());
-    }
-    default_item_ = {header.default_offset, header.default_length};
-    has_default_item_ = true;
-  }
-
-  struct StringMetaHeader {
-    uint64_t default_offset;
-    uint32_t default_length;
-    uint32_t default_value_size;
-  };
-  static_assert(sizeof(StringMetaHeader) == 16,
-                "StringMetaHeader layout has unexpected padding; on-disk "
-                "format would be broken.");
-
-  std::string default_value_;
   mmap_array<string_item> items_;
-  string_item default_item_;
   mmap_array<char> data_;
   bool is_writable_ = true;
-  bool has_default_item_ = false;
 };
 
 }  // namespace neug

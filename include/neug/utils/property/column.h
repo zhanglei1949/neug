@@ -62,6 +62,7 @@ class ColumnBase {
   virtual void copy_to_tmp(const std::string& cur_path,
                            const std::string& tmp_path) = 0;
   virtual void resize(size_t size) = 0;
+  virtual void resize(size_t size, const Property& default_value) = 0;
 
   virtual DataTypeId type() const = 0;
 
@@ -88,8 +89,8 @@ class ColumnBase {
 template <typename T>
 class TypedColumn : public ColumnBase {
  public:
-  explicit TypedColumn(const T& default_value, StorageStrategy strategy)
-      : default_value_(default_value), size_(0), strategy_(strategy) {}
+  explicit TypedColumn(StorageStrategy strategy)
+      : size_(0), strategy_(strategy) {}
   ~TypedColumn() { close(); }
 
   void open(const std::string& name, const std::string& snapshot_dir,
@@ -154,11 +155,20 @@ class TypedColumn : public ColumnBase {
   size_t size() const override { return size_; }
 
   void resize(size_t size) override {
+    size_ = size;
+    buffer_.resize(size_);
+  }
+
+  // Assume it is safe to insert the default value even if it is reserving,
+  // since user could always override
+  void resize(size_t size, const Property& default_value) override {
+    assert(default_value.type() == type());
     size_t old_size = size_;
     size_ = size;
     buffer_.resize(size_);
+    auto default_typed_value = PropUtils<T>::to_typed(default_value);
     for (size_t i = old_size; i < size_; ++i) {
-      buffer_.set(i, default_value_);
+      set_value(i, default_typed_value);
     }
   }
 
@@ -206,7 +216,6 @@ class TypedColumn : public ColumnBase {
   }
 
  private:
-  T default_value_;
   mmap_array<T> buffer_;
   size_t size_;
   StorageStrategy strategy_;
@@ -241,6 +250,7 @@ class TypedColumn<EmptyType> : public ColumnBase {
   void close() override {}
   size_t size() const override { return 0; }
   void resize(size_t size) override {}
+  void resize(size_t size, const Property& default_value) override {}
 
   DataTypeId type() const override { return DataTypeId::kEmpty; }
 
@@ -268,17 +278,14 @@ class TypedColumn<EmptyType> : public ColumnBase {
 template <>
 class TypedColumn<std::string_view> : public ColumnBase {
  public:
-  TypedColumn(StorageStrategy strategy, uint16_t width,
-              std::string_view default_value = "")
-      : buffer_(truncate_utf8(default_value, width)),
-        size_(0),
+  TypedColumn(StorageStrategy strategy, uint16_t width)
+      : size_(0),
         pos_(0),
         strategy_(strategy),
         width_(width),
         type_(DataTypeId::kVarchar) {}
   explicit TypedColumn(StorageStrategy strategy)
-      : buffer_(""),
-        size_(0),
+      : size_(0),
         pos_(0),
         strategy_(strategy),
         width_(STRING_DEFAULT_MAX_LENGTH),
@@ -335,7 +342,7 @@ class TypedColumn<std::string_view> : public ColumnBase {
 
   void copy_to_tmp(const std::string& cur_path,
                    const std::string& tmp_path) override {
-    mmap_array<std::string_view> tmp(buffer_.default_value());
+    mmap_array<std::string_view> tmp;
     if (!std::filesystem::exists(cur_path + ".data")) {
       return;
     }
@@ -363,28 +370,46 @@ class TypedColumn<std::string_view> : public ColumnBase {
 
   void resize(size_t size) override {
     std::unique_lock<std::shared_mutex> lock(rw_mutex_);
-    const size_t old_size = buffer_.size();
     size_ = size;
-    size_t min_data_size = pos_.load();
-    if (size_ > 0 && !buffer_.has_default_item()) {
-      min_data_size += buffer_.default_value().size();
-    }
     if (buffer_.size() != 0) {
       size_t avg_width =
           buffer_.avg_size();  // calculate average width of existing strings
       buffer_.resize(
           size_, std::max(size_ * (avg_width > 0 ? avg_width
                                                  : STRING_DEFAULT_MAX_LENGTH),
-                          min_data_size));
+                          pos_.load()));
     } else {
-      buffer_.resize(size_, std::max(size_ * width_, min_data_size));
+      buffer_.resize(size_, std::max(size_ * width_, pos_.load()));
     }
-    if (size_ > 0) {
-      size_t next_pos = buffer_.ensure_default_item(pos_.load());
-      pos_.store(std::max(pos_.load(), next_pos));
+  }
+
+  void resize(size_t size, const Property& default_value) override {
+    assert(default_value.type() == type());
+    std::unique_lock<std::shared_mutex> lock(rw_mutex_);
+    size_t old_size = size_;
+    size_ = size;
+    auto default_str = PropUtils<std::string_view>::to_typed(default_value);
+    if (buffer_.size() != 0) {
+      size_t avg_width =
+          buffer_.avg_size();  // calculate average width of existing strings
+      buffer_.resize(
+          size_, std::max(size_ * (avg_width > 0 ? avg_width
+                                                 : STRING_DEFAULT_MAX_LENGTH),
+                          pos_.load()));
+    } else {
+      buffer_.resize(size_, std::max(size_ * width_, pos_.load()));
     }
-    if (size_ > old_size) {
-      buffer_.fill_default_items(old_size, size_);
+    if (default_str.size() <= 0) {
+      return;
+    }
+    default_str = truncate_utf8(default_str, width_);
+
+    if (old_size < size_) {
+      set_value(old_size, default_str);
+      auto string_item = buffer_.get_string_item(old_size);
+      for (size_t i = old_size + 1; i < size_; ++i) {
+        buffer_.set_string_item(i, string_item);
+      }
     }
   }
 
@@ -469,8 +494,7 @@ class TypedColumn<std::string_view> : public ColumnBase {
 using StringColumn = TypedColumn<std::string_view>;
 
 std::shared_ptr<ColumnBase> CreateColumn(
-    DataType type, Property default_value,
-    StorageStrategy strategy = StorageStrategy::kMem);
+    DataType type, StorageStrategy strategy = StorageStrategy::kMem);
 
 /// Create RefColumn for ease of usage for hqps
 class RefColumnBase {
