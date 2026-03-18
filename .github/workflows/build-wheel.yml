@@ -131,11 +131,11 @@ jobs:
         run: |
           rm -rf /__w/_tool/Python
 
-      - name: Setup Python 3.14
+      - name: Setup Python 3.13
         if: runner.name != 'arm64-1'
         uses: actions/setup-python@v5
         with:
-          python-version: '3.14'
+          python-version: '3.13'
 
       - name: Install cibuildwheel
         run: python3 -m pip install cibuildwheel==3.4.0
@@ -144,9 +144,9 @@ jobs:
         run: |
           echo "CMAKE_BUILD_PARALLEL_LEVEL=$(nproc)" >> $GITHUB_ENV
 
-      - name: Limit builds to CPython 3.14 on PRs
+      - name: Limit builds to CPython 3.13 on PRs
         if: github.event_name == 'pull_request'
-        run: echo "CIBW_BUILD=cp314-*" >> $GITHUB_ENV
+        run: echo "CIBW_BUILD=cp313-*" >> $GITHUB_ENV
 
       - name: Build wheels
         run: |
