@@ -162,7 +162,9 @@ class TypedColumn : public ColumnBase {
   // Assume it is safe to insert the default value even if it is reserving,
   // since user could always override
   void resize(size_t size, const Property& default_value) override {
-    assert(default_value.type() == type());
+    if (default_value.type() != type()) {
+      THROW_RUNTIME_ERROR("Default value type does not match column type");
+    }
     size_t old_size = size_;
     size_ = size;
     buffer_.resize(size_);
@@ -380,7 +382,9 @@ class TypedColumn<std::string_view> : public ColumnBase {
   }
 
   void resize(size_t size, const Property& default_value) override {
-    assert(default_value.type() == type());
+    if (default_value.type() != type()) {
+      THROW_RUNTIME_ERROR("Default value type does not match column type");
+    }
     std::unique_lock<std::shared_mutex> lock(rw_mutex_);
     size_t old_size = size_;
     size_ = size;

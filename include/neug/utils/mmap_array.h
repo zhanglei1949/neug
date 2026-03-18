@@ -630,7 +630,8 @@ class mmap_array<std::string_view> {
     memcpy(data_.data(), temp_buf.data(), effective_size);
 
     VLOG(1) << "Compaction completed. New data size: " << effective_size
-            << ", old data size: " << limit_offset;
+            << ", old data size: " << limit_offset
+            << ", effective size: " << effective_size;
     return effective_size;
   }
 
@@ -758,6 +759,10 @@ class mmap_array<std::string_view> {
   // Should only be used internally when we are sure the idx is valid
   string_item get_string_item(size_t idx) const { return items_.get(idx); }
   void set_string_item(size_t idx, const string_item& item) {
+    if (!is_writable_) {
+      THROW_RUNTIME_ERROR(
+          "Attempt to set_string_item on a read-only mmap_array");
+    }
     items_.set(idx, item);
   }
 
