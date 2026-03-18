@@ -30,14 +30,14 @@ void VertexTable::Open(const std::string& work_dir, int memory_level) {
       checkpoint_dir_path + "/" + vertex_tracker_file(label_name);
   auto indexer_filename =
       IndexerType::prefix() + "_" + vertex_map_prefix(label_name);
-  if (memory_level_ == 0) {
+  if (memory_level_ == 4) {  // FileShared
     indexer_.open(indexer_filename, checkpoint_dir_path, work_dir_);
     table_->open(vertex_table_prefix(label_name), work_dir_,
                  vertex_schema_->property_names, vertex_schema_->property_types,
                  vertex_schema_->default_property_values,
                  vertex_schema_->storage_strategies);
 
-  } else if (memory_level_ == 1) {
+  } else if (memory_level_ == 1 || memory_level_ == 3) {  // Anon or FilePrivate
     indexer_.open_in_memory(checkpoint_dir_path + "/" + indexer_filename);
     table_->open_in_memory(vertex_table_prefix(label_name), work_dir_,
                            vertex_schema_->property_names,
@@ -45,7 +45,7 @@ void VertexTable::Open(const std::string& work_dir, int memory_level) {
                            vertex_schema_->default_property_values,
                            vertex_schema_->storage_strategies);
 
-  } else if (memory_level_ >= 2) {
+  } else if (memory_level_ == 2) {  // AnonHugepages
     indexer_.open_with_hugepages(checkpoint_dir_path + "/" + indexer_filename,
                                  (memory_level_ > 2));
     table_->open_with_hugepages(

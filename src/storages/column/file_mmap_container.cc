@@ -19,6 +19,7 @@
 #include <cstring>
 #include <stdexcept>
 
+#include <filesystem>
 #include "neug/storages/column/file_header.h"
 #include "neug/storages/column/file_mmap_container.h"
 
@@ -97,28 +98,40 @@ FileSharedMMap::~FileSharedMMap() {
 }
 
 void FileSharedMMap::Resize(size_t size) {
-  if (size <= size_) {
+  if (size == size_) {
     return;  // No need to resize if the new size is smaller or equal
   }
+  if (mmap_data_ && size_ > 0) {
+    Sync();  // Ensure changes are flushed before resizing
+  }
+  size_t real_size = size + sizeof(FileHeader);
   // Unmap the old mapping
-  munmapImpl(mmap_data_, mmap_size_);
+  if (mmap_data_ && mmap_size_ > 0) {
+    munmapImpl(mmap_data_, mmap_size_);
+  }
+  mmap_data_ = nullptr;
+  mmap_size_ = 0;
+  data_ = nullptr;
+  size_ = 0;
   // Update the file size
   int fd = open(path_.c_str(), O_RDWR);
   if (fd == -1) {
     throw std::runtime_error("Failed to open file for resizing: " + path_);
   }
-  if (ftruncate(fd, size) == -1) {
+  if (ftruncate(fd, real_size) == -1) {
     close(fd);
     throw std::runtime_error("Failed to resize file: " + path_);
   }
   close(fd);
+  mmap_size_ = std::filesystem::file_size(path_);
+  assert(mmap_size_ == real_size);
   // Create a new mapping with the updated file size
-  mmap_data_ = mmapImpl(path_, size);
+  mmap_data_ = mmapImpl(path_, mmap_size_);
   if (mmap_data_ == MAP_FAILED) {
     throw std::runtime_error("Failed to mmap file after resizing: " + path_);
   }
   data_ = static_cast<char*>(mmap_data_) + sizeof(FileHeader);
-  size_ = size - sizeof(FileHeader);
+  size_ = mmap_size_ - sizeof(FileHeader);
 }
 
 void* FileSharedMMap::mmapImpl(const std::string& path, size_t mmap_size) {
@@ -137,6 +150,9 @@ void FileSharedMMap::munmapImpl(void* mmap_data, size_t mmap_size) {
 }
 
 void FileSharedMMap::Sync() {
+  if (mmap_data_ == nullptr || data_ == nullptr || size_ == 0) {
+    return;
+  }
   unsigned char md5[MD5_DIGEST_LENGTH];
   MD5((unsigned char*) this->data_, this->size_, md5);
   if (memcmp(md5, reinterpret_cast<FileHeader*>(mmap_data_)->data_md5,

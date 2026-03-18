@@ -323,9 +323,9 @@ class LFIndexer {
     hash_policy_.commit(new_prime_index);
     indices_->Resize(size * sizeof(INDEX_T));
     indices_ptr_ = reinterpret_cast<INDEX_T*>(indices_->GetData());
-    indices_size_ = size;
-    assert(indices_->GetDataSize() == size * sizeof(INDEX_T));
-    for (size_t k = 0; k != size; ++k) {
+    indices_size_ = indices_->GetDataSize() / sizeof(INDEX_T);
+    CHECK(indices_size_ * sizeof(INDEX_T) == indices_->GetDataSize());
+    for (size_t k = 0; k != indices_size_; ++k) {
       indices_ptr_[k] = LFIndexer<INDEX_T>::sentinel;
     }
     num_slots_minus_one_ = size - 1;
@@ -461,8 +461,6 @@ class LFIndexer {
     LOG(INFO) << "Open indices file in " << data_dir + "/" + name + ".indices"
               << ", size: " << indices_size_
               << ", num_elements: " << num_elements_.load();
-    // indices_.open(data_dir + "/" + name + ".indices", false);
-    size_t num_elements = num_elements_.load();
   }
 
   void open(const std::string& name, const std::string& checkpoint_dir,
@@ -1119,7 +1117,12 @@ void build_lf_indexer(const IdIndexer<KEY_T, INDEX_T>& input,
   // lf.indices_.open(snapshot_dir + "/" + filename + ".indices", true);
   // lf.indices_.resize(input.num_slots_minus_one_ + 1);
   lf.indices_ = std::make_unique<FileSharedMMap>();
+  auto indices_path = work_dir + "/" + filename + ".indices";
+  if (!std::filesystem::exists(indices_path)) {
+    file_utils::create_file(indices_path, sizeof(FileHeader));
+  }
   lf.indices_->Open(work_dir + "/" + filename + ".indices");
+  lf.indices_->Resize((input.num_slots_minus_one_ + 1) * sizeof(INDEX_T));
   lf.indices_ptr_ = reinterpret_cast<INDEX_T*>(lf.indices_->GetData());
   lf.indices_size_ = lf.indices_->GetDataSize() / sizeof(INDEX_T);
 

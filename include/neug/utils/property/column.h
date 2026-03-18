@@ -125,7 +125,7 @@ class TypedColumn : public ColumnBase {
   void open_with_hugepages(const std::string& name, bool force) override {
     if (strategy_ == StorageStrategy::kAnonHuge || force) {
       if (!name.empty() && std::filesystem::exists(name)) {
-        buffer_.open_with_hugepages(name, false);
+        buffer_.open_with_hugepages(name);
         size_ = buffer_.size();
       } else {
         buffer_.reset();

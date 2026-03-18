@@ -40,9 +40,17 @@ void MMapContainer::Open(const std::string& path) {
   if (!path_.empty() || mmap_data_ != nullptr) {
     Close();
   }
+  if (!std::filesystem::exists(path)) {
+    LOG(WARNING) << "File does not exist: " << path;
+    return;
+  }
 
   path_ = path;
   mmap_size_ = std::filesystem::file_size(path);
+  if (mmap_size_ == 0) {
+    LOG(WARNING) << "File is empty: " << path;
+    return;
+  }
 
   mmap_data_ = mmapImpl(path, mmap_size_);
   if (mmap_data_ == MAP_FAILED) {

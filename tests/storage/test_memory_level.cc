@@ -43,8 +43,10 @@ class MemoryLevelPersistenceTest : public ::testing::TestWithParam<int> {
   }
 };
 
+// Hugepages may not be supported in all environments, so we skip test memory
+// level 2.
 INSTANTIATE_TEST_SUITE_P(AllMemoryLevels, MemoryLevelPersistenceTest,
-                         ::testing::Values(0, 1, 2, 3));
+                         ::testing::Values(1, 3, 4));
 
 TEST_P(MemoryLevelPersistenceTest, DDLAndDMLPersistence) {
   // 1. Open DB, do DDL and DML

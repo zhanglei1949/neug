@@ -27,8 +27,8 @@ std::unique_ptr<IDataContainer> CreateDataContainer(
   if (strategy == StorageStrategy::kAnon ||
       strategy == StorageStrategy::kAnonHuge) {
     if (!file_name.empty()) {
-      LOG(WARNING) << "File name is ignored for anonymous mmap strategy: "
-                   << file_name;
+      VLOG(1) << "File name is ignored for anonymous mmap strategy: "
+              << file_name;
     }
   } else {
     if (file_name.empty()) {
@@ -50,11 +50,13 @@ std::unique_ptr<IDataContainer> CreateDataContainer(
   case StorageStrategy::kFilePrivate: {
     auto ret = std::make_unique<FilePrivateMMap>();
     ret->Open(file_name);
+    ret->Resize(size);
     return ret;
   }
   case StorageStrategy::kFileShared: {
     auto ret = std::make_unique<FileSharedMMap>();
     ret->Open(file_name);
+    ret->Resize(size);
     return ret;
   }
   default:

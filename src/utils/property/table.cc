@@ -181,12 +181,16 @@ void Table::add_columns(const std::vector<std::string>& col_names,
         i < strategies_.size() ? strategies_[i] : StorageStrategy::kAnon);
   }
   for (size_t i = old_size; i < columns_.size(); ++i) {
-    if (memory_level == 0) {
+    if (memory_level == 4) {
       columns_[i]->open(name_ + ".col_" + std::to_string(i), "",
                         tmp_dir(work_dir_));
-    } else if (memory_level == 1) {
+    } else if (memory_level == 1 || memory_level == 3) {
       columns_[i]->open_in_memory(tmp_dir(work_dir_) + "/" + name_ + ".col_" +
                                   std::to_string(i));
+    } else if (memory_level == 2) {
+      columns_[i]->open_with_hugepages(
+          tmp_dir(work_dir_) + "/" + name_ + ".col_" + std::to_string(i),
+          false);
     } else {
       THROW_NOT_IMPLEMENTED_EXCEPTION("Unsupported memory level");
     }

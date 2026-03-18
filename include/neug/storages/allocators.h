@@ -16,7 +16,10 @@
 
 #include <stdlib.h>
 
+#include <filesystem>
+#include <fstream>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -84,6 +87,15 @@ class ArenaAllocator {
   void* allocate_batch(size_t size) {
     allocated_batches_ += size;
     auto file_name = prefix_ + std::to_string(mmap_buffers_.size());
+    if (!std::filesystem::exists(file_name) &&
+        (strategy_ == StorageStrategy::kFileShared ||
+         strategy_ == StorageStrategy::kFilePrivate)) {
+      std::ofstream ofs(file_name, std::ios::binary | std::ios::out);
+      if (!ofs) {
+        THROW_IO_EXCEPTION("Failed to create allocator file: " + file_name);
+      }
+      ofs.close();
+    }
     auto buf = CreateDataContainer(strategy_, file_name, size);
     mmap_buffers_.push_back(std::move(buf));
     return mmap_buffers_.back()->GetData();

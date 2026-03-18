@@ -176,7 +176,7 @@ class NeugDB {
    * config.data_dir = "/path/to/graph";
    * config.thread_num = 8;
    * config.mode = neug::DBMode::READ_WRITE;
-   * config.memory_level = 2;  // Use hugepages
+   * config.memory_level = 1;  // Use memory-mapped virtual memory
    * config.enable_auto_compaction = true;
    *
    * neug::NeugDB db;

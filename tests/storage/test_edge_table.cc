@@ -1048,7 +1048,7 @@ TEST_F(EdgeTableTest, TestUpdateEdgeData) {
                          neug::Property::from_int32(static_cast<int>(0))});
   }
 
-this->edge_table->EnsureCapacity(edge_data.size());
+  this->edge_table->EnsureCapacity(edge_data.size());
   neug::Allocator allocator(neug::StorageStrategy::kAnon, allocator_dir_);
   for (size_t i = 0; i < src_lids.size(); ++i) {
     this->edge_table->AddEdge(src_lids[i], dst_lids[i], edge_data[i], 0,
@@ -1199,6 +1199,7 @@ TYPED_TEST(EdgeTableToolsTest, TestBatchAddEdges) {
 
   LFIndexer<vid_t> indexer;
   indexer.init(DataTypeId::kUInt32);
+  indexer.open_in_memory("");
   indexer.reserve(10);
   for (uint32_t i = 0; i < 10; i++) {
     Property oid;
@@ -1241,6 +1242,7 @@ TYPED_TEST(EdgeTableToolsTest, TestAddProperties) {
 
   LFIndexer<vid_t> indexer;
   indexer.init(DataTypeId::kUInt32);
+  indexer.open_in_memory("");
   indexer.reserve(10);
   for (uint32_t i = 0; i < 10; i++) {
     Property oid;
