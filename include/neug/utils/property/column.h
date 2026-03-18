@@ -372,9 +372,8 @@ class TypedColumn<std::string_view> : public ColumnBase {
       size_t avg_width =
           buffer_.avg_size();  // calculate average width of existing strings
       buffer_.resize(
-          size_, std::max(size_ * (avg_width > 0 ? avg_width
-                                                 : STRING_DEFAULT_MAX_LENGTH),
-                          pos_.load()));
+          size_,
+          std::max(size_ * (avg_width > 0 ? avg_width : width_), pos_.load()));
     } else {
       buffer_.resize(size_, std::max(size_ * width_, pos_.load()));
     }
@@ -390,9 +389,8 @@ class TypedColumn<std::string_view> : public ColumnBase {
       size_t avg_width =
           buffer_.avg_size();  // calculate average width of existing strings
       buffer_.resize(
-          size_, std::max(size_ * (avg_width > 0 ? avg_width
-                                                 : STRING_DEFAULT_MAX_LENGTH),
-                          pos_.load()));
+          size_,
+          std::max(size_ * (avg_width > 0 ? avg_width : width_), pos_.load()));
     } else {
       buffer_.resize(size_, std::max(size_ * width_, pos_.load()));
     }

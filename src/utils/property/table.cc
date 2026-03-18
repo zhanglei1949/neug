@@ -321,7 +321,6 @@ void Table::resize(size_t row_num) {
 void Table::resize(size_t row_num,
                    const std::vector<Property>& default_values) {
   assert(default_values.size() == columns_.size());
-  CHECK_EQ(default_values.size(), columns_.size());
   for (size_t i = 0; i < columns_.size(); ++i) {
     columns_[i]->ensure_writable(work_dir_);
     columns_[i]->resize(row_num, default_values[i]);

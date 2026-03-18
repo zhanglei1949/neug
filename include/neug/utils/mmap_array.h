@@ -514,8 +514,9 @@ class mmap_array<std::string_view> {
   void dump(const std::string& filename) {
     // Compact before dumping to reclaim unused space
     auto plan = prepare_compaction_plan();
+    size_t effective_size = plan.total_size - plan.reused_size;
     bool should_stream =
-        !data_.is_sync_to_file() && plan.total_size < data_.size();
+        !data_.is_sync_to_file() && effective_size < data_.size();
     if (should_stream) {
       stream_compact_and_dump(plan, filename + ".data", filename + ".items");
       return;
@@ -598,26 +599,12 @@ class mmap_array<std::string_view> {
       return 0;
     }
     size_t size_before_compact = data_.size();
-    if (plan.total_size == size_before_compact) {
+    if (plan.total_size == plan.reused_size + size_before_compact) {
       return size_before_compact;
     }
-    // First round to check whether we need compact.
-    size_t reused_space = 0;
-    std::unordered_set<uint64_t> seen_offsets;
-    for (const auto& entry : plan.entries) {
-      if (entry.length > 0) {
-        if (seen_offsets.find(entry.offset) != seen_offsets.end()) {
-          reused_space += entry.length;
-          continue;
-        }
-        seen_offsets.insert(entry.offset);
-      }
-    }
-    if (plan.total_size == reused_space + size_before_compact) {
-      return size_before_compact;
-    }
+    size_t effective_size = plan.total_size - plan.reused_size;
 
-    std::vector<char> temp_buf(plan.total_size);
+    std::vector<char> temp_buf(effective_size);
     size_t write_offset = 0;
     size_t limit_offset = 0;
     std::unordered_map<uint64_t, uint64_t> old_offset_to_new;
@@ -639,12 +626,12 @@ class mmap_array<std::string_view> {
                                static_cast<uint32_t>(entry.length)});
       write_offset += entry.length;
     }
-    assert(write_offset + reused_space == plan.total_size);
-    memcpy(data_.data(), temp_buf.data(), plan.total_size);
+    assert(write_offset + plan.reused_size == plan.total_size);
+    memcpy(data_.data(), temp_buf.data(), effective_size);
 
-    VLOG(1) << "Compaction completed. New data size: " << plan.total_size
+    VLOG(1) << "Compaction completed. New data size: " << effective_size
             << ", old data size: " << limit_offset;
-    return plan.total_size;
+    return effective_size;
   }
 
   struct CompactionPlan {
@@ -655,16 +642,25 @@ class mmap_array<std::string_view> {
     };
     std::vector<Entry> entries;
     size_t total_size = 0;
+    size_t reused_size = 0;
   };
 
   CompactionPlan prepare_compaction_plan() const {
     CompactionPlan plan;
     plan.entries.reserve(items_.size());
+    std::unordered_set<uint64_t> seen_offsets;
     for (size_t i = 0; i < items_.size(); ++i) {
       const string_item& item = items_.get(i);
       plan.total_size += item.length;
       plan.entries.push_back(
           {i, item.offset, static_cast<uint32_t>(item.length)});
+      if (item.length > 0) {
+        if (seen_offsets.find(item.offset) != seen_offsets.end()) {
+          plan.reused_size += item.length;
+        } else {
+          seen_offsets.insert(item.offset);
+        }
+      }
     }
     return plan;
   }
@@ -684,13 +680,11 @@ class mmap_array<std::string_view> {
 
     size_t write_offset = 0;
     std::unordered_map<uint64_t, uint64_t> old_offset_to_new;
-    size_t reused_space = 0;
     for (const auto& entry : plan.entries) {
       if (entry.length > 0) {
         auto it = old_offset_to_new.find(entry.offset);
         if (it != old_offset_to_new.end()) {
           items_.set(entry.index, {it->second, entry.length});
-          reused_space += entry.length;
           continue;
         }
         old_offset_to_new.insert({entry.offset, write_offset});
@@ -708,7 +702,7 @@ class mmap_array<std::string_view> {
                                static_cast<uint32_t>(entry.length)});
       write_offset += entry.length;
     }
-    assert(write_offset + reused_space == plan.total_size);
+    assert(write_offset + plan.reused_size == plan.total_size);
 
     if (fflush(fout) != 0) {
       fclose(fout);
