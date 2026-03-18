@@ -398,7 +398,7 @@ class TypedColumn<std::string_view> : public ColumnBase {
     } else {
       buffer_.resize(size_, std::max(size_ * width_, pos_.load()));
     }
-    if (default_str.size() <= 0) {
+    if (default_str.size() == 0) {
       return;
     }
     default_str = truncate_utf8(default_str, width_);

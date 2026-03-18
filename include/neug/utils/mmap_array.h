@@ -630,8 +630,7 @@ class mmap_array<std::string_view> {
     memcpy(data_.data(), temp_buf.data(), effective_size);
 
     VLOG(1) << "Compaction completed. New data size: " << effective_size
-            << ", old data size: " << limit_offset
-            << ", effective size: " << effective_size;
+            << ", old data size: " << limit_offset;
     return effective_size;
   }
 

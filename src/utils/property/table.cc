@@ -153,6 +153,11 @@ void Table::add_columns(const std::vector<std::string>& col_names,
                         size_t capacity,
                         const std::vector<StorageStrategy>& strategies_,
                         int memory_level) {
+  if (default_property_values.size() != col_names.size()) {
+    THROW_RUNTIME_ERROR("default_property_values size mismatch: expected " +
+                        std::to_string(col_names.size()) + " but got " +
+                        std::to_string(default_property_values.size()));
+  }
   // When add_columns are called, the table is already initialized and col_files
   // are opened.
   std::stringstream ss;
