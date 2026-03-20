@@ -291,6 +291,10 @@ class VertexTable {
       auto pk_array = columns[ind];
       columns.erase(columns.begin() + ind);
       size_t new_size = indexer_.size() + pk_array->length();
+      LOG(INFO) << "Inserting " << pk_array->length()
+                << " vertices, current vertex num: " << indexer_.size()
+                << ", new vertex num: " << new_size
+                << ", current capacity: " << indexer_.capacity();
       if (new_size >= indexer_.capacity()) {
         size_t new_cap = new_size;
         while (new_size >= new_cap) {

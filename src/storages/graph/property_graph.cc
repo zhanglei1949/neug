@@ -886,12 +886,15 @@ void PropertyGraph::Open(const std::string& work_dir, int memory_level) {
 
         EdgeTable edge_table(
             schema_.get_edge_schema(src_label_i, dst_label_i, e_label_i));
-        if (memory_level == 0) {
+        if (memory_level == 4) {
           edge_table.Open(work_dir_);
-        } else if (memory_level >= 2) {
+        } else if (memory_level == 2) {
           edge_table.OpenWithHugepages(work_dir_);
-        } else {
+        } else if (memory_level == 3 || memory_level == 1) {
           edge_table.OpenInMemory(work_dir_);
+        } else {
+          THROW_NOT_SUPPORTED_EXCEPTION("Unsupported memory level: " +
+                                        std::to_string(memory_level));
         }
         auto e_size = edge_table.Size();
         size_t e_capacity = e_size < 4096 ? 4096 : e_size + (e_size + 4) / 5;

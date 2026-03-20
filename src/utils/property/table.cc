@@ -184,7 +184,7 @@ void Table::add_columns(const std::vector<std::string>& col_names,
     if (memory_level == 4) {
       columns_[i]->open(name_ + ".col_" + std::to_string(i), "",
                         tmp_dir(work_dir_));
-    } else if (memory_level == 1 || memory_level == 3) {
+    } else if (memory_level == 3) {
       columns_[i]->open_in_memory(tmp_dir(work_dir_) + "/" + name_ + ".col_" +
                                   std::to_string(i));
     } else if (memory_level == 2) {
@@ -192,7 +192,8 @@ void Table::add_columns(const std::vector<std::string>& col_names,
           tmp_dir(work_dir_) + "/" + name_ + ".col_" + std::to_string(i),
           false);
     } else {
-      THROW_NOT_IMPLEMENTED_EXCEPTION("Unsupported memory level");
+      THROW_NOT_IMPLEMENTED_EXCEPTION("Unsupported memory level: " +
+                                      std::to_string(memory_level));
     }
     columns_[i]->resize(column_size);
   }

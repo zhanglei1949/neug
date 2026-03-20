@@ -84,9 +84,12 @@ void MMapContainer::Dump(const std::string& path) {
   if (ret != 1) {
     throw std::runtime_error("Failed to write to file: " + path);
   }
-  ret = fwrite(data_, size_, 1, fp);
-  if (ret != 1) {
-    throw std::runtime_error("Failed to write to file: " + path);
+  LOG(INFO) << "Dumping data to file: " << path << ", size: " << size_;
+  if (size_ > 0) {
+    ret = fwrite(data_, size_, 1, fp);
+    if (ret != 1) {
+      throw std::runtime_error("Failed to write to file: " + path);
+    }
   }
   fclose(fp);
 }

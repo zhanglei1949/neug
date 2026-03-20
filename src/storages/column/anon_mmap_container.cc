@@ -52,7 +52,7 @@ void AnonMMap::OpenAnonymous(size_t size) {
 }
 
 void AnonMMap::Resize(size_t size) {
-  if (size <= size_) {
+  if (size == size_) {
     return;  // No need to resize if the new size is smaller or equal
   }
   void* new_mmap_data = mmap(nullptr, size, PROT_READ | PROT_WRITE,
@@ -61,8 +61,8 @@ void AnonMMap::Resize(size_t size) {
     throw std::runtime_error("Failed to allocate memory for resizing");
   }
   // Copy existing data to the new mapping
-  if (mmap_data_ && size_ > 0) {
-    memcpy(new_mmap_data, mmap_data_, size_);
+  if (mmap_data_ && mmap_size_ > 0) {
+    memcpy(new_mmap_data, mmap_data_, mmap_size_ < size ? mmap_size_ : size);
     munmapImpl(mmap_data_, mmap_size_);
   }
   mmap_data_ = new_mmap_data;
@@ -115,7 +115,7 @@ void AnonHugeMMap::OpenAnonymous(size_t size) {
 }
 
 void AnonHugeMMap::Resize(size_t size) {
-  if (size <= size_) {
+  if (size == size_) {
     return;  // No need to resize if the new size is smaller or equal
   }
   size_t hugepage_size = file_utils::hugepage_round_up(size);

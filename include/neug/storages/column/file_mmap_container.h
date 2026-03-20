@@ -14,6 +14,9 @@
  */
 #pragma once
 
+#include <glog/logging.h>
+#include <filesystem>
+
 #include "neug/storages/column/mmap_container.h"
 
 namespace neug {

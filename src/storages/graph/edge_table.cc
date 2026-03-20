@@ -504,6 +504,7 @@ void EdgeTable::Open(const std::string& work_dir) {
   work_dir_ = work_dir;
   memory_level_ = 0;
   auto checkpoint_dir_path = checkpoint_dir(work_dir);
+  ensure_directory_exists(checkpoint_dir_path);
   in_csr_->open(ie_prefix(meta_->src_label_name, meta_->dst_label_name,
                           meta_->edge_label_name),
                 checkpoint_dir_path, work_dir);
@@ -531,6 +532,7 @@ void EdgeTable::OpenInMemory(const std::string& work_dir) {
   work_dir_ = work_dir;
   memory_level_ = 1;
   auto checkpoint_dir_path = checkpoint_dir(work_dir);
+  ensure_directory_exists(checkpoint_dir_path);
   in_csr_->open_in_memory(checkpoint_dir_path + "/" +
                           ie_prefix(meta_->src_label_name,
                                     meta_->dst_label_name,

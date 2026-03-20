@@ -18,6 +18,7 @@ limitations under the License.
 #include <atomic>
 #include <cassert>
 #include <cmath>
+#include <filesystem>
 #include <limits>
 #include <memory>
 #include <string>
@@ -290,6 +291,8 @@ class LFIndexer {
     keys_->open(filename + ".keys", "", work_dir);
     auto tmp_indices = std::make_unique<FileSharedMMap>();
     auto full_path = work_dir + "/" + filename + ".indices";
+    ensure_directory_exists(
+        std::filesystem::path(full_path).parent_path().string());
     file_utils::create_file(full_path, sizeof(FileHeader));
     tmp_indices->Open(full_path);
 
@@ -303,6 +306,7 @@ class LFIndexer {
   void reserve(size_t size) { rehash(std::max(size, num_elements_.load())); }
 
   void rehash(size_t size) {
+    LOG(INFO) << "Rehashing LFIndexer to size " << size;
     size = std::max(size, 4ul);
     keys_->resize(size);
     size =
@@ -454,11 +458,18 @@ class LFIndexer {
 
     load_meta(data_dir + "/" + name + ".meta");
     keys_->open(name + ".keys", data_dir, "");
-    indices_ = std::make_unique<FilePrivateMMap>();
-    indices_->Open(data_dir + "/" + name + ".indices");
+    auto indices_path = data_dir + "/" + name + ".indices";
+    auto tmp_indices_path = tmp_dir(data_dir) + "/" + name + ".indices";
+    if (std::filesystem::exists(tmp_indices_path)) {
+      std::filesystem::remove(tmp_indices_path);
+    }
+    std::filesystem::create_directories(tmp_dir(data_dir));
+    file_utils::copy_file(indices_path, tmp_indices_path, true);
+    indices_ = std::make_unique<FileSharedMMap>();
+    indices_->Open(tmp_indices_path);
     indices_ptr_ = reinterpret_cast<INDEX_T*>(indices_->GetData());
     indices_size_ = indices_->GetDataSize() / sizeof(INDEX_T);
-    LOG(INFO) << "Open indices file in " << data_dir + "/" + name + ".indices"
+    LOG(INFO) << "Open indices file in " << tmp_indices_path
               << ", size: " << indices_size_
               << ", num_elements: " << num_elements_.load();
   }
@@ -478,7 +489,8 @@ class LFIndexer {
               << tmp_dir(work_dir) + "/" + name + ".indices";
     // indices_.open(tmp_dir(work_dir) + "/" + name + ".indices", true);
     indices_ = std::make_unique<FileSharedMMap>();
-    indices_->Open(tmp_dir(work_dir) + "/" + name + ".indices");
+    auto indices_path = tmp_dir(work_dir) + "/" + name + ".indices";
+    indices_->Open(indices_path);
     indices_ptr_ = reinterpret_cast<INDEX_T*>(indices_->GetData());
     indices_size_ = indices_->GetDataSize() / sizeof(INDEX_T);
     LOG(INFO) << "Open indices file in "
@@ -495,8 +507,12 @@ class LFIndexer {
     }
     keys_->open_in_memory(name + ".keys");
     // indices_.open(name + ".indices", false);
-    indices_ = std::make_unique<AnonMMap>();
-    indices_->Open(name + ".indices");
+    indices_ = std::make_unique<FilePrivateMMap>();
+    auto file_name = name + ".indices";
+    if (!std::filesystem::exists(file_name)) {
+      file_utils::create_file(file_name, sizeof(FileHeader));
+    }
+    indices_->Open(file_name);
     indices_ptr_ = reinterpret_cast<INDEX_T*>(indices_->GetData());
     indices_size_ = indices_->GetDataSize() / sizeof(INDEX_T);
     LOG(INFO) << "Open indices file in " << name + ".indices"
@@ -511,12 +527,16 @@ class LFIndexer {
       num_elements_.store(0);
     }
     keys_->open_with_hugepages(name + ".keys", true);
+    auto file_name = name + ".indices";
+    if (!std::filesystem::exists(file_name)) {
+      file_utils::create_file(file_name, sizeof(FileHeader));
+    }
     if (hugepage_table) {
       indices_ = std::make_unique<AnonHugeMMap>();
-      indices_->Open(name + ".indices");
+      indices_->Open(file_name);
     } else {
-      indices_ = std::make_unique<AnonMMap>();
-      indices_->Open(name + ".indices");
+      indices_ = std::make_unique<FilePrivateMMap>();
+      indices_->Open(file_name);
     }
     indices_ptr_ = reinterpret_cast<INDEX_T*>(indices_->GetData());
     indices_size_ = indices_->GetDataSize() / sizeof(INDEX_T);
@@ -576,19 +596,6 @@ class LFIndexer {
   const ColumnBase& get_keys() const { return *keys_; }
 
   void ensure_writable(const std::string& work_dir) {
-    // indices_.ensure_writable(work_dir);
-    if (indices_->GetContainerType() == ContainerType::kFilePrivateMMap) {
-      auto path = indices_->GetPath();
-      std::string filename = std::filesystem::path(path).filename().string();
-      std::string target_path = tmp_dir(work_dir) + "/" + filename;
-      copy_file(path, target_path);
-      indices_->Close();
-      indices_.reset();
-      indices_ = std::make_unique<FileSharedMMap>();
-      indices_->Open(target_path);
-      indices_ptr_ = reinterpret_cast<INDEX_T*>(indices_->GetData());
-      indices_size_ = indices_->GetDataSize() / sizeof(INDEX_T);
-    }
     keys_->ensure_writable(work_dir);
   }
 

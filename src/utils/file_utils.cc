@@ -286,6 +286,11 @@ CopyResult copy_file(const std::string& src_path, const std::string& dst_path,
 }
 
 void create_file(const std::string& path, size_t size) {
+  // get dir
+  std::filesystem::path dir = std::filesystem::path(path).parent_path();
+  if (!dir.empty() && !std::filesystem::exists(dir)) {
+    std::filesystem::create_directories(dir);
+  }
   int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
   if (fd < 0) {
     throw std::runtime_error("Failed to create file: " + path);

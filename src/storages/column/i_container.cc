@@ -44,7 +44,8 @@ std::unique_ptr<IDataContainer> CreateDataContainer(
   }
   case StorageStrategy::kAnonHuge: {
     auto ret = std::make_unique<AnonHugeMMap>();
-    ret->OpenAnonymous(size);
+    ret->Open(file_name);
+    ret->Resize(size);
     return ret;
   }
   case StorageStrategy::kFilePrivate: {

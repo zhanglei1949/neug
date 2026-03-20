@@ -50,7 +50,7 @@ void FilePrivateMMap::OpenAnonymous(size_t size) {
 }
 
 void FilePrivateMMap::Resize(size_t size) {
-  if (size <= size_) {
+  if (size == size_) {
     return;  // No need to resize if the new size is smaller or equal
   }
   void* new_mmap_data = mmap(nullptr, size, PROT_READ | PROT_WRITE,
@@ -98,6 +98,7 @@ FileSharedMMap::~FileSharedMMap() {
 }
 
 void FileSharedMMap::Resize(size_t size) {
+  LOG(INFO) << "Resizing file " << path_ << " to size " << size;
   if (size == size_) {
     return;  // No need to resize if the new size is smaller or equal
   }
@@ -132,6 +133,8 @@ void FileSharedMMap::Resize(size_t size) {
   }
   data_ = static_cast<char*>(mmap_data_) + sizeof(FileHeader);
   size_ = mmap_size_ - sizeof(FileHeader);
+  LOG(INFO) << "Resized file " << path_ << " to size " << size_
+            << " (total mmap size: " << mmap_size_ << ")";
 }
 
 void* FileSharedMMap::mmapImpl(const std::string& path, size_t mmap_size) {
