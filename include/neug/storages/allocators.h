@@ -23,23 +23,19 @@
 #include <string>
 #include <vector>
 
+#include "neug/storages/column/file_header.h"
 #include "neug/storages/column/mmap_container.h"
+#include "neug/utils/file_utils.h"
 #include "neug/utils/mmap_array.h"
 #include "neug/utils/property/types.h"
 
 namespace neug {
 
-enum class MemoryStrategy {
-  kSyncToFile,
-  kMemoryOnly,
-  kHugepagePrefered,
-};
-
 class ArenaAllocator {
   static constexpr size_t batch_size = 16 * 1024 * 1024;
 
  public:
-  ArenaAllocator(StorageStrategy strategy, const std::string& prefix)
+  ArenaAllocator(MemoryLevel strategy, const std::string& prefix)
       : strategy_(strategy),
         prefix_(prefix),
         cur_buffer_(nullptr),
@@ -88,20 +84,15 @@ class ArenaAllocator {
     allocated_batches_ += size;
     auto file_name = prefix_ + std::to_string(mmap_buffers_.size());
     if (!std::filesystem::exists(file_name) &&
-        (strategy_ == StorageStrategy::kFileShared ||
-         strategy_ == StorageStrategy::kFilePrivate)) {
-      std::ofstream ofs(file_name, std::ios::binary | std::ios::out);
-      if (!ofs) {
-        THROW_IO_EXCEPTION("Failed to create allocator file: " + file_name);
-      }
-      ofs.close();
+        (strategy_ == MemoryLevel::kSyncToFile)) {
+      file_utils::create_file(file_name, sizeof(FileHeader));
     }
     auto buf = CreateDataContainer(strategy_, file_name, size);
     mmap_buffers_.push_back(std::move(buf));
     return mmap_buffers_.back()->GetData();
   }
 
-  StorageStrategy strategy_;
+  MemoryLevel strategy_;
   std::string prefix_;
   std::vector<std::unique_ptr<IDataContainer>> mmap_buffers_;
 

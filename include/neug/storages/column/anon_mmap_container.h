@@ -40,7 +40,7 @@ class AnonMMap : public MMapContainer {
   void Resize(size_t size) override;
   void* mmapImpl(const std::string& path, size_t mmap_size) override;
   void munmapImpl(void* mmap_data, size_t mmap_size) override;
-  StorageStrategy GetStorageStrategy() const override;
+  MemoryLevel GetStorageStrategy() const override;
 };
 
 /**
@@ -65,7 +65,7 @@ class AnonHugeMMap : public MMapContainer {
   void Resize(size_t size) override;
   void* mmapImpl(const std::string& path, size_t mmap_size) override;
   void munmapImpl(void* mmap_data, size_t mmap_size) override;
-  StorageStrategy GetStorageStrategy() const override;
+  MemoryLevel GetStorageStrategy() const override;
 };
 
 }  // namespace neug

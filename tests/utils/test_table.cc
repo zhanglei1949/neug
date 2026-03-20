@@ -93,12 +93,12 @@ TEST(TableTest, TestTableBasic) {
       Property::from_interval(Interval(std::string(""))),
       Property::from_string_view("")};
 
-  std::vector<StorageStrategy> disk_strategies(col_name.size(),
-                                               StorageStrategy::kFileShared);
-  std::vector<StorageStrategy> mem_strategies(col_name.size(),
-                                              StorageStrategy::kAnon);
-  std::vector<StorageStrategy> none_strategies(col_name.size(),
-                                               StorageStrategy::kUnSet);
+  std::vector<MemoryLevel> disk_strategies(col_name.size(),
+                                           MemoryLevel::kSyncToFile);
+  std::vector<MemoryLevel> mem_strategies(col_name.size(),
+                                          MemoryLevel::kInMemory);
+  std::vector<MemoryLevel> none_strategies(col_name.size(),
+                                           MemoryLevel::kUnSet);
 
   disk_table.init("test_dist", TEST_DIR, col_name, property_types,
                   default_values, disk_strategies);

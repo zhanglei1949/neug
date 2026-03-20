@@ -39,7 +39,7 @@ namespace neug {
 PropertyGraph::PropertyGraph()
     : vertex_label_total_count_(0),
       edge_label_total_count_(0),
-      memory_level_(1) {}
+      memory_level_(MemoryLevel::kInMemory) {}
 
 PropertyGraph::~PropertyGraph() { Clear(); }
 
@@ -219,8 +219,8 @@ Status PropertyGraph::CreateVertexType(
     default_property_values.erase(default_property_values.begin() +
                                   primary_key_inds[i]);
   }
-  std::vector<StorageStrategy> strategies(property_types.size(),
-                                          StorageStrategy::kAnon);
+  std::vector<MemoryLevel> strategies(property_types.size(),
+                                      MemoryLevel::kInMemory);
   std::string description;
   schema_.AddVertexLabel(vertex_type_name, property_types, property_names,
                          primary_keys, strategies, Schema::MAX_VNUM,
@@ -348,7 +348,7 @@ Status PropertyGraph::AddVertexProperties(
                             error_on_conflict);
   std::vector<std::string> add_property_names;
   std::vector<DataType> add_property_types;
-  std::vector<StorageStrategy> add_property_storages;
+  std::vector<MemoryLevel> add_property_storages;
   std::vector<Property> add_default_property_values;
   for (size_t i = 0; i < add_properties.size(); i++) {
     auto [property_type, property_name, default_value] = add_properties[i];
@@ -368,14 +368,7 @@ Status PropertyGraph::AddVertexProperties(
     }
     add_property_names.emplace_back(property_name);
     add_property_types.emplace_back(property_type);
-    if (memory_level_ == 0) {
-      // TODO(zhanglei): Check here:
-      add_property_storages.emplace_back(StorageStrategy::kFileShared);
-    } else if (memory_level_ >= 1) {
-      add_property_storages.emplace_back(StorageStrategy::kAnon);
-    } else {
-      add_property_storages.emplace_back(StorageStrategy::kUnSet);
-    }
+    add_property_storages.emplace_back(memory_level_);
     add_default_property_values.emplace_back(default_value);
   }
   schema_.AddVertexProperties(vertex_type_name, add_property_names,
@@ -800,12 +793,13 @@ void PropertyGraph::DumpSchema() {
 }
 
 void PropertyGraph::Open(const Schema& schema, const std::string& work_dir,
-                         int memory_level) {
+                         MemoryLevel memory_level) {
   schema_ = schema;
   Open(work_dir, memory_level);
 }
 
-void PropertyGraph::Open(const std::string& work_dir, int memory_level) {
+void PropertyGraph::Open(const std::string& work_dir,
+                         MemoryLevel memory_level) {
   // copy work_dir to work_dir_
   memory_level_ = memory_level;
   work_dir_.assign(work_dir);
@@ -886,11 +880,11 @@ void PropertyGraph::Open(const std::string& work_dir, int memory_level) {
 
         EdgeTable edge_table(
             schema_.get_edge_schema(src_label_i, dst_label_i, e_label_i));
-        if (memory_level == 4) {
+        if (memory_level == MemoryLevel::kSyncToFile) {
           edge_table.Open(work_dir_);
-        } else if (memory_level == 2) {
+        } else if (memory_level == MemoryLevel::kHugePagePrefered) {
           edge_table.OpenWithHugepages(work_dir_);
-        } else if (memory_level == 3 || memory_level == 1) {
+        } else if (memory_level == MemoryLevel::kInMemory) {
           edge_table.OpenInMemory(work_dir_);
         } else {
           THROW_NOT_SUPPORTED_EXCEPTION("Unsupported memory level: " +

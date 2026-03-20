@@ -247,7 +247,7 @@ class MutableCsr : public TypedCsrBase<EDATA_T> {
   std::unique_ptr<IDataContainer> adj_list_size_;
   std::unique_ptr<IDataContainer> adj_list_capacity_;
   std::unique_ptr<IDataContainer> nbr_list_;
-  StorageStrategy storage_strategy_ = StorageStrategy::kAnon;
+  MemoryLevel storage_strategy_ = MemoryLevel::kInMemory;
   timestamp_t unsorted_since_;
 
   nbr_t** adj_list_buffer_ptr() {
@@ -428,7 +428,7 @@ class SingleMutableCsr : public TypedCsrBase<EDATA_T> {
 
  private:
   std::unique_ptr<IDataContainer> nbr_list_;
-  StorageStrategy storage_strategy_ = StorageStrategy::kAnon;
+  MemoryLevel storage_strategy_ = MemoryLevel::kInMemory;
 
   nbr_t* nbr_entries() {
     assert(nbr_list_);

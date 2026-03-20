@@ -61,7 +61,7 @@ class TypedEmptyColumn : public ColumnBase {
   void open(const std::string& name, const std::string& snapshot_dir,
             const std::string& work_dir) override {}
   void open_in_memory(const std::string& name) override {}
-  void open_with_hugepages(const std::string& name, bool force) override {}
+  void open_with_hugepages(const std::string& name) override {}
   void dump(const std::string& filename) override {}
   void copy_to_tmp(const std::string& cur_path,
                    const std::string& tmp_path) override {}
@@ -85,9 +85,7 @@ class TypedEmptyColumn : public ColumnBase {
     arc >> val;
   }
 
-  StorageStrategy storage_strategy() const override {
-    return StorageStrategy::kUnSet;
-  }
+  MemoryLevel storage_strategy() const override { return MemoryLevel::kUnSet; }
 
   void ensure_writable(const std::string& work_dir) override {}
 };
@@ -101,7 +99,7 @@ class TypedEmptyColumn<std::string_view> : public ColumnBase {
   void open(const std::string& name, const std::string& snapshot_dir,
             const std::string& work_dir) override {}
   void open_in_memory(const std::string& name) override {}
-  void open_with_hugepages(const std::string& name, bool force) override {}
+  void open_with_hugepages(const std::string& name) override {}
   void dump(const std::string& filename) override {}
   void copy_to_tmp(const std::string& cur_path,
                    const std::string& tmp_path) override {}
@@ -125,18 +123,16 @@ class TypedEmptyColumn<std::string_view> : public ColumnBase {
     arc >> val;
   }
 
-  StorageStrategy storage_strategy() const override {
-    return StorageStrategy::kUnSet;
-  }
+  MemoryLevel storage_strategy() const override { return MemoryLevel::kUnSet; }
 
   void ensure_writable(const std::string& work_dir) override {}
 };
 
 std::shared_ptr<ColumnBase> CreateColumn(DataType type, Property default_value,
-                                         StorageStrategy strategy) {
+                                         MemoryLevel strategy) {
   auto type_id = type.id();
   auto extra_type_info = type.RawExtraTypeInfo();
-  if (strategy == StorageStrategy::kUnSet) {
+  if (strategy == MemoryLevel::kUnSet) {
     switch (type_id) {
 #define TYPE_DISPATCHER(enum_val, type) \
   case DataTypeId::enum_val:            \

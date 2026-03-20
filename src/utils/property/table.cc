@@ -34,7 +34,7 @@ Table::~Table() { close(); }
 void Table::initColumns(const std::vector<std::string>& col_name,
                         const std::vector<DataType>& property_types,
                         const std::vector<Property>& default_property_values,
-                        const std::vector<StorageStrategy>& strategies_) {
+                        const std::vector<MemoryLevel>& strategies_) {
   size_t col_num = col_name.size();
   columns_.clear();
   col_names_.clear();
@@ -42,7 +42,7 @@ void Table::initColumns(const std::vector<std::string>& col_name,
   col_id_map_.clear();
   columns_.resize(col_num, nullptr);
   auto strategies = strategies_;
-  strategies.resize(col_num, StorageStrategy::kAnon);
+  strategies.resize(col_num, MemoryLevel::kInMemory);
 
   for (size_t i = 0; i < col_num; ++i) {
     int col_id = col_names_.size();
@@ -62,7 +62,7 @@ void Table::init(const std::string& name, const std::string& work_dir,
                  const std::vector<std::string>& col_name,
                  const std::vector<DataType>& property_types,
                  const std::vector<Property>& default_property_values,
-                 const std::vector<StorageStrategy>& strategies_) {
+                 const std::vector<MemoryLevel>& strategies_) {
   name_ = name;
   work_dir_ = work_dir;
   initColumns(col_name, property_types, default_property_values, strategies_);
@@ -77,7 +77,7 @@ void Table::open(const std::string& name, const std::string& work_dir,
                  const std::vector<std::string>& col_name,
                  const std::vector<DataType>& property_types,
                  const std::vector<Property>& default_property_values,
-                 const std::vector<StorageStrategy>& strategies_) {
+                 const std::vector<MemoryLevel>& strategies_) {
   name_ = name;
   work_dir_ = work_dir;
   snapshot_dir_ = checkpoint_dir(work_dir_);
@@ -94,7 +94,7 @@ void Table::open_in_memory(const std::string& name, const std::string& work_dir,
                            const std::vector<std::string>& col_name,
                            const std::vector<DataType>& property_types,
                            const std::vector<Property>& default_property_values,
-                           const std::vector<StorageStrategy>& strategies_) {
+                           const std::vector<MemoryLevel>& strategies_) {
   name_ = name;
   work_dir_ = work_dir;
   snapshot_dir_ = checkpoint_dir(work_dir_);
@@ -112,14 +112,14 @@ void Table::open_with_hugepages(
     const std::vector<std::string>& col_name,
     const std::vector<DataType>& property_types,
     const std::vector<Property>& default_property_values,
-    const std::vector<StorageStrategy>& strategies_, bool force) {
+    const std::vector<MemoryLevel>& strategies_) {
   name_ = name;
   work_dir_ = work_dir;
   snapshot_dir_ = checkpoint_dir(work_dir);
   initColumns(col_name, property_types, default_property_values, strategies_);
   for (size_t i = 0; i < columns_.size(); ++i) {
-    columns_[i]->open_with_hugepages(
-        snapshot_dir_ + "/" + name + ".col_" + std::to_string(i), force);
+    columns_[i]->open_with_hugepages(snapshot_dir_ + "/" + name + ".col_" +
+                                     std::to_string(i));
   }
   touched_ = true;
   buildColumnPtrs();
@@ -160,8 +160,8 @@ void Table::add_columns(const std::vector<std::string>& col_names,
                         const std::vector<DataType>& col_types,
                         const std::vector<Property>& default_property_values,
                         size_t column_size,
-                        const std::vector<StorageStrategy>& strategies_,
-                        int memory_level) {
+                        const std::vector<MemoryLevel>& strategies_,
+                        MemoryLevel memory_level) {
   // When add_columns are called, the table is already initialized and col_files
   // are opened.
   std::stringstream ss;
@@ -178,22 +178,22 @@ void Table::add_columns(const std::vector<std::string>& col_names,
     col_default_values_.emplace_back(default_property_values[i]);
     columns_[col_id] = CreateColumn(
         col_types[i], default_property_values[i],
-        i < strategies_.size() ? strategies_[i] : StorageStrategy::kAnon);
+        i < strategies_.size() ? strategies_[i] : MemoryLevel::kInMemory);
   }
   for (size_t i = old_size; i < columns_.size(); ++i) {
-    if (memory_level == 4) {
+    if (memory_level == MemoryLevel::kSyncToFile) {
       columns_[i]->open(name_ + ".col_" + std::to_string(i), "",
                         tmp_dir(work_dir_));
-    } else if (memory_level == 3) {
+    } else if (memory_level == MemoryLevel::kInMemory) {
       columns_[i]->open_in_memory(tmp_dir(work_dir_) + "/" + name_ + ".col_" +
                                   std::to_string(i));
-    } else if (memory_level == 2) {
-      columns_[i]->open_with_hugepages(
-          tmp_dir(work_dir_) + "/" + name_ + ".col_" + std::to_string(i),
-          false);
+    } else if (memory_level == MemoryLevel::kHugePagePrefered) {
+      columns_[i]->open_with_hugepages(tmp_dir(work_dir_) + "/" + name_ +
+                                       ".col_" + std::to_string(i));
     } else {
-      THROW_NOT_IMPLEMENTED_EXCEPTION("Unsupported memory level: " +
-                                      std::to_string(memory_level));
+      THROW_NOT_IMPLEMENTED_EXCEPTION(
+          "Unsupported memory level: " +
+          std::to_string(static_cast<int>(memory_level)));
     }
     columns_[i]->resize(column_size);
   }

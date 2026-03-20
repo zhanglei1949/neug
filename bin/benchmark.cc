@@ -246,7 +246,7 @@ int main(int argc, char** argv) {
     std::cout << options.help() << std::endl;
     return 0;
   }
-  int memory_level = vm["memory-level"].as<int>();
+  MemoryLevel memory_level = vm["memory-level"].as<int>();
 
   std::string data_path = "";
   if (!vm.count("data-path")) {

@@ -18,6 +18,7 @@
 #include <memory>
 #include <string>
 
+#include "neug/config.h"
 #include "neug/utils/property/types.h"
 
 namespace neug {
@@ -67,7 +68,7 @@ class IDataContainer {
   /**
    * @brief Get the storage strategy used by this container.
    */
-  virtual StorageStrategy GetStorageStrategy() const = 0;
+  virtual MemoryLevel GetStorageStrategy() const = 0;
 
   /**
    * @brief Open a file-backed container.
@@ -97,6 +98,6 @@ class IDataContainer {
 };
 
 std::unique_ptr<IDataContainer> CreateDataContainer(
-    StorageStrategy strategy, const std::string& file_name, size_t size = 0);
+    MemoryLevel strategy, const std::string& file_name, size_t size = 0);
 
 }  // namespace neug

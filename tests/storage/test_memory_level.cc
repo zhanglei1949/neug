@@ -22,10 +22,11 @@
 #include "column_assertions.h"
 #include "neug/main/neug_db.h"
 
-class MemoryLevelPersistenceTest : public ::testing::TestWithParam<int> {
+class MemoryLevelPersistenceTest
+    : public ::testing::TestWithParam<neug::MemoryLevel> {
  protected:
   std::string db_dir;
-  int memory_level;
+  neug::MemoryLevel memory_level;
 
   void SetUp() override {
     memory_level = GetParam();
@@ -46,7 +47,8 @@ class MemoryLevelPersistenceTest : public ::testing::TestWithParam<int> {
 // Hugepages may not be supported in all environments, so we skip test memory
 // level 2.
 INSTANTIATE_TEST_SUITE_P(AllMemoryLevels, MemoryLevelPersistenceTest,
-                         ::testing::Values(1, 3, 4));
+                         ::testing::Values(neug::MemoryLevel::kSyncToFile,
+                                           neug::MemoryLevel::kInMemory));
 
 TEST_P(MemoryLevelPersistenceTest, DDLAndDMLPersistence) {
   // 1. Open DB, do DDL and DML

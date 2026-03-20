@@ -203,16 +203,9 @@ TEST_F(LFIndexerTest, DumpsAndOpensAcrossBackends) {
   LFIndexer<uint32_t> hugepage_indexer;
   hugepage_indexer.init(DataTypeId::kInt64);
   try {
-    hugepage_indexer.open_with_hugepages(snapshot_dir_ + "/" + name, false);
+    hugepage_indexer.open_with_hugepages(snapshot_dir_ + "/" + name);
     ExpectInt64Values(hugepage_indexer, values);
     hugepage_indexer.close();
-
-    LFIndexer<uint32_t> hugepage_table_indexer;
-    hugepage_table_indexer.init(DataTypeId::kInt64);
-    hugepage_table_indexer.open_with_hugepages(snapshot_dir_ + "/" + name,
-                                               true);
-    ExpectInt64Values(hugepage_table_indexer, values);
-    hugepage_table_indexer.close();
   } catch (const std::exception& e) {
     GTEST_SKIP() << "Hugepage-backed LFIndexer is unavailable: " << e.what();
   }

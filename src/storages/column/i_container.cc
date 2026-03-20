@@ -23,38 +23,35 @@
 namespace neug {
 
 std::unique_ptr<IDataContainer> CreateDataContainer(
-    StorageStrategy strategy, const std::string& file_name, size_t size) {
-  if (strategy == StorageStrategy::kAnon ||
-      strategy == StorageStrategy::kAnonHuge) {
-    if (!file_name.empty()) {
-      VLOG(1) << "File name is ignored for anonymous mmap strategy: "
-              << file_name;
-    }
-  } else {
+    MemoryLevel strategy, const std::string& file_name, size_t size) {
+  if (strategy == MemoryLevel::kSyncToFile) {
     if (file_name.empty()) {
       THROW_INVALID_ARGUMENT_EXCEPTION(
           "File name must be provided for file-backed mmap strategy");
     }
   }
   switch (strategy) {
-  case StorageStrategy::kAnon: {
-    auto ret = std::make_unique<AnonMMap>();
-    ret->OpenAnonymous(size);
-    return ret;
+  case MemoryLevel::kInMemory: {
+    if (file_name.empty()) {
+      auto ret = std::make_unique<AnonMMap>();
+      ret->OpenAnonymous(size);
+      return ret;
+    } else {
+      auto ret = std::make_unique<FilePrivateMMap>();
+      ret->Open(file_name);
+      ret->Resize(size);
+      return ret;
+    }
   }
-  case StorageStrategy::kAnonHuge: {
+  case MemoryLevel::kHugePagePrefered: {
+    // TODO(zhanglei): Determine whether hugepage is actually available and
+    // fallback to normal mmap if not
     auto ret = std::make_unique<AnonHugeMMap>();
     ret->Open(file_name);
     ret->Resize(size);
     return ret;
   }
-  case StorageStrategy::kFilePrivate: {
-    auto ret = std::make_unique<FilePrivateMMap>();
-    ret->Open(file_name);
-    ret->Resize(size);
-    return ret;
-  }
-  case StorageStrategy::kFileShared: {
+  case MemoryLevel::kSyncToFile: {
     auto ret = std::make_unique<FileSharedMMap>();
     ret->Open(file_name);
     ret->Resize(size);

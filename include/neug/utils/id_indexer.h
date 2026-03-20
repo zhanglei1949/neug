@@ -255,7 +255,7 @@ class LFIndexer {
 #define TYPE_DISPATCHER(enum_val, T)                                    \
   case DataTypeId::enum_val: {                                          \
     keys_ = std::make_shared<TypedColumn<T>>(                           \
-        PropUtils<T>::to_typed(default_value), StorageStrategy::kAnon); \
+        PropUtils<T>::to_typed(default_value), MemoryLevel::kInMemory); \
     break;                                                              \
   }
       TYPE_DISPATCHER(kInt64, int64_t)
@@ -273,7 +273,7 @@ class LFIndexer {
         }
       }
       keys_ =
-          std::make_shared<StringColumn>(StorageStrategy::kAnon, max_length);
+          std::make_shared<StringColumn>(MemoryLevel::kInMemory, max_length);
       break;
     }
     default: {
@@ -520,21 +520,24 @@ class LFIndexer {
               << ", num_elements: " << num_elements_.load();
   }
 
-  void open_with_hugepages(const std::string& name, bool hugepage_table) {
+  void open_with_hugepages(const std::string& name) {
     if (std::filesystem::exists(name + ".meta")) {
       load_meta(name + ".meta");
     } else {
       num_elements_.store(0);
     }
-    keys_->open_with_hugepages(name + ".keys", true);
+    keys_->open_with_hugepages(name + ".keys");
     auto file_name = name + ".indices";
     if (!std::filesystem::exists(file_name)) {
       file_utils::create_file(file_name, sizeof(FileHeader));
     }
-    if (hugepage_table) {
+    try {
       indices_ = std::make_unique<AnonHugeMMap>();
       indices_->Open(file_name);
-    } else {
+    } catch (const std::exception& e) {
+      LOG(WARNING)
+          << "Failed to open hugepage mapping for indices, fallback to "
+          << "regular file mapping. Error: " << e.what();
       indices_ = std::make_unique<FilePrivateMMap>();
       indices_->Open(file_name);
     }

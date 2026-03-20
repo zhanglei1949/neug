@@ -79,7 +79,7 @@ int main(int argc, char** argv) {
     return 0;
   }
 
-  int memory_level = vm["memory-level"].as<int>();
+  MemoryLevel memory_level = vm["memory-level"].as<int>();
   uint32_t shard_num = vm["shard-num"].as<uint32_t>();
   uint16_t http_port = vm["http-port"].as<uint16_t>();
 

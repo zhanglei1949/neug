@@ -86,8 +86,8 @@ void AnonMMap::munmapImpl(void* mmap_data, size_t mmap_size) {
   munmap(mmap_data, mmap_size);
 }
 
-StorageStrategy AnonMMap::GetStorageStrategy() const {
-  return StorageStrategy::kAnon;
+MemoryLevel AnonMMap::GetStorageStrategy() const {
+  return MemoryLevel::kInMemory;
 }
 
 // AnonHugeMMap implementation
@@ -156,8 +156,8 @@ void AnonHugeMMap::munmapImpl(void* mmap_data, size_t mmap_size) {
   munmap(mmap_data, hugepage_size);
 }
 
-StorageStrategy AnonHugeMMap::GetStorageStrategy() const {
-  return StorageStrategy::kAnonHuge;
+MemoryLevel AnonHugeMMap::GetStorageStrategy() const {
+  return MemoryLevel::kHugePagePrefered;
 }
 
 }  // namespace neug

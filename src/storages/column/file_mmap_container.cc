@@ -84,8 +84,8 @@ void FilePrivateMMap::munmapImpl(void* mmap_data, size_t mmap_size) {
   munmap(mmap_data, mmap_size);
 }
 
-StorageStrategy FilePrivateMMap::GetStorageStrategy() const {
-  return StorageStrategy::kFilePrivate;
+MemoryLevel FilePrivateMMap::GetStorageStrategy() const {
+  return MemoryLevel::kInMemory;
 }
 
 // FileSharedMMap implementation
@@ -166,8 +166,8 @@ void FileSharedMMap::Sync() {
   }
 }
 
-StorageStrategy FileSharedMMap::GetStorageStrategy() const {
-  return StorageStrategy::kFileShared;
+MemoryLevel FileSharedMMap::GetStorageStrategy() const {
+  return MemoryLevel::kSyncToFile;
 }
 
 }  // namespace neug

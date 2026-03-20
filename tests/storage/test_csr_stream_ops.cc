@@ -111,7 +111,7 @@ class CsrStreamTest : public ::testing::Test {
     if (this->allocators.size() < static_cast<size_t>(thread_num)) {
       this->allocators.reserve(thread_num);
       while (this->allocators.size() < static_cast<size_t>(thread_num)) {
-        this->allocators.emplace_back(neug::StorageStrategy::kAnon, "");
+        this->allocators.emplace_back(neug::MemoryLevel::kInMemory, "");
       }
     }
     std::atomic<size_t> counter(0);

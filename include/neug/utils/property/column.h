@@ -52,7 +52,7 @@ class ColumnBase {
 
   virtual void open_in_memory(const std::string& name) = 0;
 
-  virtual void open_with_hugepages(const std::string& name, bool force) = 0;
+  virtual void open_with_hugepages(const std::string& name) = 0;
 
   virtual void close() = 0;
 
@@ -81,7 +81,7 @@ class ColumnBase {
 
   virtual void ingest(uint32_t index, OutArchive& arc) = 0;
 
-  virtual StorageStrategy storage_strategy() const = 0;
+  virtual MemoryLevel storage_strategy() const = 0;
 
   virtual void ensure_writable(const std::string& work_dir) = 0;
 };
@@ -89,7 +89,7 @@ class ColumnBase {
 template <typename T>
 class TypedColumn : public ColumnBase {
  public:
-  explicit TypedColumn(const T& default_value, StorageStrategy strategy)
+  explicit TypedColumn(const T& default_value, MemoryLevel strategy)
       : default_value_(default_value), size_(0), strategy_(strategy) {}
   ~TypedColumn() { close(); }
 
@@ -122,8 +122,8 @@ class TypedColumn : public ColumnBase {
     }
   }
 
-  void open_with_hugepages(const std::string& name, bool force) override {
-    if (strategy_ == StorageStrategy::kAnonHuge || force) {
+  void open_with_hugepages(const std::string& name) override {
+    if (strategy_ == MemoryLevel::kHugePagePrefered) {
       if (!name.empty() && std::filesystem::exists(name)) {
         buffer_.open_with_hugepages(name);
         size_ = buffer_.size();
@@ -200,7 +200,7 @@ class TypedColumn : public ColumnBase {
     set_value(index, val);
   }
 
-  StorageStrategy storage_strategy() const override { return strategy_; }
+  MemoryLevel storage_strategy() const override { return strategy_; }
 
   const mmap_array<T>& buffer() const { return buffer_; }
   size_t buffer_size() const { return size_; }
@@ -214,7 +214,7 @@ class TypedColumn : public ColumnBase {
   mmap_array<T> buffer_;
   // std::unique_ptr<IDataContainer> buffer_;
   size_t size_;
-  StorageStrategy strategy_;
+  MemoryLevel strategy_;
 };
 
 using BoolColumn = TypedColumn<bool>;
@@ -233,13 +233,13 @@ using IntervalColumn = TypedColumn<Interval>;
 template <>
 class TypedColumn<EmptyType> : public ColumnBase {
  public:
-  explicit TypedColumn(StorageStrategy strategy) : strategy_(strategy) {}
+  explicit TypedColumn(MemoryLevel strategy) : strategy_(strategy) {}
   ~TypedColumn() {}
 
   void open(const std::string& name, const std::string& snapshot_dir,
             const std::string& work_dir) override {}
   void open_in_memory(const std::string& name) override {}
-  void open_with_hugepages(const std::string& name, bool force) override {}
+  void open_with_hugepages(const std::string& name) override {}
   void dump(const std::string& filename) override {}
   void copy_to_tmp(const std::string& cur_path,
                    const std::string& tmp_path) override {}
@@ -262,19 +262,19 @@ class TypedColumn<EmptyType> : public ColumnBase {
 
   void ingest(uint32_t index, OutArchive& arc) override {}
 
-  StorageStrategy storage_strategy() const override { return strategy_; }
+  MemoryLevel storage_strategy() const override { return strategy_; }
 
   void ensure_writable(const std::string& work_dir) override {}
 
  private:
-  StorageStrategy strategy_;
+  MemoryLevel strategy_;
 };
 
 // No default value for StringColumn
 template <>
 class TypedColumn<std::string_view> : public ColumnBase {
  public:
-  TypedColumn(StorageStrategy strategy, uint16_t width,
+  TypedColumn(MemoryLevel strategy, uint16_t width,
               std::string_view default_value = "")
       : size_(0),
         pos_(0),
@@ -282,7 +282,7 @@ class TypedColumn<std::string_view> : public ColumnBase {
         width_(width),
         default_value_(default_value),
         type_(DataTypeId::kVarchar) {}
-  explicit TypedColumn(StorageStrategy strategy)
+  explicit TypedColumn(MemoryLevel strategy)
       : size_(0),
         pos_(0),
         strategy_(strategy),
@@ -326,8 +326,8 @@ class TypedColumn<std::string_view> : public ColumnBase {
     init_pos(prefix + ".pos");
   }
 
-  void open_with_hugepages(const std::string& prefix, bool force) override {
-    if (strategy_ == StorageStrategy::kAnonHuge || force) {
+  void open_with_hugepages(const std::string& prefix) override {
+    if (strategy_ == MemoryLevel::kHugePagePrefered) {
       buffer_.open_with_hugepages(prefix);
       size_ = buffer_.size();
       init_pos(prefix + ".pos");
@@ -430,7 +430,7 @@ class TypedColumn<std::string_view> : public ColumnBase {
 
   const mmap_array<std::string_view>& buffer() const { return buffer_; }
 
-  StorageStrategy storage_strategy() const override { return strategy_; }
+  MemoryLevel storage_strategy() const override { return strategy_; }
 
   size_t buffer_size() const { return size_; }
 
@@ -451,7 +451,7 @@ class TypedColumn<std::string_view> : public ColumnBase {
   mmap_array<std::string_view> buffer_;
   size_t size_;
   std::atomic<size_t> pos_;
-  StorageStrategy strategy_;
+  MemoryLevel strategy_;
   std::shared_mutex rw_mutex_;
   uint16_t width_;
   std::string_view default_value_;
@@ -462,7 +462,7 @@ using StringColumn = TypedColumn<std::string_view>;
 
 std::shared_ptr<ColumnBase> CreateColumn(
     DataType type, Property default_value,
-    StorageStrategy strategy = StorageStrategy::kAnon);
+    MemoryLevel strategy = MemoryLevel::kInMemory);
 
 /// Create RefColumn for ease of usage for hqps
 class RefColumnBase {

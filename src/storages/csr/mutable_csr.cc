@@ -49,7 +49,7 @@ void MutableCsr<EDATA_T>::open(const std::string& name,
                                const std::string& snapshot_dir,
                                const std::string& work_dir) {
   close();
-  storage_strategy_ = StorageStrategy::kFileShared;
+  storage_strategy_ = MemoryLevel::kSyncToFile;
 
   std::string prefix = snapshot_dir + "/" + name;
   auto deg_file_name = prefix + ".deg";
@@ -129,7 +129,7 @@ void MutableCsr<EDATA_T>::open(const std::string& name,
 template <typename EDATA_T>
 void MutableCsr<EDATA_T>::open_in_memory(const std::string& prefix) {
   close();
-  storage_strategy_ = StorageStrategy::kAnon;
+  storage_strategy_ = MemoryLevel::kInMemory;
 
   auto degree_file_name = prefix + ".deg";
   auto cap_file_name = prefix + ".cap";
@@ -190,7 +190,7 @@ void MutableCsr<EDATA_T>::open_in_memory(const std::string& prefix) {
 template <typename EDATA_T>
 void MutableCsr<EDATA_T>::open_with_hugepages(const std::string& prefix) {
   close();
-  storage_strategy_ = StorageStrategy::kAnonHuge;
+  storage_strategy_ = MemoryLevel::kHugePagePrefered;
   auto degree_file_name = prefix + ".deg";
   auto cap_file_name = prefix + ".cap";
   auto snap_nbr_file_name = prefix + ".nbr";
@@ -278,10 +278,77 @@ void MutableCsr<EDATA_T>::dump(const std::string& name,
 
   degree_list->Dump(new_snapshot_dir + "/" + name + ".deg");
   std::string filename = new_snapshot_dir + "/" + name + ".nbr";
-  if (nbr_list_) {
-    nbr_list_->Dump(filename);
-  } else {
-    file_utils::create_file(filename, sizeof(FileHeader));
+  FILE* fout = fopen(filename.c_str(), "wb");
+  if (fout == nullptr) {
+    std::stringstream ss;
+    ss << "Failed to open nbr list " << filename << ", " << strerror(errno);
+    LOG(ERROR) << ss.str();
+    throw std::runtime_error(ss.str());
+  }
+
+  // First write empty FileHeader, which will be updated after writing the data.
+  FileHeader header{};
+  if (fwrite(&header, sizeof(FileHeader), 1, fout) != 1) {
+    fclose(fout);
+    std::stringstream ss;
+    ss << "Failed to write FileHeader for nbr list " << filename << ", "
+       << strerror(errno);
+    LOG(ERROR) << ss.str();
+    throw std::runtime_error(ss.str());
+  }
+  auto buffers = adj_list_buffer_ptr();
+  MD5_CTX md5_ctx;
+  MD5_Init(&md5_ctx);
+
+  for (size_t i = 0; i < vnum; ++i) {
+    size_t ret{};
+    if ((ret = fwrite(buffers[i], sizeof(nbr_t), caps[i], fout)) !=
+        static_cast<size_t>(caps[i])) {
+      fclose(fout);
+      std::stringstream ss;
+      ss << "Failed to write nbr list " << filename << ", expected " << caps[i]
+         << ", got " << ret << ", " << strerror(errno);
+      LOG(ERROR) << ss.str();
+      throw std::runtime_error(ss.str());
+    }
+    MD5_Update(&md5_ctx, buffers[i], sizeof(nbr_t) * caps[i]);
+  }
+
+  MD5_Final(header.data_md5, &md5_ctx);
+
+  // Update the FileHeader with the correct MD5.
+  if (fseek(fout, 0, SEEK_SET) != 0) {
+    fclose(fout);
+    std::stringstream ss;
+    ss << "Failed to seek to beginning of nbr list " << filename << ", "
+       << strerror(errno);
+    LOG(ERROR) << ss.str();
+    throw std::runtime_error(ss.str());
+  }
+  if (fwrite(&header, sizeof(FileHeader), 1, fout) != 1) {
+    fclose(fout);
+    std::stringstream ss;
+    ss << "Failed to write FileHeader for nbr list " << filename << ", "
+       << strerror(errno);
+    LOG(ERROR) << ss.str();
+    throw std::runtime_error(ss.str());
+  }
+
+  int ret = 0;
+  if ((ret = fflush(fout)) != 0) {
+    fclose(fout);
+    std::stringstream ss;
+    ss << "Failed to flush nbr list " << filename << ", error code: " << ret
+       << " " << strerror(errno);
+    LOG(ERROR) << ss.str();
+    throw std::runtime_error(ss.str());
+  }
+  if ((ret = fclose(fout)) != 0) {
+    std::stringstream ss;
+    ss << "Failed to close nbr list " << filename << ", error code: " << ret
+       << " " << strerror(errno);
+    LOG(ERROR) << ss.str();
+    throw std::runtime_error(ss.str());
   }
 }
 
@@ -653,7 +720,7 @@ void SingleMutableCsr<EDATA_T>::open(const std::string& name,
                                      const std::string& snapshot_dir,
                                      const std::string& work_dir) {
   close();
-  storage_strategy_ = StorageStrategy::kFileShared;
+  storage_strategy_ = MemoryLevel::kSyncToFile;
 
   auto snapshot_file = snapshot_dir + "/" + name + ".snbr";
   auto tmp_file = tmp_dir(work_dir) + "/" + name + ".snbr";
@@ -672,7 +739,7 @@ void SingleMutableCsr<EDATA_T>::open(const std::string& name,
 template <typename EDATA_T>
 void SingleMutableCsr<EDATA_T>::open_in_memory(const std::string& prefix) {
   close();
-  storage_strategy_ = StorageStrategy::kAnon;
+  storage_strategy_ = MemoryLevel::kInMemory;
 
   auto snapshot_file = prefix + ".snbr";
   nbr_list_ = std::make_unique<FilePrivateMMap>();
@@ -685,7 +752,7 @@ void SingleMutableCsr<EDATA_T>::open_in_memory(const std::string& prefix) {
 template <typename EDATA_T>
 void SingleMutableCsr<EDATA_T>::open_with_hugepages(const std::string& prefix) {
   close();
-  storage_strategy_ = StorageStrategy::kAnonHuge;
+  storage_strategy_ = MemoryLevel::kHugePagePrefered;
 
   auto snapshot_file = prefix + ".snbr";
   nbr_list_ = std::make_unique<AnonHugeMMap>();

@@ -215,28 +215,16 @@ void NeugDB::initAllocators() {
   // Initialize the default allocator for ingesting wals
   remove_directory(allocator_dir(work_dir_));
   std::filesystem::create_directories(allocator_dir(work_dir_));
-  // MemoryStrategy strategy = StorageStrategy::kAnon;
-  StorageStrategy strategy = StorageStrategy::kAnon;
-  if (config_.memory_level == 1) {
-    strategy = StorageStrategy::kAnon;
-  } else if (config_.memory_level == 2) {
-    strategy = StorageStrategy::kAnonHuge;
-  } else if (config_.memory_level == 3) {
-    strategy = StorageStrategy::kFilePrivate;
-  } else if (config_.memory_level == 4) {
-    strategy = StorageStrategy::kFileShared;
-  } else {
-    LOG(WARNING) << "Unrecognized memory level: " << config_.memory_level
-                 << ", defaulting to memory-mapped virtual memory";
-    strategy = StorageStrategy::kAnon;
-  }
   assert(config_.thread_num > 0);
   for (int i = 0; i < config_.thread_num; ++i) {
     // safe to pass the same prefix for both anon-based and file-based
     // strategies, as the allocator will ignore the prefix for anon-based
     // strategy
-    allocators_.emplace_back(std::make_shared<Allocator>(
-        strategy, wal_ingest_allocator_prefix(work_dir_, i)));
+    auto allocator_file = config_.memory_level == MemoryLevel::kSyncToFile
+                              ? wal_ingest_allocator_prefix(work_dir_, i)
+                              : "";
+    allocators_.emplace_back(
+        std::make_shared<Allocator>(config_.memory_level, allocator_file));
   }
 }
 
