@@ -301,6 +301,7 @@ void Table::insert(size_t index, const std::vector<Property>& values,
   CHECK_EQ(values.size(), columns_.size());
   size_t col_num = columns_.size();
   for (size_t i = 0; i < col_num; ++i) {
+    columns_[i]->ensure_writable(work_dir_);
     columns_[i]->set_any(index, values[i], insert_safe);
   }
 }
@@ -368,5 +369,13 @@ void Table::drop() {
 void Table::set_name(const std::string& name) { name_ = name; }
 
 void Table::set_work_dir(const std::string& work_dir) { work_dir_ = work_dir; }
+
+void Table::ensure_writable(size_t col_id) {
+  if (col_id >= columns_.size()) {
+    THROW_INVALID_ARGUMENT_EXCEPTION("Column id out of range: " +
+                                     std::to_string(col_id));
+  }
+  columns_[col_id]->ensure_writable(work_dir_);
+}
 
 }  // namespace neug

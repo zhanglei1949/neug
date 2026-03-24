@@ -156,6 +156,7 @@ bool VertexTable::UpdateProperty(vid_t vid, int32_t prop_id,
     LOG(ERROR) << "Property id " << prop_id << " is out of range.";
     return false;
   }
+  table_->ensure_writable(prop_id);
   table_->get_column_by_id(prop_id)->set_any(vid, value);
   return true;
 }
