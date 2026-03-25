@@ -620,8 +620,8 @@ void EdgeTable::OpenWithHugepages(const std::string& work_dir) {
     table_->open_with_hugepages(
         edata_prefix(meta_->src_label_name, meta_->dst_label_name,
                      meta_->edge_label_name),
-        checkpoint_dir_path, meta_->property_names, meta_->properties,
-        meta_->strategies, (memory_level_ > 2));
+        work_dir_, meta_->property_names, meta_->properties, meta_->strategies,
+        (memory_level_ > 2));
     assert(table_->col_num() > 0);
     size_t table_cap = table_->get_column_by_id(0)->size();
     load_statistic_file(work_dir, meta_->src_label_name, meta_->dst_label_name,
