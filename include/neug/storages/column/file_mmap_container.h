@@ -62,6 +62,16 @@ class FileSharedMMap : public MMapContainer {
   void Resize(size_t size) override;
   void Sync() override;
 
+  /**
+   * @brief Dump data to a file using hard link when possible.
+   *
+   * Since FileSharedMMap writes directly to the backing file via MAP_SHARED,
+   * we can flush the header via Sync() and then create a hard link to the
+   * source file, preserving sparse file structure and avoiding full data copy.
+   * Falls back to the base class fwrite-based Dump() if no backing file exists.
+   */
+  void Dump(const std::string& path) override;
+
  protected:
   void* mmapImpl(const std::string& path, size_t mmap_size) override;
   void munmapImpl(void* mmap_data, size_t mmap_size) override;

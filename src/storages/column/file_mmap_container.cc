@@ -136,4 +136,39 @@ void FileSharedMMap::Sync() {
   }
 }
 
+void FileSharedMMap::Dump(const std::string& path) {
+  // If there is no backing file, fall back to the fwrite-based base Dump().
+  if (path_.empty()) {
+    MMapContainer::Dump(path);
+    return;
+  }
+
+  // Flush the MD5 header and all dirty pages to the backing file.
+  Sync();
+
+  if (path == path_) {
+    // Target is the same file; Sync() already ensured it is up-to-date.
+    return;
+  }
+
+  // Remove an existing file at the destination so hard-link can be created.
+  std::error_code ec;
+  if (std::filesystem::exists(path, ec)) {
+    std::filesystem::remove(path, ec);
+    if (ec) {
+      THROW_IO_EXCEPTION("Failed to remove existing file before hard link: " +
+                         path + ": " + ec.message());
+    }
+  }
+
+  // Create a hard link: no data is copied, sparse holes are preserved.
+  std::filesystem::create_hard_link(path_, path, ec);
+  if (ec) {
+    // Hard link failed (e.g. cross-device); fall back to fwrite.
+    LOG(WARNING) << "create_hard_link failed (" << ec.message()
+                 << "), falling back to fwrite for " << path;
+    MMapContainer::Dump(path);
+  }
+}
+
 }  // namespace neug
