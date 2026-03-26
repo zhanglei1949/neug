@@ -15,8 +15,10 @@
 
 #include "neug/storages/column/i_container.h"
 #include "neug/storages/column/anon_mmap_container.h"
+#include "neug/storages/column/file_header.h"
 #include "neug/storages/column/file_mmap_container.h"
 #include "neug/utils/exception/exception.h"
+#include "neug/utils/file_utils.h"
 
 #include <glog/logging.h>
 
@@ -47,12 +49,17 @@ std::unique_ptr<IDataContainer> CreateDataContainer(
   }
   case MemoryLevel::kHugePagePrefered: {
     auto ret = std::make_unique<AnonHugeMMap>();
-    ret->Open(file_name);
+    if (std::filesystem::exists(file_name)) {
+      ret->Open(file_name);
+    }
     ret->Resize(size);
     return ret;
   }
   case MemoryLevel::kSyncToFile: {
     auto ret = std::make_unique<FileSharedMMap>();
+    if (!std::filesystem::exists(file_name)) {
+      file_utils::create_file(file_name, sizeof(FileHeader));
+    }
     ret->Open(file_name);
     ret->Resize(size);
     return ret;

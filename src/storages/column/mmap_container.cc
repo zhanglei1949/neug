@@ -43,7 +43,7 @@ void MMapContainer::Open(const std::string& path) {
     Close();
   }
   if (!std::filesystem::exists(path)) {
-    LOG(WARNING) << "File does not exist: " << path;
+    THROW_IO_EXCEPTION("File does not exist: " + path);
     return;
   }
 

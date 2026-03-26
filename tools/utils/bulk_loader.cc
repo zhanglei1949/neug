@@ -75,7 +75,11 @@ int main(int argc, char** argv) {
       "d,data-path", "Data directory path", cxxopts::value<std::string>())(
       "g,graph-config", "Graph schema config file",
       cxxopts::value<std::string>())("l,bulk-load", "Bulk-load config file",
-                                     cxxopts::value<std::string>());
+                                     cxxopts::value<std::string>())(
+      "memory-level",
+      "Memory level for loading, 1 for InMemory, 2 for SyncToFile, 3 for "
+      "HugePagePreferred",
+      cxxopts::value<int>()->default_value("1"));
 
   google::InitGoogleLogging(argv[0]);
   FLAGS_logtostderr = true;
@@ -145,6 +149,18 @@ int main(int argc, char** argv) {
   // check whether parallelism, are overridden
   if (vm.count("parallelism")) {
     loading_config_res.value().SetParallelism(vm["parallelism"].as<uint32_t>());
+  }
+  neug::MemoryLevel memory_level = neug::MemoryLevel::kSyncToFile;
+  if (vm.count("memory-level")) {
+    int memory_level_int = vm["memory-level"].as<int>();
+    if (memory_level_int < 1 || memory_level_int > 3) {
+      LOG(ERROR) << "Invalid memory level: " << memory_level_int
+                 << ", should be 1 for InMemory, 2 for SyncToFile, 3 for "
+                    "HugePagePreferred";
+      return -1;
+    }
+    memory_level = static_cast<neug::MemoryLevel>(memory_level_int);
+    loading_config_res.value().SetMemoryLevel(memory_level);
   }
 
   std::filesystem::path data_dir_path(data_path);
