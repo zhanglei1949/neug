@@ -40,10 +40,8 @@ std::unique_ptr<IDataContainer> CreateDataContainer(
       auto ret = std::make_unique<FilePrivateMMap>();
       if (std::filesystem::exists(file_name)) {
         ret->Open(file_name);
-        ret->Resize(size);
-      } else {
-        ret->OpenAnonymous(size);
       }
+      ret->Resize(size);
       return ret;
     }
   }

@@ -116,7 +116,10 @@ class TypedColumn : public ColumnBase {
 
   void close() override { buffer_.reset(); }
 
-  void dump(const std::string& filename) override { buffer_->Dump(filename); }
+  void dump(const std::string& filename) override {
+    buffer_->Sync();
+    buffer_->Dump(filename);
+  }
 
   size_t size() const override { return size_; }
 
@@ -298,9 +301,11 @@ class TypedColumn<std::string_view> : public ColumnBase {
     size_t pos_val = pos_.load();
     write_file(filename + ".pos", &pos_val, sizeof(pos_val), 1);
     if (items_buffer_) {
+      items_buffer_->Sync();
       items_buffer_->Dump(filename + ".items");
     }
     if (data_buffer_) {
+      data_buffer_->Sync();
       data_buffer_->Dump(filename + ".data");
     }
     CLOSE_AND_RESET(items_buffer_);

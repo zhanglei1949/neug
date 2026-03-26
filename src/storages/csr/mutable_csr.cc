@@ -59,13 +59,10 @@ void MutableCsr<EDATA_T>::open(const std::string& name,
         "Snapshot directory is required for disk-backed open()");
   }
 
-  std::shared_ptr<IDataContainer> degree_list;
+  std::shared_ptr<IDataContainer> degree_list =
+      std::make_shared<FilePrivateMMap>();
   if (std::filesystem::exists(deg_file_name)) {
-    degree_list = std::make_shared<FilePrivateMMap>();
     degree_list->Open(deg_file_name);
-  } else {
-    // create an empty degree list
-    degree_list = std::make_unique<AnonMMap>();
   }
 
   std::shared_ptr<IDataContainer> cap_list = degree_list;
@@ -130,11 +127,9 @@ void MutableCsr<EDATA_T>::open_in_memory(const std::string& prefix) {
   auto cap_file_name = prefix + ".cap";
   auto snap_nbr_file_name = prefix + ".nbr";
 
-  std::shared_ptr<IDataContainer> degree_list;
-  if (!std::filesystem::exists(degree_file_name)) {
-    degree_list = std::make_unique<AnonMMap>();
-  } else {
-    degree_list = std::make_unique<FilePrivateMMap>();
+  std::shared_ptr<IDataContainer> degree_list =
+      std::make_unique<FilePrivateMMap>();
+  if (std::filesystem::exists(degree_file_name)) {
     degree_list->Open(degree_file_name);
   }
 
@@ -145,10 +140,8 @@ void MutableCsr<EDATA_T>::open_in_memory(const std::string& prefix) {
   }
 
   auto v_cap = degree_list->GetDataSize() / sizeof(int);
-  if (!std::filesystem::exists(snap_nbr_file_name)) {
-    nbr_list_ = std::make_unique<AnonMMap>();
-  } else {
-    nbr_list_ = std::make_unique<FilePrivateMMap>();
+  nbr_list_ = std::make_unique<FilePrivateMMap>();
+  if (std::filesystem::exists(snap_nbr_file_name)) {
     nbr_list_->Open(snap_nbr_file_name);
   }
   adj_list_buffer_ = std::make_unique<AnonMMap>();
@@ -184,12 +177,10 @@ void MutableCsr<EDATA_T>::open_with_hugepages(const std::string& prefix) {
   auto snap_nbr_file_name = prefix + ".nbr";
 
   // For tmp degree_list, we FilePrivateMap since we only need to read it once
-  std::shared_ptr<IDataContainer> degree_list;
+  std::shared_ptr<IDataContainer> degree_list =
+      std::make_shared<FilePrivateMMap>();
   if (std::filesystem::exists(degree_file_name)) {
-    degree_list = std::make_shared<FilePrivateMMap>();
     degree_list->Open(degree_file_name);
-  } else {
-    degree_list = std::make_unique<AnonMMap>();
   }
 
   std::shared_ptr<IDataContainer> cap_list = degree_list;
@@ -690,11 +681,9 @@ void SingleMutableCsr<EDATA_T>::open_in_memory(const std::string& prefix) {
   close();
 
   auto snapshot_file = prefix + ".snbr";
+  nbr_list_ = std::make_unique<FilePrivateMMap>();
   if (std::filesystem::exists(snapshot_file)) {
-    nbr_list_ = std::make_unique<FilePrivateMMap>();
     nbr_list_->Open(snapshot_file);
-  } else {
-    nbr_list_ = std::make_unique<AnonMMap>();
   }
 }
 
@@ -716,6 +705,7 @@ void SingleMutableCsr<EDATA_T>::dump(const std::string& name,
   if (!nbr_list_) {
     return;
   }
+  nbr_list_->Sync();
   nbr_list_->Dump(new_snapshot_dir + "/" + name + ".snbr");
 }
 

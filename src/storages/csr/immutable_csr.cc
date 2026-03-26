@@ -94,18 +94,14 @@ void ImmutableCsr<EDATA_T>::open_in_memory(const std::string& prefix) {
   load_meta(prefix);
   auto degree_file_name = prefix + ".deg";
   auto nbr_file_name = prefix + ".nbr";
+  degree_list_buffer_ = std::make_unique<FilePrivateMMap>();
   if (std::filesystem::exists(degree_file_name)) {
-    degree_list_buffer_ = std::make_unique<FilePrivateMMap>();
     degree_list_buffer_->Open(degree_file_name);
-  } else {
-    degree_list_buffer_ = std::make_unique<AnonMMap>();
   }
 
+  nbr_list_buffer_ = std::make_unique<FilePrivateMMap>();
   if (std::filesystem::exists(nbr_file_name)) {
-    nbr_list_buffer_ = std::make_unique<FilePrivateMMap>();
     nbr_list_buffer_->Open(nbr_file_name);
-  } else {
-    nbr_list_buffer_ = std::make_unique<AnonMMap>();
   }
 
   adj_list_buffer_ = std::make_unique<AnonMMap>();
@@ -494,11 +490,9 @@ void SingleImmutableCsr<EDATA_T>::open(const std::string& name,
 template <typename EDATA_T>
 void SingleImmutableCsr<EDATA_T>::open_in_memory(const std::string& prefix) {
   auto snapshot_file = prefix + ".snbr";
+  nbr_list_buffer_ = std::make_unique<FilePrivateMMap>();
   if (std::filesystem::exists(snapshot_file)) {
-    nbr_list_buffer_ = std::make_unique<FilePrivateMMap>();
     nbr_list_buffer_->Open(snapshot_file);
-  } else {
-    nbr_list_buffer_ = std::make_unique<AnonMMap>();
   }
 }
 

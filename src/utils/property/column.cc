@@ -106,18 +106,13 @@ void open_container_shared(IDataContainer& buffer, const std::string& name,
 std::unique_ptr<IDataContainer> open_container_in_memory(
     const std::string& name, bool use_hugepages) {
   std::unique_ptr<IDataContainer> buffer;
-  if (!use_hugepages) {
-    if (!name.empty() && std::filesystem::exists(name)) {
-      buffer = std::make_unique<FilePrivateMMap>();
-      buffer->Open(name);
-    } else {
-      buffer = std::make_unique<AnonMMap>();
-    }
-  } else {
+  if (use_hugepages) {
     buffer = std::make_unique<AnonHugeMMap>();
-    if (!name.empty() && std::filesystem::exists(name)) {
-      buffer->Open(name);
-    }
+  } else {
+    buffer = std::make_unique<FilePrivateMMap>();
+  }
+  if (!name.empty() && std::filesystem::exists(name)) {
+    buffer->Open(name);
   }
   return buffer;
 }
