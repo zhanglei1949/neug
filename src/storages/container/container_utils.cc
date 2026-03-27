@@ -15,8 +15,11 @@
 
 #include "neug/storages/container_utils.h"
 
+#include <cstdio>
 #include <filesystem>
+#include <functional>
 #include <memory>
+#include <utility>
 
 #include "neug/storages/container/file_header.h"
 #include "neug/storages/container/i_container.h"
@@ -54,6 +57,46 @@ std::unique_ptr<IDataContainer> prepare_and_open_container(
   } else {
     // For in-memory or hugepage containers, use snapshot file directly
     return OpenDataContainer(memory_level, snapshot_file);
+  }
+}
+
+void write_nbr_file(
+    const std::string& path, size_t num_segs,
+    const std::function<std::pair<const void*, size_t>(size_t)>& seg_fn) {
+  FILE* fp = fopen(path.c_str(), "wb");
+  if (fp == nullptr) {
+    THROW_IO_EXCEPTION("Failed to open file for writing: " + path);
+  }
+  FileHeader header{};
+  if (fwrite(&header, sizeof(FileHeader), 1, fp) != 1) {
+    fclose(fp);
+    THROW_IO_EXCEPTION("Failed to write header to: " + path);
+  }
+  MD5_CTX ctx;
+  MD5_Init(&ctx);
+  for (size_t i = 0; i < num_segs; ++i) {
+    auto [data, len] = seg_fn(i);
+    if (len == 0 || data == nullptr) {
+      continue;
+    }
+    if (fwrite(data, 1, len, fp) != len) {
+      fclose(fp);
+      THROW_IO_EXCEPTION("Failed to write segment " + std::to_string(i) +
+                         " to: " + path);
+    }
+    MD5_Update(&ctx, data, len);
+  }
+  MD5_Final(header.data_md5, &ctx);
+  if (fseek(fp, 0, SEEK_SET) != 0) {
+    fclose(fp);
+    THROW_IO_EXCEPTION("Failed to seek in: " + path);
+  }
+  if (fwrite(&header, sizeof(FileHeader), 1, fp) != 1) {
+    fclose(fp);
+    THROW_IO_EXCEPTION("Failed to rewrite header in: " + path);
+  }
+  if (fclose(fp) != 0) {
+    THROW_IO_EXCEPTION("Failed to close file: " + path);
   }
 }
 

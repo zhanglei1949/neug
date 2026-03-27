@@ -32,9 +32,6 @@ limitations under the License.
 
 #include "flat_hash_map/flat_hash_map.hpp"
 #include "glog/logging.h"
-#include "neug/storages/container/anon_mmap_container.h"
-#include "neug/storages/container/file_header.h"
-#include "neug/storages/container/file_mmap_container.h"
 #include "neug/storages/container/i_container.h"
 #include "neug/storages/container_utils.h"
 #include "neug/utils/bitset.h"
@@ -285,7 +282,7 @@ class LFIndexer {
                              const std::string& work_dir) {
     keys_->open(filename + ".keys", "", work_dir);
     auto full_path = work_dir + "/" + filename + ".indices";
-    file_utils::create_file(full_path, sizeof(FileHeader));
+    CreateEmptyContainerFile(full_path);
     auto tmp_indices = OpenDataContainer(MemoryLevel::kSyncToFile, full_path);
 
     num_elements_.store(0);
@@ -1054,7 +1051,7 @@ void build_lf_indexer(const IdIndexer<KEY_T, INDEX_T>& input,
   lf.num_elements_.store(size);
 
   auto indices_path = work_dir + "/" + filename + ".indices";
-  file_utils::create_file(indices_path, sizeof(FileHeader));
+  CreateEmptyContainerFile(indices_path);
   lf.indices_ = OpenDataContainer(MemoryLevel::kSyncToFile, indices_path);
   lf.indices_->Resize((input.num_slots_minus_one_ + 1) * sizeof(INDEX_T));
   auto lf_indices_ptr = lf.indices_data();

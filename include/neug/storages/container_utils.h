@@ -14,8 +14,10 @@
  */
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 
 #include "neug/config.h"
 #include "neug/storages/container/i_container.h"
@@ -59,5 +61,22 @@ void prepare_container_file(const std::string& snapshot_file,
 std::unique_ptr<IDataContainer> prepare_and_open_container(
     const std::string& snapshot_file, const std::string& tmp_file,
     MemoryLevel memory_level);
+
+/**
+ * @brief Write adjacency list segments to a container file.
+ *
+ * Opens `path` for writing, emits a zeroed FileHeader, then calls
+ * seg_fn(i) for i in [0, num_segs) to obtain each (data_ptr, byte_count)
+ * segment.  Segments with byte_count == 0 or nullptr are skipped.
+ * After all segments are written the FileHeader is patched with the MD5
+ * computed over the concatenated segment data, and the file is closed.
+ *
+ * @param path     Output file path
+ * @param num_segs Number of segments
+ * @param seg_fn   Callable returning {data_ptr, byte_count} for segment i
+ */
+void write_nbr_file(
+    const std::string& path, size_t num_segs,
+    const std::function<std::pair<const void*, size_t>(size_t)>& seg_fn);
 
 }  // namespace neug

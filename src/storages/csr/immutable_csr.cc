@@ -26,9 +26,7 @@
 #include <memory>
 #include <thread>
 #include <utility>
-#include "neug/storages/container/anon_mmap_container.h"
-#include "neug/storages/container/file_header.h"
-#include "neug/storages/container/file_mmap_container.h"
+
 #include "neug/storages/container/i_container.h"
 #include "neug/storages/container_utils.h"
 #include "neug/storages/file_names.h"
@@ -103,53 +101,7 @@ void ImmutableCsr<EDATA_T>::dump(const std::string& name,
                                  const std::string& new_snapshot_dir) {
   dump_meta(new_snapshot_dir + "/" + name);
   degree_list_buffer_->Dump(new_snapshot_dir + "/" + name + ".deg");
-  auto vnum = size();
-  FILE* fout = fopen((new_snapshot_dir + "/" + name + ".nbr").c_str(), "wb");
-  FileHeader header{};
-  if (fwrite(&header, sizeof(FileHeader), 1, fout) != 1) {
-    fclose(fout);
-    std::stringstream ss;
-    ss << "Failed to fwrite file [ " << new_snapshot_dir + "/" + name + ".nbr"
-       << " ], " << strerror(errno);
-    LOG(ERROR) << ss.str();
-    THROW_RUNTIME_ERROR(ss.str());
-  }
-  MD5_CTX md5_ctx;
-  MD5_Init(&md5_ctx);
-  for (size_t k = 0; k < vnum; ++k) {
-    int deg = degree_list_ptr()[k];
-    if (deg != 0 && adj_lists_ptr()[k] != NULL) {
-      const nbr_t* nbrs = adj_lists_ptr()[k];
-      if (fwrite(nbrs, sizeof(nbr_t), deg, fout) != static_cast<size_t>(deg)) {
-        std::stringstream ss;
-        ss << "Failed to fwrite file [ "
-           << new_snapshot_dir + "/" + name + ".nbr"
-           << " ], " << strerror(errno);
-        LOG(ERROR) << ss.str();
-        THROW_RUNTIME_ERROR(ss.str());
-      }
-      MD5_Update(&md5_ctx, nbrs, sizeof(nbr_t) * deg);
-    }
-  }
-  MD5_Final(header.data_md5, &md5_ctx);
-  if (fseek(fout, 0, SEEK_SET) != 0) {
-    fclose(fout);
-    std::stringstream ss;
-    ss << "Failed to fseek file [ " << new_snapshot_dir + "/" + name + ".nbr"
-       << " ], " << strerror(errno);
-    LOG(ERROR) << ss.str();
-    THROW_RUNTIME_ERROR(ss.str());
-  }
-  if (fwrite(&header, sizeof(FileHeader), 1, fout) != 1) {
-    fclose(fout);
-    std::stringstream ss;
-    ss << "Failed to fwrite file [ " << new_snapshot_dir + "/" + name + ".nbr"
-       << " ], " << strerror(errno);
-    LOG(ERROR) << ss.str();
-    THROW_RUNTIME_ERROR(ss.str());
-  }
-  fflush(fout);
-  fclose(fout);
+  nbr_list_buffer_->Dump(new_snapshot_dir + "/" + name + ".nbr");
 }
 
 template <typename EDATA_T>

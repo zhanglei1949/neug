@@ -26,15 +26,10 @@
 #include <map>
 #include <memory>
 #include <numeric>
-#include <sstream>
-#include <stdexcept>
-#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
 
-#include "neug/storages/container/anon_mmap_container.h"
-#include "neug/storages/container/file_header.h"
 #include "neug/storages/container/file_mmap_container.h"
 #include "neug/storages/container_utils.h"
 #include "neug/storages/file_names.h"
@@ -154,12 +149,9 @@ void MutableCsr<EDATA_T>::dump(const std::string& name,
   bool need_cap_list = false;
   auto degree_ptr = reinterpret_cast<int*>(degree_list->GetData());
   auto cap_ptr = reinterpret_cast<int*>(cap_list->GetData());
-  size_t offset = 0;
   for (size_t i = 0; i < vnum; ++i) {
-    offset += adj_list_cap_ptr()[i];
     degree_ptr[i] = adj_list_size_ptr()[i].load(std::memory_order_relaxed);
     cap_ptr[i] = adj_list_cap_ptr()[i];
-
     if (degree_ptr[i] != cap_ptr[i]) {
       need_cap_list = true;
     }
@@ -173,80 +165,14 @@ void MutableCsr<EDATA_T>::dump(const std::string& name,
   }
 
   degree_list->Dump(new_snapshot_dir + "/" + name + ".deg");
-  std::string filename = new_snapshot_dir + "/" + name + ".nbr";
-  FILE* fout = fopen(filename.c_str(), "wb");
-  if (fout == nullptr) {
-    std::stringstream ss;
-    ss << "Failed to open nbr list " << filename << ", " << strerror(errno);
-    LOG(ERROR) << ss.str();
-    throw std::runtime_error(ss.str());
-  }
 
-  // First write empty FileHeader, which will be updated after writing the data.
-  FileHeader header{};
-  if (fwrite(&header, sizeof(FileHeader), 1, fout) != 1) {
-    fclose(fout);
-    std::stringstream ss;
-    ss << "Failed to write FileHeader for nbr list " << filename << ", "
-       << strerror(errno);
-    LOG(ERROR) << ss.str();
-    throw std::runtime_error(ss.str());
-  }
-  MD5_CTX md5_ctx;
-  MD5_Init(&md5_ctx);
-
-  for (size_t i = 0; i < vnum; ++i) {
-    size_t ret{};
-    if ((ret = fwrite(adj_list_buffer_ptr()[i], sizeof(nbr_t),
-                      adj_list_cap_ptr()[i], fout)) !=
-        static_cast<size_t>(adj_list_cap_ptr()[i])) {
-      fclose(fout);
-      std::stringstream ss;
-      ss << "Failed to write nbr list " << filename << ", expected "
-         << adj_list_cap_ptr()[i] << ", got " << ret << ", " << strerror(errno);
-      LOG(ERROR) << ss.str();
-      throw std::runtime_error(ss.str());
-    }
-    MD5_Update(&md5_ctx, adj_list_buffer_ptr()[i],
-               sizeof(nbr_t) * adj_list_cap_ptr()[i]);
-  }
-
-  MD5_Final(header.data_md5, &md5_ctx);
-
-  // Update the FileHeader with the correct MD5.
-  if (fseek(fout, 0, SEEK_SET) != 0) {
-    fclose(fout);
-    std::stringstream ss;
-    ss << "Failed to seek to beginning of nbr list " << filename << ", "
-       << strerror(errno);
-    LOG(ERROR) << ss.str();
-    throw std::runtime_error(ss.str());
-  }
-  if (fwrite(&header, sizeof(FileHeader), 1, fout) != 1) {
-    fclose(fout);
-    std::stringstream ss;
-    ss << "Failed to write FileHeader for nbr list " << filename << ", "
-       << strerror(errno);
-    LOG(ERROR) << ss.str();
-    throw std::runtime_error(ss.str());
-  }
-
-  int ret = 0;
-  if ((ret = fflush(fout)) != 0) {
-    fclose(fout);
-    std::stringstream ss;
-    ss << "Failed to flush nbr list " << filename << ", error code: " << ret
-       << " " << strerror(errno);
-    LOG(ERROR) << ss.str();
-    throw std::runtime_error(ss.str());
-  }
-  if ((ret = fclose(fout)) != 0) {
-    std::stringstream ss;
-    ss << "Failed to close nbr list " << filename << ", error code: " << ret
-       << " " << strerror(errno);
-    LOG(ERROR) << ss.str();
-    throw std::runtime_error(ss.str());
-  }
+  const nbr_t* const* lists = adj_list_buffer_ptr();
+  const int* caps = adj_list_cap_ptr();
+  write_nbr_file(
+      new_snapshot_dir + "/" + name + ".nbr", vnum,
+      [lists, caps](size_t i) -> std::pair<const void*, size_t> {
+        return {lists[i], static_cast<size_t>(caps[i]) * sizeof(nbr_t)};
+      });
 }
 
 template <typename EDATA_T>
