@@ -79,7 +79,7 @@ int main(int argc, char** argv) {
       "m,memory-level",
       "Memory level for loading, 1 for InMemory, 2 for SyncToFile, 3 for "
       "HugePagePreferred",
-      cxxopts::value<int>()->default_value("1"));
+      cxxopts::value<int>()->default_value("2"));
 
   google::InitGoogleLogging(argv[0]);
   FLAGS_logtostderr = true;
