@@ -63,12 +63,18 @@ class FileSharedMMap : public MMapContainer {
   void Sync() override;
 
   /**
-   * @brief Dump data to a file using hard link when possible.
+   * @brief Dump data to a file preserving sparse structure.
    *
    * Since FileSharedMMap writes directly to the backing file via MAP_SHARED,
-   * we can flush the header via Sync() and then create a hard link to the
-   * source file, preserving sparse file structure and avoiding full data copy.
-   * Falls back to the base class fwrite-based Dump() if no backing file exists.
+   * we flush via Sync() and then delegate to file_utils::copy_file() which
+   * tries in order:
+   *   1. FICLONE ioctl (reflink/COW clone) - preserves sparse holes, zero copy
+   *   2. copy_file_range() - server-side copy, may use COW on supported FS
+   *   3. Traditional read/write fallback
+   *
+   * All three paths produce an independent inode, so a subsequent open() that
+   * copies the snapshot back to a tmp file will never alias the source.
+   * Falls back to the base-class fwrite-based Dump() if copy_file() throws.
    */
   void Dump(const std::string& path) override;
 

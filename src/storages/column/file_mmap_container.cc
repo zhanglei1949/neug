@@ -22,6 +22,7 @@
 #include <filesystem>
 #include "neug/storages/column/file_header.h"
 #include "neug/storages/column/file_mmap_container.h"
+#include "neug/utils/file_utils.h"
 
 namespace neug {
 
@@ -151,21 +152,14 @@ void FileSharedMMap::Dump(const std::string& path) {
     return;
   }
 
-  // Remove an existing file at the destination so hard-link can be created.
-  std::error_code ec;
-  if (std::filesystem::exists(path, ec)) {
-    std::filesystem::remove(path, ec);
-    if (ec) {
-      THROW_IO_EXCEPTION("Failed to remove existing file before hard link: " +
-                         path + ": " + ec.message());
-    }
-  }
-
-  // Create a hard link: no data is copied, sparse holes are preserved.
-  std::filesystem::create_hard_link(path_, path, ec);
-  if (ec) {
-    // Hard link failed (e.g. cross-device); fall back to fwrite.
-    LOG(WARNING) << "create_hard_link failed (" << ec.message()
+  // Use file_utils::copy_file which tries FICLONE (reflink/COW) first,
+  // then copy_file_range, then falls back to traditional read/write copy.
+  // All three paths produce an independent inode, so a subsequent open()
+  // that copies the snapshot back to a tmp file will never alias the source.
+  try {
+    file_utils::copy_file(path_, path, /*overwrite=*/true);
+  } catch (const std::exception& e) {
+    LOG(WARNING) << "copy_file failed (" << e.what()
                  << "), falling back to fwrite for " << path;
     MMapContainer::Dump(path);
   }
