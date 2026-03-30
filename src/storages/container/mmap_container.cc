@@ -81,6 +81,9 @@ void MMapContainer::Open(const std::string& path) {
 }
 
 void MMapContainer::Close() {
+  // Flush MD5 header to the backing file before unmapping.
+  // For non-file containers the base Sync() is a no-op, so this is free.
+  Sync();
   if (mmap_data_ && mmap_size_ > 0) {
     munmapImpl(mmap_data_, mmap_size_);
   }
@@ -141,21 +144,21 @@ void MMapContainer::Resize(size_t size) {
 void MMapContainer::Dump(const std::string& path) {
   FileHeader header;
   MD5((unsigned char*) data_, size_, header.data_md5);
-  FILE* fp = fopen(path.c_str(), "wb");
+  std::unique_ptr<FILE, decltype(&fclose)> fp(fopen(path.c_str(), "wb"),
+                                              &fclose);
   if (fp == nullptr) {
     THROW_IO_EXCEPTION("Failed to open file for writing: " + path);
   }
-  auto ret = fwrite(&header, sizeof(FileHeader), 1, fp);
+  auto ret = fwrite(&header, sizeof(FileHeader), 1, fp.get());
   if (ret != 1) {
     THROW_IO_EXCEPTION("Failed to write header to file: " + path);
   }
   if (size_ > 0) {
-    ret = fwrite(data_, size_, 1, fp);
+    ret = fwrite(data_, size_, 1, fp.get());
     if (ret != 1) {
       THROW_IO_EXCEPTION("Failed to write data to file: " + path);
     }
   }
-  fclose(fp);
 }
 
 bool MMapContainer::IsDirty() {

@@ -17,6 +17,8 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <cstdio>
+#include <functional>
+#include <memory>
 #include <stdexcept>
 
 #include <glog/logging.h>
@@ -28,13 +30,7 @@ namespace neug {
 
 AnonMMap::AnonMMap() : MMapContainer() {}
 
-AnonMMap::~AnonMMap() {
-  if (mmap_data_ && mmap_size_ > 0) {
-    munmapImpl(mmap_data_, mmap_size_);
-    mmap_data_ = nullptr;
-    mmap_size_ = 0;
-  }
-}
+AnonMMap::~AnonMMap() { Close(); }
 
 void AnonMMap::OpenAnonymous(size_t size) {
   if (!path_.empty() || mmap_data_ != nullptr) {
@@ -69,11 +65,7 @@ void AnonMMap::munmapImpl(void* mmap_data, size_t mmap_size) {
 // AnonHugeMMap implementation
 AnonHugeMMap::AnonHugeMMap() : MMapContainer() {}
 
-AnonHugeMMap::~AnonHugeMMap() {
-  if (mmap_data_ && mmap_size_ > 0) {
-    munmapImpl(mmap_data_, mmap_size_);
-  }
-}
+AnonHugeMMap::~AnonHugeMMap() { Close(); }
 
 void AnonHugeMMap::OpenAnonymous(size_t size) {
   if (!path_.empty() || mmap_data_ != nullptr) {
@@ -134,15 +126,20 @@ void AnonHugeMMap::Resize(size_t size) {
 void* AnonHugeMMap::mmapImpl(const std::string& path, size_t mmap_size) {
   size_t hugepage_size = file_utils::hugepage_round_up(mmap_size);
   void* mmap_data = try_allocate_hugepages(hugepage_size);
-  FILE* fp = fopen(path.c_str(), "rb");
+  // RAII guard: munmap hugepages on any error path.
+  auto mmap_guard = std::unique_ptr<void, std::function<void(void*)>>(
+      mmap_data, [hugepage_size](void* p) { munmap(p, hugepage_size); });
+
+  std::unique_ptr<FILE, decltype(&fclose)> fp(fopen(path.c_str(), "rb"),
+                                              &fclose);
   if (fp == nullptr) {
     THROW_RUNTIME_ERROR("Failed to open file: " + path);
   }
-  auto ret = fread(mmap_data, 1, mmap_size, fp);
+  auto ret = fread(mmap_data, 1, mmap_size, fp.get());
   if (ret != mmap_size) {
     THROW_RUNTIME_ERROR("Failed to read from file: " + path);
   }
-  fclose(fp);
+  mmap_guard.release();  // Ownership transferred to caller.
   return mmap_data;
 }
 

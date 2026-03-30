@@ -28,11 +28,7 @@ namespace neug {
 
 FilePrivateMMap::FilePrivateMMap() : MMapContainer() {}
 
-FilePrivateMMap::~FilePrivateMMap() {
-  if (mmap_data_ && mmap_size_ > 0) {
-    munmapImpl(mmap_data_, mmap_size_);
-  }
-}
+FilePrivateMMap::~FilePrivateMMap() { Close(); }
 
 void FilePrivateMMap::OpenAnonymous(size_t size) {
   if (!path_.empty() || mmap_data_ != nullptr) {
@@ -66,11 +62,7 @@ void FilePrivateMMap::munmapImpl(void* mmap_data, size_t mmap_size) {
 
 FileSharedMMap::FileSharedMMap() : MMapContainer() {}
 
-FileSharedMMap::~FileSharedMMap() {
-  if (mmap_data_ && mmap_size_ > 0) {
-    munmapImpl(mmap_data_, mmap_size_);
-  }
-}
+FileSharedMMap::~FileSharedMMap() { Close(); }
 
 void FileSharedMMap::Resize(size_t size) {
   if (size == size_) {

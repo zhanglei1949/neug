@@ -63,13 +63,13 @@ std::unique_ptr<IDataContainer> prepare_and_open_container(
 void write_nbr_file(
     const std::string& path, size_t num_segs,
     const std::function<std::pair<const void*, size_t>(size_t)>& seg_fn) {
-  FILE* fp = fopen(path.c_str(), "wb");
+  std::unique_ptr<FILE, decltype(&fclose)> fp(fopen(path.c_str(), "wb"),
+                                              &fclose);
   if (fp == nullptr) {
     THROW_IO_EXCEPTION("Failed to open file for writing: " + path);
   }
   FileHeader header{};
-  if (fwrite(&header, sizeof(FileHeader), 1, fp) != 1) {
-    fclose(fp);
+  if (fwrite(&header, sizeof(FileHeader), 1, fp.get()) != 1) {
     THROW_IO_EXCEPTION("Failed to write header to: " + path);
   }
   MD5_CTX ctx;
@@ -79,23 +79,20 @@ void write_nbr_file(
     if (len == 0 || data == nullptr) {
       continue;
     }
-    if (fwrite(data, 1, len, fp) != len) {
-      fclose(fp);
+    if (fwrite(data, 1, len, fp.get()) != len) {
       THROW_IO_EXCEPTION("Failed to write segment " + std::to_string(i) +
                          " to: " + path);
     }
     MD5_Update(&ctx, data, len);
   }
   MD5_Final(header.data_md5, &ctx);
-  if (fseek(fp, 0, SEEK_SET) != 0) {
-    fclose(fp);
+  if (fseek(fp.get(), 0, SEEK_SET) != 0) {
     THROW_IO_EXCEPTION("Failed to seek in: " + path);
   }
-  if (fwrite(&header, sizeof(FileHeader), 1, fp) != 1) {
-    fclose(fp);
+  if (fwrite(&header, sizeof(FileHeader), 1, fp.get()) != 1) {
     THROW_IO_EXCEPTION("Failed to rewrite header in: " + path);
   }
-  if (fclose(fp) != 0) {
+  if (fclose(fp.release()) != 0) {
     THROW_IO_EXCEPTION("Failed to close file: " + path);
   }
 }
