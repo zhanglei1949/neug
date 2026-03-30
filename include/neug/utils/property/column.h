@@ -294,11 +294,9 @@ class TypedColumn<std::string_view> : public ColumnBase {
     size_t pos_val = pos_.load();
     write_file(filename + ".pos", &pos_val, sizeof(pos_val), 1);
     if (items_buffer_) {
-      items_buffer_->Sync();
       items_buffer_->Dump(filename + ".items");
     }
     if (data_buffer_) {
-      data_buffer_->Sync();
       data_buffer_->Dump(filename + ".data");
     }
     CloseAndReset(items_buffer_);

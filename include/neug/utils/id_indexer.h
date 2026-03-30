@@ -464,7 +464,6 @@ class LFIndexer {
 
   void dump(const std::string& name, const std::string& snapshot_dir) {
     keys_->dump(snapshot_dir + "/" + name + ".keys");
-    indices_->Sync();
     indices_->Dump(snapshot_dir + "/" + name + ".indices");
     dump_meta(snapshot_dir + "/" + name + ".meta");
     close();
