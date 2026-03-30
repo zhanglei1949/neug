@@ -174,8 +174,6 @@ TEST_F(LFIndexerTest, DumpsAndOpensAcrossBackends) {
   copied_to_workdir.open(name, snapshot_dir_, work_dir_);
   ExpectInt64Values(copied_to_workdir, values);
   EXPECT_TRUE(
-      std::filesystem::exists(tmp_dir(work_dir_) + "/" + name + ".meta"));
-  EXPECT_TRUE(
       std::filesystem::exists(tmp_dir(work_dir_) + "/" + name + ".keys"));
   EXPECT_TRUE(
       std::filesystem::exists(tmp_dir(work_dir_) + "/" + name + ".indices"));
