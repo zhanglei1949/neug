@@ -47,6 +47,7 @@ enum class ContainerType {
  */
 class IDataContainer {
  public:
+  IDataContainer() : data_(nullptr), size_(0) {}
   virtual ~IDataContainer() {}
 
   virtual ContainerType GetContainerType() const = 0;
@@ -54,12 +55,12 @@ class IDataContainer {
   /**
    * @brief Get pointer to the data region.
    */
-  virtual void* GetData() const = 0;
+  inline void* GetData() const { return data_; }
 
   /**
    * @brief Get the size of the data region.
    */
-  virtual size_t GetDataSize() const = 0;
+  inline size_t GetDataSize() const { return size_; }
 
   /**
    * @brief Resize the container to accommodate at least the specified number of
@@ -98,6 +99,10 @@ class IDataContainer {
    * @brief Check if the data has been modified.
    */
   virtual bool IsDirty() = 0;
+
+ protected:
+  void* data_;
+  size_t size_;
 };
 
 std::unique_ptr<IDataContainer> OpenDataContainer(MemoryLevel strategy,

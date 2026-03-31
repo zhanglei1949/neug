@@ -30,12 +30,7 @@
 
 namespace neug {
 
-MMapContainer::MMapContainer()
-    : mmap_data_(nullptr), mmap_size_(0), data_(nullptr), size_(0) {}
-
-void* MMapContainer::GetData() const { return data_; }
-
-size_t MMapContainer::GetDataSize() const { return size_; }
+MMapContainer::MMapContainer() : mmap_data_(nullptr), mmap_size_(0) {}
 
 std::string MMapContainer::GetPath() const { return path_; }
 

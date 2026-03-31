@@ -34,8 +34,6 @@ class MMapContainer : public IDataContainer {
   MMapContainer();
   virtual ~MMapContainer() {}
 
-  void* GetData() const override;
-  size_t GetDataSize() const override;
   virtual void Resize(size_t size) override;
   std::string GetPath() const override;
 
@@ -58,8 +56,6 @@ class MMapContainer : public IDataContainer {
   std::string path_;
   void* mmap_data_;
   size_t mmap_size_;
-  void* data_;
-  size_t size_;
 };
 
 }  // namespace neug
