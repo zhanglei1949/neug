@@ -424,10 +424,8 @@ std::unique_ptr<::common::Expression> GExprConverter::convertRegexFunc(
 
 std::unique_ptr<::common::Value> GExprConverter::convertToLiteralArray(
     const common::Value& value, const common::LogicalType& childType) {
-  if (value.children.empty()) {
-    THROW_EXCEPTION_WITH_FILE_LINE(
-        "Array function should have at least one child");
-  }
+  // Empty list is valid (e.g. the implicit default for a list column with no
+  // DEFAULT clause).  The proto repeated field simply stays empty.
   auto valuePB = std::make_unique<::common::Value>();
   switch (childType.getLogicalTypeID()) {
   case common::LogicalTypeID::INT32: {

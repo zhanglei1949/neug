@@ -57,6 +57,12 @@ Property get_default_value(const DataTypeId& type) {
   case DataTypeId::kInterval:
     default_value.set_interval(Interval());
     break;
+  case DataTypeId::kList:
+    // An empty list blob (no elements) serves as the default value for list
+    // properties.  ListView::size() returns 0 when the blob is shorter than
+    // 4 bytes, so an empty string_view is a valid representation.
+    default_value.set_list_data(std::string_view{});
+    break;
   default:
     THROW_NOT_SUPPORTED_EXCEPTION(
         "Unsupported property type for default value: " + std::to_string(type) +
