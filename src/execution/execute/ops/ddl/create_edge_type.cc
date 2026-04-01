@@ -46,10 +46,12 @@ class CreateEdgeTypeOpr : public IOperator {
     bool failed = false;
     for (int32_t i = 0; i < defs_size; ++i) {
       const auto& create_edge_def = create_edge_types_[i];
+      std::vector<OwnedProperty> owned_defaults;
       std::vector<std::tuple<DataType, std::string, Property>> property_tuples;
       for (const auto& [prop_name, prop_value] : std::get<3>(create_edge_def)) {
+        owned_defaults.emplace_back(value_to_property(prop_value));
         property_tuples.emplace_back(prop_value.type(), prop_name,
-                                     value_to_property(prop_value));
+                                     owned_defaults.back().prop());
       }
       CreateEdgeTypeParamBuilder config_builder;
       config_builder.SrcLabel(std::get<0>(create_edge_def))
