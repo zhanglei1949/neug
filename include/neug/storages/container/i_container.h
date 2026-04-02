@@ -23,14 +23,6 @@
 
 namespace neug {
 
-template <typename T>
-inline void CloseAndReset(T& ptr) {
-  if (ptr) {
-    ptr->Close();
-    ptr.reset();
-  }
-}
-
 enum class ContainerType {
   kAnonMMap = 0,
   kAnonHugeMMap = 1,
@@ -104,5 +96,12 @@ class IDataContainer {
   void* data_;
   size_t size_;
 };
+
+inline void CloseAndReset(std::unique_ptr<IDataContainer>& ptr) {
+  if (ptr) {
+    ptr->Close();
+    ptr.reset();
+  }
+}
 
 }  // namespace neug
