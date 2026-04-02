@@ -81,10 +81,10 @@ class ImmutableCsr : public TypedCsrBase<EDATA_T> {
     return ret;
   }
 
-  void Open(const Checkpoint& ckp, const ModuleDescriptor& descriptor,
+  void Open(Checkpoint& ckp, const ModuleDescriptor& descriptor,
             MemoryLevel memory_level) override;
 
-  ModuleDescriptor Dump(const Checkpoint& ckp) override;
+  ModuleDescriptor Dump(Checkpoint& ckp) override;
 
   void reset_timestamp() override;
 
@@ -123,8 +123,7 @@ class ImmutableCsr : public TypedCsrBase<EDATA_T> {
     return {};
   }
 
-  std::unique_ptr<Module> Fork(const Checkpoint& ckp,
-                               MemoryLevel level) override {
+  std::unique_ptr<Module> Fork(Checkpoint& ckp, MemoryLevel level) override {
     return nullptr;
   }
 
@@ -133,13 +132,6 @@ class ImmutableCsr : public TypedCsrBase<EDATA_T> {
   }
 
  private:
-  void load_meta(const std::string& prefix);
-
-  void dump_meta(const std::string& prefix) const;
-
-  void open_internal(const std::string& snapshot_prefix,
-                     const std::string& tmp_prefix, MemoryLevel mem_level);
-
   std::unique_ptr<IDataContainer> adj_list_buffer_;
   std::unique_ptr<IDataContainer> degree_list_buffer_;
   std::unique_ptr<IDataContainer> nbr_list_buffer_;
@@ -193,10 +185,10 @@ class SingleImmutableCsr : public TypedCsrBase<EDATA_T> {
     return ret;
   }
 
-  void Open(const Checkpoint& ckp, const ModuleDescriptor& descriptor,
+  void Open(Checkpoint& ckp, const ModuleDescriptor& descriptor,
             MemoryLevel level) override;
 
-  ModuleDescriptor Dump(const Checkpoint& ckp) override;
+  ModuleDescriptor Dump(Checkpoint& ckp) override;
 
   void reset_timestamp() override;
 
@@ -235,8 +227,7 @@ class SingleImmutableCsr : public TypedCsrBase<EDATA_T> {
     return {};
   }
 
-  std::unique_ptr<Module> Fork(const Checkpoint& ckp,
-                               MemoryLevel level) override {
+  std::unique_ptr<Module> Fork(Checkpoint& ckp, MemoryLevel level) override {
     return nullptr;
   }
 

@@ -35,11 +35,11 @@ class Table {
   Table();
   ~Table();
 
-  void Open(const Checkpoint& ckp, const ModuleDescriptor& descriptor,
+  void Open(Checkpoint& ckp, const ModuleDescriptor& descriptor,
             MemoryLevel memory_level, const std::vector<std::string>& col_name,
             const std::vector<DataType>& property_types);
 
-  ModuleDescriptor Dump(const Checkpoint& ckp);
+  ModuleDescriptor Dump(Checkpoint& ckp);
 
   void reset_header(const std::vector<std::string>& col_name);
 
@@ -107,7 +107,7 @@ class Table {
    * @brief Fork all property columns to UUID paths under ckp.runtime_dir(),
    * returning a new Table that owns the forked columns.
    */
-  std::unique_ptr<Table> Fork(const Checkpoint& ckp, MemoryLevel level) const;
+  std::unique_ptr<Table> Fork(Checkpoint& ckp, MemoryLevel level) const;
 
   void set_name(const std::string& name);
 

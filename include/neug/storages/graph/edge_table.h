@@ -39,29 +39,25 @@ class PropertyGraph;
 
 class IRecordBatchSupplier;
 
-class EdgeTable : public Module {
+class EdgeTable {
  public:
   EdgeTable() = default;
   EdgeTable(std::shared_ptr<const EdgeSchema> meta);
   EdgeTable(EdgeTable&& edge_table);
 
   EdgeTable(const EdgeTable&) = delete;
-  ~EdgeTable() override = default;
-
-  std::string ModuleTypeName() const override { return "edge_table"; }
+  ~EdgeTable() = default;
 
   void Swap(EdgeTable& other);
 
   void SetEdgeSchema(std::shared_ptr<const EdgeSchema> meta);
 
   // Module interface (Checkpoint-based) — the single public Open.
-  void Open(const Checkpoint& ckp, const ModuleDescriptor& descriptor,
-            MemoryLevel memory_level) override;
-  ModuleDescriptor Dump(const Checkpoint& ckp) override;
+  void Open(Checkpoint& ckp, const ModuleDescriptor& descriptor,
+            MemoryLevel memory_level);
+  ModuleDescriptor Dump(Checkpoint& ckp);
 
-  void Close() override;
-  std::unique_ptr<Module> Fork(const Checkpoint& ckp,
-                               MemoryLevel level) override;
+  void Close();
 
   /**
    * @brief Dump all components to @p checkpoint_dir_path (a flat directory).
@@ -114,11 +110,12 @@ class EdgeTable : public Module {
   void RenameProperties(const std::vector<std::string>& old_names,
                         const std::vector<std::string>& new_names);
 
-  void AddProperties(const std::vector<std::string>& names,
+  void AddProperties(Checkpoint& ckp, const std::vector<std::string>& names,
                      const std::vector<DataType>& types,
                      const std::vector<Property>& default_values = {});
 
-  void DeleteProperties(const std::vector<std::string>& col_names);
+  void DeleteProperties(Checkpoint& ckp,
+                        const std::vector<std::string>& col_names);
 
   void DeleteEdge(vid_t src_lid, vid_t dst_lid, int32_t oe_offset,
                   int32_t ie_offset, timestamp_t ts);
@@ -145,8 +142,9 @@ class EdgeTable : public Module {
   size_t Capacity() const;
 
  private:
-  void dropAndCreateNewBundledCSR(std::shared_ptr<ColumnBase> prev_data_col);
-  void dropAndCreateNewUnbundledCSR(bool delete_property);
+  void dropAndCreateNewBundledCSR(Checkpoint& ckp,
+                                  std::shared_ptr<ColumnBase> prev_data_col);
+  void dropAndCreateNewUnbundledCSR(Checkpoint& ckp, bool delete_property);
 
   /**
    * @brief Bootstrap/legacy open: initialise from a work_dir that follows

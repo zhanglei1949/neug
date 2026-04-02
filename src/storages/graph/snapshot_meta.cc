@@ -64,8 +64,7 @@ const std::unordered_map<std::string, ModuleDescriptor>& SnapshotMeta::modules()
 // Module overrides
 // ---------------------------------------------------------------------------
 
-void SnapshotMeta::Open(const Checkpoint& ckp,
-                        const ModuleDescriptor& /*descriptor*/,
+void SnapshotMeta::Open(Checkpoint& ckp, const ModuleDescriptor& /*descriptor*/,
                         MemoryLevel /*level*/) {
   // SnapshotMeta lives at the canonical checkpoint meta path.
   std::string meta_path = ckp.meta_path();
@@ -94,7 +93,7 @@ void SnapshotMeta::Open(const Checkpoint& ckp,
   }
 }
 
-ModuleDescriptor SnapshotMeta::Dump(const Checkpoint& ckp) {
+ModuleDescriptor SnapshotMeta::Dump(Checkpoint& ckp) {
   // Write to the canonical meta path of the checkpoint (not a UUID subdir).
   std::string meta_path = ckp.meta_path();
   std::ofstream ofs(meta_path);
@@ -131,8 +130,7 @@ ModuleDescriptor SnapshotMeta::Dump(const Checkpoint& ckp) {
 
 void SnapshotMeta::Close() { modules_.clear(); }
 
-std::unique_ptr<Module> SnapshotMeta::Fork(const Checkpoint& ckp,
-                                           MemoryLevel level) {
+std::unique_ptr<Module> SnapshotMeta::Fork(Checkpoint& ckp, MemoryLevel level) {
   auto desc = Dump(ckp);
   auto copy = std::make_unique<SnapshotMeta>();
   copy->Open(ckp, desc, level);

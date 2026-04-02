@@ -114,7 +114,7 @@ class SnapshotMeta : public Module {
    * @brief Load the meta JSON from ckp.path()/meta.
    * @p descriptor is currently unused (meta is self-describing).
    */
-  void Open(const Checkpoint& ckp, const ModuleDescriptor& descriptor,
+  void Open(Checkpoint& ckp, const ModuleDescriptor& descriptor,
             MemoryLevel level) override;
 
   /**
@@ -122,7 +122,7 @@ class SnapshotMeta : public Module {
    * Unlike other Modules, SnapshotMeta writes to the canonical
    * checkpoint meta path rather than a UUID sub-directory.
    */
-  ModuleDescriptor Dump(const Checkpoint& ckp) override;
+  ModuleDescriptor Dump(Checkpoint& ckp) override;
 
   std::string ModuleTypeName() const override { return "snapshot_meta"; }
 
@@ -135,8 +135,9 @@ class SnapshotMeta : public Module {
    * @brief Return a copy of this SnapshotMeta.  If @p level is kSyncToFile
    * the copy is also persisted to the Checkpoint's meta path.
    */
-  std::unique_ptr<Module> Fork(const Checkpoint& ckp,
-                               MemoryLevel level) override;
+  std::unique_ptr<Module> Fork(Checkpoint& ckp, MemoryLevel level) override;
+
+  void GenerateEmptyMeta(const std::string& file_path);
 
  private:
   std::unordered_map<std::string, ModuleDescriptor> modules_;

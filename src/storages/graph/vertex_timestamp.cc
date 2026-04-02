@@ -22,8 +22,7 @@
 
 namespace neug {
 
-void VertexTimestamp::Open(const Checkpoint& ckp,
-                           const ModuleDescriptor& descriptor,
+void VertexTimestamp::Open(Checkpoint& ckp, const ModuleDescriptor& descriptor,
                            MemoryLevel memory_level) {
   assert(descriptor.type == ModuleTypeName());
   std::string ts_filename = descriptor.path + ".ts";
@@ -38,7 +37,7 @@ void VertexTimestamp::Open(const Checkpoint& ckp,
   }
 }
 
-ModuleDescriptor VertexTimestamp::Dump(const Checkpoint& ckp) {
+ModuleDescriptor VertexTimestamp::Dump(Checkpoint& ckp) {
   auto uuid = generate_uuid();
   std::string tracker_file_prefix = ckp.runtime_dir() + "/" + uuid;
   std::string ts_filename = tracker_file_prefix + ".ts";
@@ -315,7 +314,7 @@ void VertexTimestamp::resize_inserted_vertices(size_t new_size,
 }
 
 // TODO(zhanglei): Make sure this is correct.
-std::unique_ptr<Module> VertexTimestamp::Fork(const Checkpoint& ckp,
+std::unique_ptr<Module> VertexTimestamp::Fork(Checkpoint& ckp,
                                               MemoryLevel level) {
   auto new_vertex_ts = std::make_unique<VertexTimestamp>();
   new_vertex_ts->init_vertex_num_ = init_vertex_num_;

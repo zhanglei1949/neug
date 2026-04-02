@@ -795,14 +795,14 @@ class Schema : public Module {
    * @brief Open / restore the schema from the Checkpoint using the provided
    * descriptor.  Calls Deserialize() on @p desc.path/schema.
    */
-  void Open(const Checkpoint& ckp, const ModuleDescriptor& descriptor,
+  void Open(Checkpoint& ckp, const ModuleDescriptor& descriptor,
             MemoryLevel level) override;
 
   /**
    * @brief Persist the schema to a UUID directory under ckp.runtime_dir().
    * Writes both binary (schema) and YAML (schema.yaml).
    */
-  ModuleDescriptor Dump(const Checkpoint& ckp) override;
+  ModuleDescriptor Dump(Checkpoint& ckp) override;
 
   std::string ModuleTypeName() const override { return "schema"; }
 
@@ -815,8 +815,7 @@ class Schema : public Module {
    * @brief Return a deep copy of this Schema; Checkpoint and MemoryLevel are
    * ignored because Schema is always in-memory.
    */
-  std::unique_ptr<Module> Fork(const Checkpoint& ckp,
-                               MemoryLevel level) override;
+  std::unique_ptr<Module> Fork(Checkpoint& ckp, MemoryLevel level) override;
 
  private:
   // Internal methods that do not check tombstone

@@ -21,6 +21,8 @@
 #include <sstream>
 #include <string>
 
+#include "neug/storages/container/container_utils.h"
+
 #include <glog/logging.h>
 
 namespace neug {
@@ -28,6 +30,17 @@ namespace neug {
 // ---------------------------------------------------------------------------
 // Checkpoint
 // ---------------------------------------------------------------------------
+
+bool parse_checkpoint_path(const std::string& path, int& id) {
+  if (!std::filesystem::is_directory(path)) {
+    return false;
+  }
+  std::string name = std::filesystem::path(path).filename().string();
+  if (sscanf(name.c_str(), "checkpoint-%d", &id) != 1) {
+    return false;
+  }
+  return true;
+}
 
 Checkpoint::Checkpoint(std::string path, uint32_t id)
     : path_(std::move(path)), id_(id) {}
@@ -52,6 +65,15 @@ void Checkpoint::create_dirs() const {
   }
 }
 
+std::unique_ptr<IDataContainer> Checkpoint::CreateRuntimeContainer(
+    size_t size, MemoryLevel level) {
+  assert(!IsEmpty());
+  std::string path = runtime_dir() + "/" + create_runtime_object();
+  auto ret = OpenContainer("", path, level);
+  ret->Resize(size);
+  return ret;
+}
+
 SnapshotMeta Checkpoint::LoadMeta() const {
   assert(!IsEmpty());
   SnapshotMeta meta;
@@ -65,66 +87,87 @@ void Checkpoint::SaveMeta(SnapshotMeta meta) const {
   meta.Dump(*this);
 }
 
+std::string Checkpoint::create_runtime_object() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  while (true) {
+    std::string uuid = UUIDGenerator().generate();
+    if (runtime_objects_.count(uuid) == 0 &&
+        uncommitted_runtime_objects_.count(uuid) == 0) {
+      uncommitted_runtime_objects_.insert(uuid);
+      return uuid;
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Workspace
 // ---------------------------------------------------------------------------
 
-Workspace::Workspace(std::string db_dir) : db_dir_(std::move(db_dir)) {}
+Workspace::Workspace() {}
 
-std::string Workspace::FormatId(uint32_t id) {
-  std::ostringstream oss;
-  oss << std::setw(kCheckpointIdWidth) << std::setfill('0') << id;
-  return oss.str();
-}
+Workspace::~Workspace() {}
 
-std::string Workspace::CheckpointPath(uint32_t id) const {
-  return db_dir_ + "/" + kCheckpointPrefix + FormatId(id);
-}
-
-std::vector<uint32_t> Workspace::ListCheckpointIds() const {
-  std::vector<uint32_t> ids;
-  if (!std::filesystem::exists(db_dir_)) {
-    return ids;
+void Workspace::Open(const std::string& db_dir) {
+  if (!db_dir.empty()) {
+    Close();
   }
-  const std::string prefix(kCheckpointPrefix);
-  for (const auto& entry : std::filesystem::directory_iterator(db_dir_)) {
-    if (!entry.is_directory()) {
-      continue;
-    }
-    std::string name = entry.path().filename().string();
-    if (name.substr(0, prefix.size()) != prefix) {
-      continue;
-    }
-    try {
-      uint32_t id =
-          static_cast<uint32_t>(std::stoul(name.substr(prefix.size())));
-      ids.push_back(id);
-    } catch (...) {
-      // Ignore entries with non-numeric suffixes
-    }
+  std::lock_guard<std::mutex> lock(mutex_);
+  db_dir_ = std::filesystem::absolute(db_dir).string();
+  if (!std::filesystem::is_directory(db_dir_)) {
+    std::filesystem::create_directory(db_dir_);
   }
-  std::sort(ids.begin(), ids.end());
-  return ids;
-}
-
-std::optional<Checkpoint> Workspace::LatestCheckpoint() const {
-  auto ids = ListCheckpointIds();
-  if (ids.empty()) {
-    return std::nullopt;
+  try {
+    for (const auto& entry : std::filesystem::directory_iterator(db_dir_)) {
+      if (entry.is_directory()) {
+        int id;
+        if (parse_checkpoint_path(entry.path().string(), id)) {
+          checkpoints_[id] =
+              std::make_unique<Checkpoint>(entry.path().string());
+        }
+      }
+    }
+  } catch (const std::filesystem::filesystem_error& e) {
+    LOG(ERROR) << "Workspace::Open: failed to read directory " << db_dir_
+               << ": " << e.what();
   }
-  return GetCheckpoint(ids.back());
 }
 
-Checkpoint Workspace::GetCheckpoint(uint32_t id) const {
-  return Checkpoint(CheckpointPath(id), id);
+void Workspace::Close() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  db_dir_.clear();
+  checkpoints_.clear();
 }
 
-Checkpoint Workspace::CreateCheckpoint() const {
-  auto ids = ListCheckpointIds();
-  uint32_t next_id = ids.empty() ? 1u : ids.back() + 1u;
-  Checkpoint cp(CheckpointPath(next_id), next_id);
-  cp.create_dirs();
-  return cp;
+size_t Workspace::NumCheckpoints() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return checkpoints_.size();
+}
+
+int Workspace::HeadId() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (checkpoints_.empty()) {
+    return -1;
+  }
+  return checkpoints_.rbegin()->first;
+}
+
+int Workspace::CreateCheckpoint() {
+  int id = HeadId() + 1;
+  std::string path = db_dir_ + "/checkpoint-" + std::to_string(id);
+  std::filesystem::create_directory(path);
+  std::lock_guard<std::mutex> lock(mutex_);
+  checkpoints_[id] = std::make_unique<Checkpoint>(path);
+  return id;
+}
+
+Checkpoint& Workspace::GetCheckpoint(int id) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return *checkpoints_.at(id);
+}
+
+Checkpoint& Workspace::GetCheckpoint(int id) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return *checkpoints_.at(id);
 }
 
 }  // namespace neug

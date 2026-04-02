@@ -42,10 +42,10 @@ class VertexTimestamp : public Module {
   // TODO(zhanglei): VertexTimestamp doesn't necessarily need open from file.
   // Implement the compaction logic
   // void Open(const std::string& tracker_file_prefix);
-  void Open(const Checkpoint& ckp, const ModuleDescriptor& descriptor,
+  void Open(Checkpoint& ckp, const ModuleDescriptor& descriptor,
             MemoryLevel memory_level) override;
 
-  ModuleDescriptor Dump(const Checkpoint& ckp) override;
+  ModuleDescriptor Dump(Checkpoint& ckp) override;
 
   void Init(vid_t init_vertex_num, vid_t max_vertex_num);
 
@@ -165,8 +165,7 @@ class VertexTimestamp : public Module {
 
   const vid_t InitVertexNum() const { return init_vertex_num_; }
 
-  std::unique_ptr<Module> Fork(const Checkpoint& ckp,
-                               MemoryLevel level) override;
+  std::unique_ptr<Module> Fork(Checkpoint& ckp, MemoryLevel level) override;
 
   void Close() override;
 

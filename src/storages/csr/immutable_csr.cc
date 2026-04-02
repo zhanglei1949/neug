@@ -36,11 +36,24 @@
 
 namespace neug {
 
-template <typename NbrType>
-void initialize_adj_lists(NbrType** adj_lists_ptr, const int* degree_list_ptr,
-                          NbrType* nbr_list_ptr, size_t num_vertices) {
-  NbrType* cur_nbr_list_ptr = nbr_list_ptr;
-  for (size_t i = 0; i < num_vertices; ++i) {
+template <typename EDATA_T>
+void ImmutableCsr<EDATA_T>::Open(Checkpoint& ckp, const ModuleDescriptor& desc,
+                                 MemoryLevel memory_level) {
+  Close();
+  unsorted_since_ = std::stoull(desc.get("unsorted_since").value_or("0"));
+  degree_list_buffer_ =
+      ckp.OpenFile(desc.get_sub_module("degree_list").path, memory_level);
+  nbr_list_buffer_ =
+      ckp.OpenFile(desc.get_sub_module("nbr_list").path, memory_level);
+  adj_list_buffer_ = ckp.CreateRuntimeContainer(v_cap * sizeof(nbr_t*),
+                                                MemoryLevel::kInMemory);
+  auto v_cap = size();
+  auto adj_lists_ptr = reinterpret_cast<nbr_t**>(adj_list_buffer_->GetData());
+  auto degree_list_ptr =
+      reinterpret_cast<const int*>(degree_list_buffer_->GetData());
+  auto nbr_list_ptr = reinterpret_cast<nbr_t*>(nbr_list_buffer_->GetData());
+  nbr_t* cur_nbr_list_ptr = nbr_list_ptr;
+  for (size_t i = 0; i < v_cap; ++i) {
     int deg = degree_list_ptr[i];
     if (deg != 0) {
       adj_lists_ptr[i] = cur_nbr_list_ptr;
@@ -52,48 +65,13 @@ void initialize_adj_lists(NbrType** adj_lists_ptr, const int* degree_list_ptr,
 }
 
 template <typename EDATA_T>
-void ImmutableCsr<EDATA_T>::Open(const Checkpoint& ckp,
-                                 const ModuleDescriptor& desc,
-                                 MemoryLevel memory_level) {
-  Close();
-  if (!desc.module_type.empty()) {
-    load_meta(desc.get_sub_module("meta").path);
-    auto degree_desc_ = desc.get_sub_module("degree_list");
-    auto nbr_desc_ = desc.get_sub_module("nbr_list");
-    degree_list_buffer_ = ckp.OpenFile(degree_desc_.path, memory_level);
-    nbr_list_buffer_ = ckp.OpenFile(nbr_desc_.path, memory_level);
-  }
-  // adj_list_buffer_ holds runtime pointer-array; always allocate anonymously
-  // since the addresses are rebuilt from degree/nbr lists on every open.
-  adj_list_buffer_ = OpenDataContainer(MemoryLevel::kInMemory, "");
-  auto v_cap = size();
-  adj_list_buffer_->Resize(v_cap * sizeof(nbr_t*));
-  if (degree_list_buffer_ && nbr_list_buffer_) {
-    initialize_adj_lists(
-        reinterpret_cast<nbr_t**>(adj_list_buffer_->GetData()),
-        reinterpret_cast<const int*>(degree_list_buffer_->GetData()),
-        reinterpret_cast<nbr_t*>(nbr_list_buffer_->GetData()), v_cap);
-  }
-}
-
-template <typename EDATA_T>
-ModuleDescriptor ImmutableCsr<EDATA_T>::Dump(const Checkpoint& ckp) {
+ModuleDescriptor ImmutableCsr<EDATA_T>::Dump(Checkpoint& ckp) {
   // TODO(zhanglei): Fix the correctness
-  auto name = generate_uuid();
-  const std::string& new_snapshot_dir = ckp.runtime_dir();
   ModuleDescriptor desc;
   desc.module_type = ModuleTypeName();
-  {
-    dump_meta(new_snapshot_dir + "/" + name);
-    ModuleDescriptor meta_desc;
-    meta_desc.path = new_snapshot_dir + "/" + name;
-    desc.set_sub_module("meta", meta_desc);
-  }
-
+  desc.set("unsorted_since", std::to_string(unsorted_since_));
   desc.set_sub_module("degree_list", ckp.Commit(*degree_list_buffer_));
-
   desc.set_sub_module("nbr_list", ckp.Commit(*nbr_list_buffer_));
-
   return desc;
 }
 
@@ -370,27 +348,7 @@ void ImmutableCsr<EDATA_T>::batch_put_edges(
 }
 
 template <typename EDATA_T>
-void ImmutableCsr<EDATA_T>::load_meta(const std::string& meta_file_path) {
-  if (std::filesystem::exists(meta_file_path)) {
-    FILE* meta_file_fd = fopen(meta_file_path.c_str(), "r");
-    CHECK_EQ(fread(&unsorted_since_, sizeof(timestamp_t), 1, meta_file_fd), 1);
-    fclose(meta_file_fd);
-  } else {
-    unsorted_since_ = 0;
-  }
-}
-
-template <typename EDATA_T>
-void ImmutableCsr<EDATA_T>::dump_meta(const std::string& prefix) const {
-  std::string meta_file_path = prefix + ".meta";
-  FILE* meta_file_fd = fopen((prefix + ".meta").c_str(), "wb");
-  CHECK_EQ(fwrite(&unsorted_since_, sizeof(timestamp_t), 1, meta_file_fd), 1);
-  fflush(meta_file_fd);
-  fclose(meta_file_fd);
-}
-
-template <typename EDATA_T>
-void SingleImmutableCsr<EDATA_T>::Open(const Checkpoint& ckp,
+void SingleImmutableCsr<EDATA_T>::Open(Checkpoint& ckp,
                                        const ModuleDescriptor& descriptor,
                                        MemoryLevel memory_level) {
   auto nbr_desc_ = descriptor.get_sub_module("nbr_list");
@@ -398,7 +356,7 @@ void SingleImmutableCsr<EDATA_T>::Open(const Checkpoint& ckp,
 }
 
 template <typename EDATA_T>
-ModuleDescriptor SingleImmutableCsr<EDATA_T>::Dump(const Checkpoint& ckp) {
+ModuleDescriptor SingleImmutableCsr<EDATA_T>::Dump(Checkpoint& ckp) {
   ModuleDescriptor desc;
   desc.module_type = ModuleTypeName();
   desc.set_sub_module("nbr_list", ckp.Commit(*nbr_list_buffer_));

@@ -33,8 +33,11 @@ class PropertyGraphTest : public ::testing::Test {
     }
     std::filesystem::create_directories(work_dir_);
     graph_ = std::make_unique<PropertyGraph>();
-    Workspace ws(work_dir_);
-    auto ckp = ws.CreateCheckpoint();
+    // Workspace ws(work_dir_);
+    Workspace ws;
+    ws.Open(work_dir_);
+    auto ckp_id = ws.CreateCheckpoint();
+    auto& ckp = ws.GetCheckpoint(ckp_id);
     graph_->Open(ckp, MemoryLevel::kInMemory);
   }
 

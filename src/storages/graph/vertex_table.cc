@@ -23,8 +23,7 @@
 
 namespace neug {
 
-void VertexTable::Open(const Checkpoint& ckp,
-                       const ModuleDescriptor& descriptor,
+void VertexTable::Open(Checkpoint& ckp, const ModuleDescriptor& descriptor,
                        MemoryLevel memory_level) {
   memory_level_ = memory_level;
 
@@ -57,22 +56,13 @@ void VertexTable::insert_vertices(
   }
 }
 
-ModuleDescriptor VertexTable::Dump(const Checkpoint& ckp) {
+ModuleDescriptor VertexTable::Dump(Checkpoint& ckp) {
   ModuleDescriptor descriptor;
   descriptor.module_type = ModuleTypeName();
   descriptor.set_sub_module("indexer", indexer_.Dump(ckp));
   descriptor.set_sub_module("property_table", table_->Dump(ckp));
   descriptor.set_sub_module("vertex_timestamp", v_ts_.Dump(ckp));
   return descriptor;
-}
-
-/// TODO(zhanglei): FXIME
-std::unique_ptr<Module> VertexTable::Fork(const Checkpoint& ckp,
-                                          MemoryLevel level) {
-  auto forked = std::make_unique<VertexTable>(vertex_schema_);
-  ModuleDescriptor descriptor = Dump(ckp);
-  forked->Open(ckp, descriptor, level);
-  return forked;
 }
 
 void VertexTable::Close() {
@@ -270,7 +260,5 @@ vid_t VertexTable::insert_vertex_pk(const Property& id, timestamp_t ts) {
   v_ts_.InsertVertex(vid, ts);
   return vid;
 }
-
-NEUG_REGISTER_MODULE("vertex_table", VertexTable);
 
 }  // namespace neug

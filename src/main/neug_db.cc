@@ -218,13 +218,17 @@ void NeugDB::openGraphAndSchema() {
 
   thread_num_ = config_.thread_num;
   try {
-    Workspace ws(work_dir_);
-    auto latest_ckp = ws.LatestCheckpoint();
-    if (latest_ckp.has_value()) {
-      LOG(INFO) << "Opening graph from checkpoint " << latest_ckp->path();
-      graph_.Open(*latest_ckp, config_.memory_level);
-    } else {
-      auto ckp = ws.CreateCheckpoint();
+    Workspace ws;
+    ws.Open(work_dir_);
+    if (ws.HeadId() >= 0) {
+      auto& latest_ckp = ws.GetLatestCheckpoint();
+      LOG(INFO) << "Opening graph from checkpoint " << latest_ckp.path();
+      graph_.Open(latest_ckp, config_.memory_level);
+    }
+
+    else {
+      auto ckp_id = ws.CreateCheckpoint();
+      auto& ckp = ws.GetCheckpoint(ckp_id);
       LOG(INFO) << "No checkpoint found, created new checkpoint at "
                 << ckp.path();
       graph_.Open(ckp, config_.memory_level);
@@ -233,7 +237,7 @@ void NeugDB::openGraphAndSchema() {
     LOG(ERROR) << "Exception: " << e.what();
     THROW_INTERNAL_EXCEPTION(e.what());
   }
-}
+}  // namespace neug
 
 void NeugDB::ingestWals() {
   auto wal_uri = parse_wal_uri(config_.wal_uri, work_dir_);
@@ -297,8 +301,10 @@ void NeugDB::createCheckpoint(bool force_compaction, bool reopen) {
     graph_.Compact(config_.compact_csr, config_.csr_reserve_ratio,
                    MAX_TIMESTAMP);
   }
-  Workspace ws(work_dir_);
-  Checkpoint ckp = ws.CreateCheckpoint();
+  Workspace ws;
+  ws.Open(work_dir_);
+  auto ckp_id = ws.CreateCheckpoint();
+  auto& ckp = ws.GetCheckpoint(ckp_id);
   graph_.Dump(ckp, reopen);
   VLOG(1) << "Finish checkpoint: " << ckp.path();
 }

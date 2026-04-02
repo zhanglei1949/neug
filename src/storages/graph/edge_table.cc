@@ -505,12 +505,10 @@ EdgeTable::EdgeTable(EdgeTable&& edge_table)
   table_ = std::move(edge_table.table_);
   table_idx_ = edge_table.table_idx_.load();
   capacity_ = edge_table.capacity_.load();
-  ckp_ = std::move(edge_table.ckp_);
 }
 
 void EdgeTable::Swap(EdgeTable& edge_table) {
   std::swap(meta_, edge_table.meta_);
-  std::swap(ckp_, edge_table.ckp_);
   std::swap(memory_level_, edge_table.memory_level_);
   out_csr_.swap(edge_table.out_csr_);
   in_csr_.swap(edge_table.in_csr_);
@@ -541,10 +539,9 @@ void load_statistic_file(const std::string& statistic_file_path,
   table_idx_atomic.store(size);
 }
 
-void EdgeTable::Open(const Checkpoint& ckp, const ModuleDescriptor& desc,
+void EdgeTable::Open(Checkpoint& ckp, const ModuleDescriptor& desc,
                      MemoryLevel level) {
   memory_level_ = level;
-  ckp_ = ckp;
   if (desc.module_type.empty()) {
     // Fresh init: allocate empty containers for the CSRs so they are ready
     // for resize/insert without stored data.
@@ -553,7 +550,6 @@ void EdgeTable::Open(const Checkpoint& ckp, const ModuleDescriptor& desc,
     out_csr_->Open(ckp, empty_desc, level);
     return;
   }
-  assert(desc.module_type == ModuleTypeName());
   assert(desc.has_sub_module("in_csr"));
   assert(desc.has_sub_module("out_csr"));
   in_csr_->Open(ckp, desc.get_sub_module("in_csr"), level);
@@ -575,12 +571,11 @@ void EdgeTable::Open(const Checkpoint& ckp, const ModuleDescriptor& desc,
           "the graph is not dumped properly");
     }
   }
-  ckp_ = ckp;
 }
 
-ModuleDescriptor EdgeTable::Dump(const Checkpoint& ckp) {
+ModuleDescriptor EdgeTable::Dump(Checkpoint& ckp) {
   ModuleDescriptor desc;
-  desc.module_type = ModuleTypeName();
+  desc.module_type = "edge_table";
   desc.set_sub_module("out_csr", out_csr_->Dump(ckp));
   desc.set_sub_module("in_csr", in_csr_->Dump(ckp));
   if (!meta_->is_bundled()) {
@@ -595,14 +590,6 @@ void EdgeTable::Close() {
   out_csr_->Close();
   in_csr_->Close();
   table_->close();
-}
-
-// TODO(zhanglei): Fix me
-std::unique_ptr<Module> EdgeTable::Fork(const Checkpoint& ckp,
-                                        MemoryLevel level) {
-  auto new_table = std::make_unique<EdgeTable>(meta_);
-  new_table->Open(ckp, new_table->Dump(ckp), level);
-  return new_table;
 }
 
 void EdgeTable::SortByEdgeData(timestamp_t ts) {
@@ -769,7 +756,8 @@ EdgeDataAccessor EdgeTable::get_edge_data_accessor(
   return get_edge_data_accessor(static_cast<int>(prop_ind));
 }
 
-void EdgeTable::AddProperties(const std::vector<std::string>& prop_names,
+void EdgeTable::AddProperties(Checkpoint& ckp,
+                              const std::vector<std::string>& prop_names,
                               const std::vector<DataType>& prop_types,
                               const std::vector<Property>& default_values) {
   if (prop_names.empty()) {
@@ -781,9 +769,9 @@ void EdgeTable::AddProperties(const std::vector<std::string>& prop_names,
     // is empty.
     if (meta_->properties.size() == 1 &&
         meta_->properties[0].id() != DataTypeId::kVarchar) {
-      dropAndCreateNewBundledCSR(nullptr);
+      dropAndCreateNewBundledCSR(ckp, nullptr);
     } else {
-      dropAndCreateNewUnbundledCSR(false);
+      dropAndCreateNewUnbundledCSR(ckp, false);
     }
   } else {
     size_t property_size = table_->get_column_by_id(0)->size();
@@ -802,7 +790,8 @@ void EdgeTable::RenameProperties(const std::vector<std::string>& old_names,
   }
 }
 
-void EdgeTable::DeleteProperties(const std::vector<std::string>& col_names) {
+void EdgeTable::DeleteProperties(Checkpoint& ckp,
+                                 const std::vector<std::string>& col_names) {
   if (meta_->is_bundled()) {
     if (meta_->property_names.size() <= 0) {
       return;
@@ -815,7 +804,7 @@ void EdgeTable::DeleteProperties(const std::vector<std::string>& col_names) {
       }
     }
     if (found) {
-      dropAndCreateNewUnbundledCSR(true);
+      dropAndCreateNewUnbundledCSR(ckp, true);
     }
   } else {
     for (const auto& col : col_names) {
@@ -823,11 +812,11 @@ void EdgeTable::DeleteProperties(const std::vector<std::string>& col_names) {
       VLOG(1) << "delete column " << col;
     }
     if (table_->col_num() == 0) {
-      dropAndCreateNewUnbundledCSR(true);
+      dropAndCreateNewUnbundledCSR(ckp, true);
     } else if (table_->col_num() == 1) {
       auto remaining_col = table_->get_column_by_id(0);
       if (remaining_col->type() != DataTypeId::kVarchar) {
-        dropAndCreateNewBundledCSR(remaining_col);
+        dropAndCreateNewBundledCSR(ckp, remaining_col);
       }
     }
   }
@@ -990,12 +979,12 @@ size_t EdgeTable::Capacity() const {
 }
 
 void EdgeTable::dropAndCreateNewBundledCSR(
-    std::shared_ptr<ColumnBase> remaining_col) {
+    Checkpoint& ckp, std::shared_ptr<ColumnBase> remaining_col) {
   DataTypeId property_type = (remaining_col == nullptr)
                                  ? meta_->properties[0].id()
                                  : remaining_col->type();
-  std::string next_oe_csr_path = ckp_.runtime_dir() + generate_uuid();
-  std::string next_ie_csr_path = ckp_.runtime_dir() + generate_uuid();
+  // std::string next_oe_csr_path = ckp.runtime_dir() + generate_uuid();
+  // std::string next_ie_csr_path = ckp.runtime_dir() + generate_uuid();
 
   std::unique_ptr<CsrBase> new_out_csr, new_in_csr;
   new_out_csr =
@@ -1003,10 +992,10 @@ void EdgeTable::dropAndCreateNewBundledCSR(
   new_in_csr = create_csr(meta_->ie_mutable, meta_->ie_strategy, property_type);
   ModuleDescriptor out_csr_desc;
   ModuleDescriptor in_csr_desc;
-  out_csr_desc.path = next_oe_csr_path;
-  in_csr_desc.path = next_ie_csr_path;
-  new_out_csr->Open(ckp_, out_csr_desc, MemoryLevel::kInMemory);
-  new_in_csr->Open(ckp_, in_csr_desc, MemoryLevel::kInMemory);
+  // out_csr_desc.path = next_oe_csr_path;
+  // in_csr_desc.path = next_ie_csr_path;
+  new_out_csr->Open(ckp, out_csr_desc, MemoryLevel::kInMemory);
+  new_in_csr->Open(ckp, in_csr_desc, MemoryLevel::kInMemory);
 
   new_out_csr->resize(out_csr_->size());
   new_in_csr->resize(in_csr_->size());
@@ -1020,8 +1009,9 @@ void EdgeTable::dropAndCreateNewBundledCSR(
         std::get<1>(edges), std::get<0>(edges), property_type,
         meta_->default_property_values[0], new_in_csr.get());
   } else {
-    auto row_id_col = std::make_shared<ULongColumn>();
-    row_id_col->open_in_memory("");
+    auto row_id_col = std::dynamic_pointer_cast<ULongColumn>(
+        CreateColumn(DataTypeId::kUInt64));
+    row_id_col->Open(ckp, ModuleDescriptor(), MemoryLevel::kInMemory);
     auto edges = out_csr_->batch_export(row_id_col);
     std::vector<Property> remaining_data;
     remaining_data.reserve(row_id_col->size());
@@ -1048,10 +1038,11 @@ void EdgeTable::dropAndCreateNewBundledCSR(
   in_csr_ = std::move(new_in_csr);
 }
 
-void EdgeTable::dropAndCreateNewUnbundledCSR(bool delete_property) {
-  auto next_oe_csr_path = ckp_.runtime_dir() + "/" + generate_uuid();
-  auto next_ie_csr_path = ckp_.runtime_dir() + "/" + generate_uuid();
-  auto next_table_prefix = ckp_.runtime_dir() + "/" + generate_uuid();
+void EdgeTable::dropAndCreateNewUnbundledCSR(Checkpoint& ckp,
+                                             bool delete_property) {
+  auto next_oe_csr_path = ckp.runtime_dir() + "/" + generate_uuid();
+  auto next_ie_csr_path = ckp.runtime_dir() + "/" + generate_uuid();
+  auto next_table_prefix = ckp.runtime_dir() + "/" + generate_uuid();
   // In this method, the edge table must be bundled, so the table must be
   // opened opened. In open_in_memory method, table will try to read the
   // existing table file from checkpoint_dir, but it must not exist.
@@ -1060,8 +1051,8 @@ void EdgeTable::dropAndCreateNewUnbundledCSR(bool delete_property) {
               << meta_->property_names.size();
     ModuleDescriptor table_desc;
     table_desc.path = next_table_prefix;
-    table_->Open(ckp_, table_desc, MemoryLevel::kInMemory,
-                 meta_->property_names, meta_->properties);
+    table_->Open(ckp, table_desc, MemoryLevel::kInMemory, meta_->property_names,
+                 meta_->properties);
   }
 
   std::shared_ptr<ColumnBase> prev_data_col = nullptr;
@@ -1130,7 +1121,5 @@ void EdgeTable::dropAndCreateNewUnbundledCSR(bool delete_property) {
   out_csr_ = std::move(new_out_csr);
   in_csr_ = std::move(new_in_csr);
 }
-
-NEUG_REGISTER_MODULE("edge_table", EdgeTable);
 
 }  // namespace neug

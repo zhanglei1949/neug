@@ -78,7 +78,7 @@ class VertexSet {
 };
 
 class PropertyGraph;
-class VertexTable : public Module {
+class VertexTable {
  public:
   VertexTable()
       : table_(std::make_unique<Table>()),
@@ -114,14 +114,12 @@ class VertexTable : public Module {
   }
 
   // Module interface (Checkpoint-based) — the single public Open.
-  void Open(const Checkpoint& ckp, const ModuleDescriptor& descriptor,
-            MemoryLevel memory_level) override;
-  ModuleDescriptor Dump(const Checkpoint& ckp) override;
+  void Open(Checkpoint& ckp, const ModuleDescriptor& descriptor,
+            MemoryLevel memory_level);
+  ModuleDescriptor Dump(Checkpoint& ckp);
 
-  std::string ModuleTypeName() const override { return "vertex_table"; }
-  void Close() override;
-  std::unique_ptr<Module> Fork(const Checkpoint& ckp,
-                               MemoryLevel level) override;
+  std::string ModuleTypeName() const { return "vertex_table"; }
+  void Close();
 
   /**
    * @brief Dump all components to @p target_dir (a flat directory).

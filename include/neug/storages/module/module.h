@@ -66,14 +66,14 @@ class Module {
    * @param ckp        The checkpoint that provides snapshot / runtime paths.
    * @param descriptor Metadata produced by a prior Dump call.
    */
-  virtual void Open(const Checkpoint& ckp, const ModuleDescriptor& descriptor,
+  virtual void Open(Checkpoint& ckp, const ModuleDescriptor& descriptor,
                     MemoryLevel level) = 0;
 
   /**
    * @brief Persist the current module state to a UUID directory under
    * @p ckp.runtime_dir(), returning an updated descriptor.
    */
-  virtual ModuleDescriptor Dump(const Checkpoint& ckp) = 0;
+  virtual ModuleDescriptor Dump(Checkpoint& ckp) = 0;
 
   /**
    * @brief Release all in-memory buffers and file handles.
@@ -86,7 +86,7 @@ class Module {
    *
    * @return A newly allocated Module owning its forked state.
    */
-  virtual std::unique_ptr<Module> Fork(const Checkpoint& ckp,
+  virtual std::unique_ptr<Module> Fork(Checkpoint& ckp,
                                        MemoryLevel level) = 0;
 
   /**

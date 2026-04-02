@@ -34,7 +34,6 @@ limitations under the License.
 #include "glog/logging.h"
 #include "neug/storages/container/container_utils.h"
 #include "neug/storages/container/i_container.h"
-#include "neug/storages/container_utils.h"
 #include "neug/storages/module/module.h"
 #include "neug/storages/workspace.h"
 #include "neug/utils/bitset.h"
@@ -199,7 +198,7 @@ template <typename INDEX_T>
 class LFIndexer;
 
 template <typename INDEX_T>
-class LFIndexer : public Module {
+class LFIndexer {
   static constexpr INDEX_T sentinel = std::numeric_limits<INDEX_T>::max();
 
  public:
@@ -229,12 +228,7 @@ class LFIndexer : public Module {
 
   MemoryLevel memory_level() const { return memory_level_; }
 
-  // ── Module interface ───────────────────────────────────────────────────
-  std::string ModuleTypeName() const override { return "lf_indexer"; }
-
-  void Close() override { close(); }
-
-  void Open(const Checkpoint& ckp, const ModuleDescriptor& desc,
+  void Open(Checkpoint& ckp, const ModuleDescriptor& desc,
             MemoryLevel mem_level) override {
     memory_level_ = mem_level;
     // Restore meta fields (default to 0 / empty on fresh init)
@@ -254,23 +248,12 @@ class LFIndexer : public Module {
             ? static_cast<DataTypeId>(std::stoul(desc.get("type").value()))
             : DataTypeId::kEmpty;
     init(type);
-    // Load keys; if no sub-module recorded, keys_ gets an empty anonymous
-    // container (AnonMMap) ready for insert via reserve().
-    if (desc.has_sub_module("keys")) {
-      keys_->Open(ckp, desc.sub_modules().at("keys"), mem_level);
-    } else {
-      ModuleDescriptor fresh_keys_desc;
-      keys_->Open(ckp, fresh_keys_desc, mem_level);
-    }
-    // Load indices; if no sub-module recorded, create an empty container.
-    const std::string indices_path = desc.has_sub_module("indices")
-                                         ? desc.sub_modules().at("indices").path
-                                         : "";
-    indices_ = ckp.OpenFile(indices_path, mem_level);
+    keys_ = ckp.OpenFile(desc.sub_modules().at("keys").path, mem_level);
+    indices_ = ckp.OpenFile(desc.get_sub_module("indices").path, mem_level);
     indices_size_ = indices_->GetDataSize() / sizeof(INDEX_T);
   }
 
-  ModuleDescriptor Dump(const Checkpoint& ckp) override {
+  ModuleDescriptor Dump(Checkpoint& ckp) override {
     ModuleDescriptor out_desc;
     out_desc.type = ModuleTypeName();
     out_desc.size = static_cast<uint64_t>(num_elements_.load());
@@ -283,18 +266,6 @@ class LFIndexer : public Module {
     out_desc.set("hash_policy",
                  std::to_string(hash_policy_.get_mod_function_index()));
     return out_desc;
-  }
-
-  /**
-   * Create an independent copy of this indexer into a UUID sub-dir of ckp.
-   * The fork descriptor's path is the absolute path to the new snapshot dir.
-   */
-  std::unique_ptr<Module> Fork(const Checkpoint& ckp,
-                               MemoryLevel level) override {
-    auto desc = Dump(ckp);
-    auto forked = std::make_unique<LFIndexer<INDEX_T>>();
-    forked->Open(ckp, desc, level);
-    return forked;
   }
 
   void swap(LFIndexer& other) {
@@ -488,9 +459,9 @@ class LFIndexer : public Module {
     return keys_->get_prop(index);
   }
 
-  void close() {
+  void Close() {
     if (keys_) {
-      keys_->close();
+      keys_->Close();
     }
     if (indices_) {
       indices_->Close();
@@ -502,41 +473,6 @@ class LFIndexer : public Module {
     close();
     // TODO(zhanglei): delete files in work_dir
   }
-
-  // void dump_meta(const std::string& filename) const {
-  //   InArchive arc;
-  //   arc << get_type() << num_elements_.load() << num_slots_minus_one_
-  //       << hash_policy_.get_mod_function_index();
-  //   FILE* fout = fopen(filename.c_str(), "wb");
-  //   fwrite(arc.GetBuffer(), sizeof(char), arc.GetSize(), fout);
-  //   fflush(fout);
-  //   fclose(fout);
-  // }
-
-  // void load_meta(const std::string& filename) {
-  //   if (!std::filesystem::exists(filename)) {
-  //     num_elements_.store(0);
-  //     return;
-  //   }
-  //   OutArchive arc;
-  //   FILE* fin = fopen(filename.c_str(), "r");
-  //   size_t meta_file_size = std::filesystem::file_size(filename);
-  //   std::vector<char> buf(meta_file_size);
-  //   CHECK_EQ(fread(buf.data(), sizeof(char), meta_file_size, fin),
-  //            meta_file_size);
-  //   arc.SetSlice(buf.data(), meta_file_size);
-  //   size_t mod_function_index;
-  //   DataTypeId type;
-  //   arc >> type;
-  //   size_t num_elements;
-  //   arc >> num_elements;
-
-  //   num_elements_.store(num_elements);
-  //   arc >> num_slots_minus_one_ >> mod_function_index;
-  //   init(type);
-  //   hash_policy_.set_mod_function_by_index(mod_function_index);
-  //   fclose(fin);
-  // }
 
   // get keys
   const ColumnBase& get_keys() const { return *keys_; }
@@ -1036,60 +972,5 @@ struct _move_data<std::string_view, INDEX_T> {
     }
   }
 };
-
-template <typename KEY_T, typename INDEX_T>
-void build_lf_indexer(const IdIndexer<KEY_T, INDEX_T>& input,
-                      const std::string& filename, LFIndexer<INDEX_T>& lf,
-                      const std::string& snapshot_dir,
-                      const std::string& work_dir, DataTypeId type) {
-  size_t size = input.keys_.size();
-  lf.init(type);
-  lf.keys_->open(filename + ".keys", "", work_dir);
-  lf.keys_->resize(size);
-  _move_data<KEY_T, INDEX_T>()(input.keys_, *lf.keys_, size);
-  lf.num_elements_.store(size);
-
-  auto indices_path = work_dir + "/" + filename + ".indices";
-  file_utils::create_file(indices_path, sizeof(FileHeader));
-  lf.indices_ = OpenContainer(indices_path,
-                              tmp_dir(work_dir) + "/" + filename + ".indices",
-                              MemoryLevel::kSyncToFile);
-  lf.indices_->Resize((input.num_slots_minus_one_ + 1) * sizeof(INDEX_T));
-  auto* lf_indices_ptr = reinterpret_cast<INDEX_T*>(lf.indices_->GetData());
-  lf.indices_size_ = lf.indices_->GetDataSize() / sizeof(INDEX_T);
-
-  lf.hash_policy_.set_mod_function_by_index(
-      input.hash_policy_.get_mod_function_index());
-  lf.num_slots_minus_one_ = input.num_slots_minus_one_;
-  memcpy(lf_indices_ptr, input.indices_.data(),
-         lf.indices_size_ * sizeof(INDEX_T));
-
-  std::vector<INDEX_T> residuals;
-  for (INDEX_T idx = 0; idx < input.size(); ++idx) {
-    if (input.indices_[idx] != LFIndexer<INDEX_T>::sentinel) {
-      residuals.push_back(input.indices_[idx]);
-    }
-  }
-  for (const auto& lid : residuals) {
-    auto oid = input.keys_[lid];
-    size_t index = input.hash_policy_.index_for_hash(
-        input.hasher_(oid), input.num_slots_minus_one_);
-    while (true) {
-      if (lf_indices_ptr[index] == lid) {
-        break;
-      } else if (lf_indices_ptr[index] == LFIndexer<INDEX_T>::sentinel) {
-        lf_indices_ptr[index] = lid;
-        break;
-      }
-      index = (index + 1) % (input.num_slots_minus_one_ + 1);
-    }
-  }
-  lf.dump_meta(snapshot_dir + "/" + filename + ".meta");
-
-  lf.keys_->dump(snapshot_dir + "/" + filename + ".keys");
-  std::filesystem::remove(work_dir + "/" + filename + ".meta");
-  lf.keys_->close();
-  lf.keys_->open(filename + ".keys", snapshot_dir, work_dir);
-}
 
 }  // namespace neug

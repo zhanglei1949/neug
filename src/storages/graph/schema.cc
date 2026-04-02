@@ -2279,7 +2279,7 @@ OutArchive& operator>>(OutArchive& archive, EdgeSchema& e_schema) {
 // Module overrides
 // ---------------------------------------------------------------------------
 
-void Schema::Open(const Checkpoint& ckp, const ModuleDescriptor& descriptor,
+void Schema::Open(Checkpoint& ckp, const ModuleDescriptor& descriptor,
                   MemoryLevel level) {
   // descriptor.path is the directory containing the dumped schema file.
   assert(descriptor.type == "schema");
@@ -2288,7 +2288,7 @@ void Schema::Open(const Checkpoint& ckp, const ModuleDescriptor& descriptor,
   Deserialize(is);
 }
 
-ModuleDescriptor Schema::Dump(const Checkpoint& ckp) {
+ModuleDescriptor Schema::Dump(Checkpoint& ckp) {
   std::string uuid = generate_uuid();
   std::string target_dir = ckp.runtime_dir() + "/" + uuid;
   std::filesystem::create_directories(target_dir);
@@ -2318,7 +2318,7 @@ void Schema::Close() {
 }
 
 // TODO(zhanglei): Fix me
-std::unique_ptr<Module> Schema::Fork(const Checkpoint& /*ckp*/,
+std::unique_ptr<Module> Schema::Fork(Checkpoint& /*ckp*/,
                                      MemoryLevel /*level*/) {
   return std::make_unique<Schema>(*this);
 }

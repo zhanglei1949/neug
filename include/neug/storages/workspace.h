@@ -19,13 +19,16 @@
 #include <fstream>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
+#include <mutex>
+#include "neug/storages/container/container_utils.h"
 #include "neug/storages/container/i_container.h"
-#include "neug/storages/container_utils.h"
 #include "neug/storages/module_descriptor.h"
 #include "neug/storages/snapshot_meta.h"
+#include "neug/utils/uuid.h"
 
 namespace neug {
 
@@ -37,10 +40,8 @@ namespace neug {
  *   "a3b8c1d2-e4f5-6789-abcd-ef0123456789"
  */
 inline std::string generate_uuid() {
-  std::ifstream f("/proc/sys/kernel/random/uuid");
-  std::string uuid;
-  std::getline(f, uuid);
-  return uuid;
+  static UUIDGenerator generator;
+  return generator.generate();
 }
 
 /**
@@ -106,7 +107,10 @@ class Checkpoint {
    *   MAP_PRIVATE; otherwise an anonymous mapping is returned.
    */
   std::unique_ptr<IDataContainer> OpenFile(const std::string& file_path,
-                                           MemoryLevel level) const;
+                                           MemoryLevel level);
+
+  std::unique_ptr<IDataContainer> CreateRuntimeContainer(size_t size,
+                                                         MemoryLevel level);
 
   /**
    * @brief Commit a data container to a persistent snapshot file and return
@@ -117,7 +121,7 @@ class Checkpoint {
    * types the data is written to a freshly generated UUID file under
    * runtime_dir().
    */
-  ModuleDescriptor Commit(IDataContainer& buffer) const;
+  ModuleDescriptor Commit(IDataContainer& buffer);
 
   /**
    * @brief Create the checkpoint's sub-directories if they do not exist.
@@ -143,9 +147,20 @@ class Checkpoint {
 
   bool IsEmpty() const { return path_.empty() || id_ == 0; }
 
+  std::string create_runtime_object();
+
+  void CommitRuntimeObject(const std::string& uuid) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    uncommitted_runtime_objects_.erase(uuid);
+    runtime_objects_.insert(uuid);
+  }
+
  private:
   std::string path_;
   uint32_t id_;
+  mutable std::mutex mutex_;
+  std::set<std::string> runtime_objects_;
+  std::set<std::string> uncommitted_runtime_objects_;
 };
 
 // ---------------------------------------------------------------------------
@@ -170,73 +185,81 @@ class Checkpoint {
  */
 class Workspace {
  public:
-  /// Directory-name prefix for checkpoint folders.
-  static constexpr const char* kCheckpointPrefix = "checkpoint-";
-  /// Zero-padded width for the numeric ID part.
-  static constexpr int kCheckpointIdWidth = 5;
-
-  explicit Workspace(std::string db_dir);
-
-  /// Path of the top-level database directory.
-  const std::string& db_dir() const { return db_dir_; }
+  Workspace();
+  ~Workspace();
 
   /**
-   * @brief List all checkpoint IDs found in db_dir, sorted ascending.
-   * Returns an empty vector if no checkpoints exist yet.
+   * @brief Open a database directory.
+   * @param db_dir Path to the database directory
    */
-  std::vector<uint32_t> ListCheckpointIds() const;
+  void Open(const std::string& db_dir);
 
   /**
-   * @brief Return the checkpoint with the highest ID, or std::nullopt if none.
+   * @brief Close the workspace and release resources.
    */
-  std::optional<Checkpoint> LatestCheckpoint() const;
+  void Close();
 
   /**
-   * @brief Get a specific checkpoint by ID.
-   * @note Does not verify that the directory actually exists.
+   * @brief Get the number of checkpoints in the workspace.
    */
-  Checkpoint GetCheckpoint(uint32_t id) const;
+  size_t NumCheckpoints() const;
 
   /**
-   * @brief Allocate a new checkpoint directory (id = max_existing + 1, or 1
-   * if no checkpoints exist) and create its sub-directories.
-   * @return The newly created Checkpoint.
+   * @brief Get the ID of the most recent checkpoint.
+   * @return -1 if no checkpoints exist
    */
-  Checkpoint CreateCheckpoint() const;
+  int HeadId() const;
 
   /**
-   * @brief Format a checkpoint ID as a zero-padded string, e.g. "00001".
+   * @brief Create a new checkpoint.
+   * @return The ID of the new checkpoint
    */
-  static std::string FormatId(uint32_t id);
+  int CreateCheckpoint();
 
   /**
-   * @brief Build the full checkpoint directory path for a given ID.
+   * @brief Get a checkpoint by ID (const version).
    */
-  std::string CheckpointPath(uint32_t id) const;
+  Checkpoint& GetCheckpoint(int id) const;
+
+  /**
+   * @brief Get a checkpoint by ID.
+   */
+  Checkpoint& GetCheckpoint(int id);
+
+  Checkpoint& GetLatestCheckpoint() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (checkpoints_.empty()) {
+      throw std::runtime_error("No checkpoints available");
+    }
+    return *checkpoints_.rbegin()->second;
+  }
 
  private:
   std::string db_dir_;
+  std::map<int, std::unique_ptr<Checkpoint>> checkpoints_;
+  mutable std::mutex mutex_;
 };
 
 inline std::unique_ptr<IDataContainer> Checkpoint::OpenFile(
-    const std::string& file_path, MemoryLevel level) const {
+    const std::string& file_path, MemoryLevel level) {
   std::string new_path = "";
   if (!file_path.empty() && std::filesystem::exists(file_path)) {
-    new_path = runtime_dir() + "/" + generate_uuid();
+    new_path = runtime_dir() + "/" + create_runtime_object();
   }
-  return prepare_and_open_container(file_path, new_path, level);
+  return OpenContainer(file_path, new_path, level);
 }
 
-inline ModuleDescriptor Checkpoint::Commit(IDataContainer& buffer) const {
+inline ModuleDescriptor Checkpoint::Commit(IDataContainer& buffer) {
   ModuleDescriptor desc;
   if (buffer.GetContainerType() == ContainerType::kFileSharedMMap) {
     // MAP_SHARED container: data is already persisted in its backing file.
     // Just sync dirty pages and record the existing path.
     buffer.Sync();
     desc.path = buffer.GetPath();
+    buffer.Close();
   } else {
     // Anonymous or MAP_PRIVATE container: write data out to a new file.
-    auto dest = runtime_dir() + "/" + generate_uuid();
+    auto dest = runtime_dir() + "/" + create_runtime_object();
     buffer.Dump(dest);
     buffer.Close();
     desc.path = dest;

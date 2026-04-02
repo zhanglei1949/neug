@@ -26,14 +26,14 @@ class AbstractPropertyGraphLoader : public IFragmentLoader {
  public:
   AbstractPropertyGraphLoader(const std::string& work_dir, const Schema& schema,
                               const LoadingConfig& loading_config)
-      : ws_(work_dir),
-        schema_(schema),
+      : schema_(schema),
         loading_config_(loading_config),
         thread_num_(loading_config_.GetParallelism()) {
     // TODO(zhanglei): Determine the logic here.
-    assert(ws_.ListCheckpointIds().empty());
+    ws_.Open(work_dir);
+    assert(ws_.NumCheckpoints() == 0);
     auto ckp = ws_.CreateCheckpoint();
-    graph_.Open(ckp, MemoryLevel::kInMemory);
+    graph_.Open(ws_.GetCheckpoint(ckp), MemoryLevel::kInMemory);
   }
 
   virtual ~AbstractPropertyGraphLoader() = default;

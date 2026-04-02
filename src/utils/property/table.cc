@@ -51,7 +51,7 @@ void Table::initColumns(const std::vector<std::string>& col_name,
   columns_.resize(col_id_map_.size());
 }
 
-void Table::Open(const Checkpoint& ckp, const ModuleDescriptor& descriptor,
+void Table::Open(Checkpoint& ckp, const ModuleDescriptor& descriptor,
                  MemoryLevel memory_level,
                  const std::vector<std::string>& col_name,
                  const std::vector<DataType>& property_types) {
@@ -66,7 +66,7 @@ void Table::Open(const Checkpoint& ckp, const ModuleDescriptor& descriptor,
   ckp_ = ckp;
 }
 
-ModuleDescriptor Table::Dump(const Checkpoint& ckp) {
+ModuleDescriptor Table::Dump(Checkpoint& ckp) {
   int i = 0;
   ModuleDescriptor desc;
   for (auto col : columns_) {
@@ -112,21 +112,6 @@ void Table::add_columns(const std::vector<std::string>& col_names,
   }
   for (size_t i = old_size; i < columns_.size(); ++i) {
     columns_[i]->Open(ckp_, ModuleDescriptor(), MemoryLevel::kInMemory);
-    // if (memory_level == MemoryLevel::kSyncToFile) {
-    //   columns_[i]->open(name_ + ".col_" + std::to_string(i), "",
-    //                     tmp_dir(work_dir_));
-    // } else if (memory_level == MemoryLevel::kInMemory) {
-    //   columns_[i]->open_in_memory(tmp_dir(work_dir_) + "/" + name_ + ".col_"
-    //   +
-    //                               std::to_string(i));
-    // } else if (memory_level == MemoryLevel::kHugePagePrefered) {
-    //   columns_[i]->open_with_hugepages(tmp_dir(work_dir_) + "/" + name_ +
-    //                                    ".col_" + std::to_string(i));
-    // } else {
-    //   THROW_NOT_IMPLEMENTED_EXCEPTION(
-    //       "Unsupported memory level: " +
-    //       std::to_string(static_cast<int>(memory_level)));
-    // }
     columns_[i]->resize(capacity, default_property_values[i - old_size]);
   }
   buildColumnPtrs();
@@ -320,8 +305,7 @@ void Table::set_name(const std::string& name) { name_ = name; }
 
 void Table::set_work_dir(const std::string& work_dir) { work_dir_ = work_dir; }
 
-std::unique_ptr<Table> Table::Fork(const Checkpoint& ckp,
-                                   MemoryLevel level) const {
+std::unique_ptr<Table> Table::Fork(Checkpoint& ckp, MemoryLevel level) const {
   auto new_table = std::make_unique<Table>();
   new_table->col_id_map_ = col_id_map_;
   new_table->col_names_ = col_names_;

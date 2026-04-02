@@ -49,7 +49,7 @@ class MutableCsr : public TypedCsrBase<EDATA_T> {
   using nbr_t = MutableNbr<EDATA_T>;
 
   MutableCsr() : locks_(nullptr) {}
-  ~MutableCsr() { close(); }
+  ~MutableCsr() { Close(); }
 
   CsrType csr_type() const override { return CsrType::kMutable; }
 
@@ -86,10 +86,10 @@ class MutableCsr : public TypedCsrBase<EDATA_T> {
     return res;
   }
 
-  void Open(const Checkpoint& ckp, const ModuleDescriptor& descriptor,
+  void Open(Checkpoint& ckp, const ModuleDescriptor& descriptor,
             MemoryLevel level) override;
 
-  ModuleDescriptor Dump(const Checkpoint& ckp) override;
+  ModuleDescriptor Dump(Checkpoint& ckp) override;
 
   void reset_timestamp() override;
 
@@ -190,8 +190,7 @@ class MutableCsr : public TypedCsrBase<EDATA_T> {
     return std::make_tuple(std::move(src_list), std::move(dst_list));
   }
 
-  std::unique_ptr<Module> Fork(const Checkpoint& ckp,
-                               MemoryLevel level) override {
+  std::unique_ptr<Module> Fork(Checkpoint& ckp, MemoryLevel level) override {
     auto desc = Dump(ckp);
     auto new_csr = std::make_unique<MutableCsr<EDATA_T>>();
     new_csr->Open(ckp, desc, level);
@@ -203,13 +202,6 @@ class MutableCsr : public TypedCsrBase<EDATA_T> {
   }
 
  private:
-  void load_meta(const std::string& prefix);
-
-  void dump_meta(const std::string& prefix) const;
-
-  void open_internal(const std::string& snapshot_prefix,
-                     const std::string& tmp_prefix, MemoryLevel mem_level);
-
   SpinLock* locks_;
   std::unique_ptr<IDataContainer> adj_list_buffer_;
   std::unique_ptr<IDataContainer> adj_list_size_;
@@ -232,7 +224,7 @@ class SingleMutableCsr : public TypedCsrBase<EDATA_T> {
   using nbr_t = MutableNbr<EDATA_T>;
 
   SingleMutableCsr() {}
-  ~SingleMutableCsr() { close(); }
+  ~SingleMutableCsr() { Close(); }
 
   CsrType csr_type() const override { return CsrType::kSingleMutable; }
 
@@ -262,10 +254,10 @@ class SingleMutableCsr : public TypedCsrBase<EDATA_T> {
     return cnt;
   }
 
-  void Open(const Checkpoint& ckp, const ModuleDescriptor& descriptor,
+  void Open(Checkpoint& ckp, const ModuleDescriptor& descriptor,
             MemoryLevel) override;
 
-  ModuleDescriptor Dump(const Checkpoint& ckp) override;
+  ModuleDescriptor Dump(Checkpoint& ckp) override;
 
   void reset_timestamp() override;
 
@@ -319,8 +311,7 @@ class SingleMutableCsr : public TypedCsrBase<EDATA_T> {
     return {};
   }
 
-  std::unique_ptr<Module> Fork(const Checkpoint& ckp,
-                               MemoryLevel level) override {
+  std::unique_ptr<Module> Fork(Checkpoint& ckp, MemoryLevel level) override {
     auto desc = Dump(ckp);
     auto new_csr = std::make_unique<SingleMutableCsr<EDATA_T>>();
     new_csr->Open(ckp, desc, level);
@@ -363,10 +354,10 @@ class EmptyCsr : public TypedCsrBase<EDATA_T> {
 
   size_t edge_num() const override { return 0; }
 
-  void Open(const Checkpoint& ckp, const ModuleDescriptor& descriptor,
+  void Open(Checkpoint& ckp, const ModuleDescriptor& descriptor,
             MemoryLevel /* level */) override {}
 
-  ModuleDescriptor Dump(const Checkpoint& ckp) override {
+  ModuleDescriptor Dump(Checkpoint& ckp) override {
     ModuleDescriptor desc;
     desc.module_type = ModuleTypeName();
     return desc;
@@ -413,8 +404,7 @@ class EmptyCsr : public TypedCsrBase<EDATA_T> {
     return {};
   }
 
-  std::unique_ptr<Module> Fork(const Checkpoint& ckp,
-                               MemoryLevel level) override {
+  std::unique_ptr<Module> Fork(Checkpoint& ckp, MemoryLevel level) override {
     return std::make_unique<EmptyCsr<EDATA_T>>();
   }
 

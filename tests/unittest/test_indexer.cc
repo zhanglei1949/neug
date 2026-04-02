@@ -99,8 +99,10 @@ class LFIndexerTest : public ::testing::Test {
 TEST_F(LFIndexerTest, SupportsCoreMutableInterfacesInMemory) {
   EXPECT_EQ(LFIndexer<uint32_t>::prefix(), "indexer");
 
-  Workspace ws(test_dir_);
-  Checkpoint ckp = ws.CreateCheckpoint();
+  Workspace ws;
+  ws.Open(test_dir_);
+  auto ckp_id = ws.CreateCheckpoint();
+  auto& ckp = ws.GetCheckpoint(ckp_id);
 
   LFIndexer<uint32_t> indexer;
   {
@@ -148,8 +150,10 @@ TEST_F(LFIndexerTest, SupportsCoreMutableInterfacesInMemory) {
 TEST_F(LFIndexerTest, DumpsAndOpensAcrossBackends) {
   const std::string name = "persisted_index";
 
-  Workspace ws(test_dir_);
-  Checkpoint ckp = ws.CreateCheckpoint();
+  Workspace ws;
+  ws.Open(test_dir_);
+  auto ckp_id = ws.CreateCheckpoint();
+  auto& ckp = ws.GetCheckpoint(ckp_id);
 
   ModuleDescriptor desc;
   {
@@ -202,8 +206,10 @@ TEST_F(LFIndexerTest, DumpsAndOpensAcrossBackends) {
 }
 
 TEST_F(LFIndexerTest, SupportsBuildEmptySwapAndVarcharKeys) {
-  Workspace ws(test_dir_);
-  Checkpoint ckp = ws.CreateCheckpoint();
+  Workspace ws;
+  ws.Open(test_dir_);
+  auto ckp_id = ws.CreateCheckpoint();
+  auto& ckp = ws.GetCheckpoint(ckp_id);
 
   // Verify that an empty indexer can be initialised and dumped to disk.
   LFIndexer<uint32_t> empty_indexer;

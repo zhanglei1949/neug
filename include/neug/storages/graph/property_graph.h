@@ -123,7 +123,7 @@ class PropertyGraph {
    * VertexTable, EdgeTable) via Module::Open.  If the checkpoint contains no
    * meta the graph starts empty.
    */
-  void Open(const Checkpoint& ckp, MemoryLevel memory_level);
+  void Open(Checkpoint& ckp, MemoryLevel memory_level);
 
   void Compact(bool compact_csr, float reserve_ratio, timestamp_t ts);
 

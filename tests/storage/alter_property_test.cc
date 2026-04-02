@@ -396,6 +396,9 @@ TEST(DatabaseTest, TestAlterProperty) {
         "MODERN_GRAPH_DATA_DIR environment variable is not set");
   }
   LOG(INFO) << "Data directory: " << data_dir;
-  neug::Workspace ws(data_path);
-  neug::testOpenEmptyGraph(ws.CreateCheckpoint(), data_dir);
+  neug::Workspace ws;
+  ws.Open(data_path);
+  auto ckp_id = ws.CreateCheckpoint();
+  auto& ckp = ws.GetCheckpoint(ckp_id);
+  neug::testOpenEmptyGraph(ckp, data_dir);
 }

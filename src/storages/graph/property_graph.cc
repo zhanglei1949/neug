@@ -429,7 +429,7 @@ Status PropertyGraph::AddEdgeProperties(
   }
 
   auto& edge_table = edge_tables_.at(index);
-  edge_table.AddProperties(add_property_names, add_property_types,
+  edge_table.AddProperties(ckp_, add_property_names, add_property_types,
                            add_default_property_values);
 
   return neug::Status::OK();
@@ -608,7 +608,7 @@ Status PropertyGraph::DeleteEdgeProperties(
                       "] to [" + dst_type_name +
                       "] does not exist, cannot delete properties.");
   }
-  edge_tables_.at(index).DeleteProperties(delete_property_names);
+  edge_tables_.at(index).DeleteProperties(ckp_, delete_property_names);
   schema_.DeleteEdgeProperties(src_type_name, dst_type_name, edge_type_name,
                                delete_property_names);
   return neug::Status::OK();
@@ -769,7 +769,7 @@ Status PropertyGraph::BatchDeleteEdges(
   return Status::OK();
 }
 
-void PropertyGraph::Open(const Checkpoint& ckp, MemoryLevel memory_level) {
+void PropertyGraph::Open(Checkpoint& ckp, MemoryLevel memory_level) {
   Clear();
   memory_level_ = memory_level;
 

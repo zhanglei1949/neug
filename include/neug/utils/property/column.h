@@ -56,14 +56,6 @@ class ColumnBase : public Module {
  public:
   virtual ~ColumnBase() {}
 
-  // Legacy path-based open/dump API used by LFIndexer (bypasses Checkpoint).
-  virtual void open(const std::string& name, const std::string& snapshot_dir,
-                    const std::string& work_dir) {}
-  virtual void open_in_memory(const std::string& name) {}
-  virtual void open_with_hugepages(const std::string& name) {}
-
-  virtual void close() = 0;
-
   virtual size_t size() const = 0;
 
   virtual void resize(size_t size) = 0;
@@ -85,8 +77,6 @@ class ColumnBase : public Module {
   }
 
   virtual void ingest(uint32_t index, OutArchive& arc) = 0;
-
-  void Close() override { close(); }
 };
 
 template <typename T>
@@ -95,16 +85,16 @@ class TypedColumn : public ColumnBase {
   explicit TypedColumn() : size_(0) {}
   ~TypedColumn() { close(); }
 
-  void Open(const Checkpoint& ckp, const ModuleDescriptor& desc,
+  void Open(Checkpoint& ckp, const ModuleDescriptor& desc,
             MemoryLevel level) override {
     size_ = desc.size;
     buffer_ = ckp.OpenFile(desc.path, level);
     size_ = buffer_->GetDataSize() / sizeof(T);
   }
 
-  void close() override { buffer_.reset(); }
+  void Close() override { buffer_.reset(); }
 
-  ModuleDescriptor Dump(const Checkpoint& ckp) override {
+  ModuleDescriptor Dump(Checkpoint& ckp) override {
     // TODO(zhanglei): When DataContainer related code is merged, we need to use
     // IsDirty() to check whether we need to dump the column or not. If the
     // column is not dirty, we can skip dumping and just return the existing
@@ -175,8 +165,7 @@ class TypedColumn : public ColumnBase {
   const IDataContainer& buffer() const { return *buffer_; }
   size_t buffer_size() const { return size_; }
 
-  std::unique_ptr<Module> Fork(const Checkpoint& ckp,
-                               MemoryLevel level) override {
+  std::unique_ptr<Module> Fork(Checkpoint& ckp, MemoryLevel level) override {
     // TODO(zhanglei): Current implementation is not correct, fix it
     auto new_col = std::make_unique<TypedColumn<T>>();
     auto desc = Dump(ckp);
@@ -213,13 +202,11 @@ class TypedColumn<EmptyType> : public ColumnBase {
   explicit TypedColumn() {}
   ~TypedColumn() {}
 
-  void Open(const Checkpoint& ckp, const ModuleDescriptor& desc,
+  void Open(Checkpoint& ckp, const ModuleDescriptor& desc,
             MemoryLevel level) override {}
 
-  ModuleDescriptor Dump(const Checkpoint& ckp) override {
-    return ModuleDescriptor();
-  }
-  void close() override {}
+  ModuleDescriptor Dump(Checkpoint& ckp) override { return ModuleDescriptor(); }
+  void Close() override {}
   size_t size() const override { return 0; }
   void resize(size_t size) override {}
   void resize(size_t size, const Property& default_value) override {}
@@ -239,8 +226,7 @@ class TypedColumn<EmptyType> : public ColumnBase {
 
   void ingest(uint32_t index, OutArchive& arc) override {}
 
-  std::unique_ptr<Module> Fork(const Checkpoint& ckp,
-                               MemoryLevel level) override {
+  std::unique_ptr<Module> Fork(Checkpoint& ckp, MemoryLevel level) override {
     return std::make_unique<TypedColumn<EmptyType>>();
   }
 
@@ -272,22 +258,20 @@ class TypedColumn<std::string_view> : public ColumnBase {
     type_ = rhs.type_;
   }
 
-  ~TypedColumn() { close(); }
+  ~TypedColumn() { Close(); }
 
-  void Open(const Checkpoint& ckp, const ModuleDescriptor& desc,
+  void Open(Checkpoint& ckp, const ModuleDescriptor& desc,
             MemoryLevel level) override {
     size_ = desc.size;
-    if (desc.has_sub_module("items") && desc.has_sub_module("data")) {
-      // New layout: each buffer is stored as an independent sub-module whose
-      // descriptor was produced by Checkpoint::Commit().
-      items_buffer_ = ckp.OpenFile(desc.sub_modules().at("items").path, level);
-      data_buffer_ = ckp.OpenFile(desc.sub_modules().at("data").path, level);
-    } else {
-      // Legacy layout: desc.path is a common prefix; suffixes .items/.data are
-      // appended.  Kept for reading checkpoints produced by older builds.
-      items_buffer_ = ckp.OpenFile(desc.path + ".items", level);
-      data_buffer_ = ckp.OpenFile(desc.path + ".data", level);
-    }
+    // if (desc.has_sub_module("items") && desc.has_sub_module("data")) {
+    //   // New layout: each buffer is stored as an independent sub-module whose
+    //   // descriptor was produced by Checkpoint::Commit().
+    //   items_buffer_ = ckp.OpenFile(desc.sub_modules().at("items").path,
+    //   level); data_buffer_ = ckp.OpenFile(desc.sub_modules().at("data").path,
+    //   level);
+    // }
+    items_buffer_ = ckp.OpenFile(desc.get_sub_module("items").path, level);
+    data_buffer_ = ckp.OpenFile(desc.get_sub_module("data").path, level);
     CHECK(size_ == items_buffer_->GetDataSize() / sizeof(string_item));
     // Restore the append-position cursor.  New format stores it as an extra
     // field; fall back to reading the legacy .pos side-car file.
@@ -298,7 +282,7 @@ class TypedColumn<std::string_view> : public ColumnBase {
     }
   }
 
-  void close() override {
+  void Close() override {
     if (items_buffer_) {
       items_buffer_->Close();
     }
@@ -307,7 +291,7 @@ class TypedColumn<std::string_view> : public ColumnBase {
     }
   }
 
-  ModuleDescriptor Dump(const Checkpoint& ckp) override {
+  ModuleDescriptor Dump(Checkpoint& ckp) override {
     ModuleDescriptor desc;
     desc.size = size_;
     desc.type = StorageTypeName<std::string_view>::value;
@@ -321,7 +305,7 @@ class TypedColumn<std::string_view> : public ColumnBase {
         // We stream the compacted bytes to a fresh UUID file under runtime/
         // and build the data sub-module descriptor manually, because there
         // is no IDataContainer holding the compacted bytes at this point.
-        std::string data_uuid = generate_uuid();
+        std::string data_uuid = ckp.create_runtime_object();
         std::string data_path = ckp.runtime_dir() + "/" + data_uuid;
         size_t pos_val = stream_compact_and_dump(plan, data_path);
         desc.set("pos", std::to_string(pos_val));
@@ -355,20 +339,6 @@ class TypedColumn<std::string_view> : public ColumnBase {
     }
     items_buffer_->Close();
     data_buffer_->Close();
-  }
-
-  ModuleDescriptor Dump(const Checkpoint& ckp) override {
-    std::string uuid = generate_uuid();
-    std::string dump_path = ckp.runtime_dir() + "/" + uuid;
-    size_t pos_val = pos_.load();
-    write_file(dump_path + ".pos", &pos_val, sizeof(pos_val), 1);
-    buffer_.dump(dump_path);
-    ModuleDescriptor desc;
-    desc.path = dump_path;
-    desc.size = size_;
-    desc.type = StorageTypeName<std::string_view>::value;
-    desc.module_type = ModuleTypeName();
-    return desc;
   }
 
   size_t size() const override { return size_; }
@@ -470,8 +440,7 @@ class TypedColumn<std::string_view> : public ColumnBase {
     set_value(index, val);
   }
 
-  std::unique_ptr<Module> Fork(const Checkpoint& ckp,
-                               MemoryLevel level) override {
+  std::unique_ptr<Module> Fork(Checkpoint& ckp, MemoryLevel level) override {
     // TODO(zhanglei): this implementation is not correct, fix it
     auto new_col = std::make_unique<TypedColumn<std::string_view>>(width_);
     auto desc = Dump(ckp);

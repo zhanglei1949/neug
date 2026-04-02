@@ -65,6 +65,7 @@ bool ModuleDescriptor::has_sub_module(const std::string& key) const {
   return sub_modules_impl_->map.count(key) > 0;
 }
 
+// TODO(zhanglei): This method should be renamed to get_sub_module_or_default.
 ModuleDescriptor ModuleDescriptor::get_sub_module(
     const std::string& key) const {
   if (!sub_modules_impl_) {
