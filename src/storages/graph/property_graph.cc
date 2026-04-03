@@ -19,13 +19,16 @@
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 #include <algorithm>
+#include <atomic>
 #include <filesystem>
+#include <functional>
 #include <set>
 #include <stdexcept>
 #include <system_error>
 #include <thread>
 #include <tl/expected.hpp>
 #include <utility>
+#include <vector>
 
 #include "neug/storages/file_names.h"
 #include "neug/utils/exception/exception.h"
@@ -134,9 +137,10 @@ Status PropertyGraph::EnsureCapacity(label_t src_label, label_t dst_label,
 }
 
 Status PropertyGraph::BatchAddVertices(
-    label_t v_label, std::shared_ptr<IRecordBatchSupplier> supplier) {
+    label_t v_label, std::shared_ptr<IRecordBatchSupplier> supplier,
+    int num_threads) {
   assert(v_label < vertex_tables_.size());
-  vertex_tables_[v_label].insert_vertices(supplier);
+  vertex_tables_[v_label].insert_vertices(supplier, num_threads);
   return neug::Status::OK();
 }
 
@@ -973,8 +977,8 @@ void PropertyGraph::Compact(bool compact_csr, float reserve_ratio,
   LOG(INFO) << "Compaction completed.";
 }
 
-void PropertyGraph::Dump(bool reopen) {
-  // First dump to the  temp dir, then move to the checkpoint dir
+void PropertyGraph::Dump(bool reopen, int32_t thread_num) {
+  // First dump to the temp dir, then move to the checkpoint dir
   std::string target_dir = temp_checkpoint_dir(work_dir_);
   if (std::filesystem::exists(target_dir)) {
     remove_directory(target_dir);
@@ -991,6 +995,7 @@ void PropertyGraph::Dump(bool reopen) {
     LOG(ERROR) << ss.str();
     THROW_RUNTIME_ERROR(ss.str());
   }
+
   std::vector<size_t> vertex_num(vertex_label_total_count_, 0);
   std::vector<size_t> vertex_capacity(vertex_label_total_count_, 0);
   for (size_t i = 0; i < vertex_label_total_count_; ++i) {
@@ -999,10 +1004,16 @@ void PropertyGraph::Dump(bool reopen) {
       EnsureCapacity(
           i, vertex_num[i] < 4096 ? 4096 : vertex_num[i] + vertex_num[i] / 4);
       vertex_capacity[i] = vertex_tables_[i].Capacity();
-      vertex_tables_[i].Dump(target_dir);
     }
   }
 
+  std::vector<std::function<void()>> tasks;
+  for (size_t i = 0; i < vertex_label_total_count_; ++i) {
+    if (!vertex_tables_[i].is_dropped()) {
+      tasks.emplace_back(
+          [this, i, &target_dir]() { vertex_tables_[i].Dump(target_dir); });
+    }
+  }
   for (size_t src_label_i = 0; src_label_i != vertex_label_total_count_;
        ++src_label_i) {
     if (!schema_.vertex_label_valid(src_label_i)) {
@@ -1028,11 +1039,36 @@ void PropertyGraph::Dump(bool reopen) {
           EnsureCapacity(src_label_i, dst_label_i, e_label_i,
                          vertex_capacity[src_label_i],
                          vertex_capacity[dst_label_i], new_cap);
-          edge_table.Dump(target_dir);
+          tasks.emplace_back([this, index, &target_dir]() {
+            edge_tables_.at(index).Dump(target_dir);
+          });
         }
       }
     }
   }
+
+  // Phase 3 (parallel): execute all Dump tasks concurrently
+  std::atomic<size_t> task_idx{0};
+  auto worker = [&]() {
+    while (true) {
+      size_t t = task_idx.fetch_add(1, std::memory_order_relaxed);
+      if (t >= tasks.size()) {
+        break;
+      }
+      tasks[t]();
+    }
+  };
+  std::vector<std::thread> threads;
+  threads.reserve(thread_num - 1);
+  for (int32_t t = 0; t < thread_num - 1; ++t) {
+    threads.emplace_back(worker);
+  }
+  worker();  // main thread also participates
+  for (auto& th : threads) {
+    th.join();
+  }
+
+  // Phase 4 (serial): schema, copy, cleanup, reopen
   DumpSchema();
   copy_directory(target_dir, checkpoint_dir(work_dir_), true, true);
   remove_directory(target_dir);

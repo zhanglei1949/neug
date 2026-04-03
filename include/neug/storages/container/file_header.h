@@ -15,18 +15,20 @@
 
 #pragma once
 
-#include <openssl/md5.h>
+#include <cstdint>
 
 namespace neug {
 
 /**
- * @brief File header structure containing MD5 checksum for data integrity.
+ * @brief File header structure containing a CRC32C checksum for data integrity.
  *
- * This header is prepended to data files to enable dirty checking
- * and data integrity verification.
+ * This header is prepended to data files to enable data integrity
+ * verification on Open(). CRC32C is computed via absl::ExtendCrc32c which
+ * uses the hardware SSE4.2 _mm_crc32_u64 instruction on x86, giving ~10 GB/s
+ * throughput vs ~600 MB/s for MD5.
  */
 struct FileHeader {
-  unsigned char data_md5[MD5_DIGEST_LENGTH];
+  uint32_t data_crc32c = 0;
 };
 
 }  // namespace neug

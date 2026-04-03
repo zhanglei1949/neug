@@ -14,11 +14,16 @@
  */
 #pragma once
 
+#include <atomic>
+#include <mutex>
+#include <thread>
+
 #include "neug/storages/graph/schema.h"
 #include "neug/storages/graph/vertex_timestamp.h"
 #include "neug/storages/loader/loader_utils.h"
 #include "neug/utils/arrow_utils.h"
 #include "neug/utils/indexers.h"
+#include "neug/utils/property/column.h"
 #include "neug/utils/property/table.h"
 
 namespace neug {
@@ -197,7 +202,11 @@ class VertexTable {
 
   inline std::string& work_dir() { return work_dir_; }
 
-  void insert_vertices(std::shared_ptr<IRecordBatchSupplier> suppliers);
+  // Streaming parallel insert: each thread fetches batches (mutex-guarded),
+  // inserts PKs (lock-free via LFIndexer CAS), and writes properties.
+  // num_threads=1: runs on the main thread only (no extra threads spawned).
+  void insert_vertices(std::shared_ptr<IRecordBatchSupplier> supplier,
+                       int num_threads = 1);
 
   const VertexTimestamp& get_vertex_timestamp() const { return v_ts_; }
 
@@ -272,8 +281,20 @@ class VertexTable {
     return vids;
   }
 
+  // Streaming parallel variant: num_threads threads compete to fetch batches
+  // from the supplier (guarded by a mutex), then each thread independently
+  // inserts PKs and writes property columns for its own batch.
+  //
+  // Thread safety after the mutex:
+  //   - LFIndexer::insert()            → atomic fetch_add + CAS, lock-free
+  //   - VertexTimestamp::InsertVertex() → CAS on inserted_vertices_[vid],
+  //     each thread holds unique vids so slots are never shared
+  //   - set_properties_column()        → disjoint vid ranges for fixed columns;
+  //     StringColumn uses atomic pos_ fetch_add for the data buffer offset
   template <typename PK_T>
-  void insert_vertices_impl(std::shared_ptr<IRecordBatchSupplier> supplier) {
+  void insert_vertices_parallel_impl(
+      std::shared_ptr<IRecordBatchSupplier> supplier, int num_threads) {
+    // ── Capacity pre-allocation (serial) ──────────────────────────────────
     auto row_nums = supplier->RowNum();
     if (row_nums <= 0) {
       LOG(WARNING) << "Row number from supplier is negative, treat it as 0.";
@@ -287,39 +308,47 @@ class VertexTable {
       }
       EnsureCapacity(cap);
     }
-    while (true) {
-      auto batch = supplier->GetNextBatch();
-      if (batch == nullptr) {
-        break;
-      }
-      auto columns = batch->columns();
-      const auto& property_names = vertex_schema_->property_names;
-      CHECK(columns.size() == property_names.size() + 1)
-          << "Number of columns in the batch (" << columns.size()
-          << ") does not match the number of properties ("
-          << property_names.size() + 1 << ").";
-      auto ind = std::get<2>(vertex_schema_->primary_keys[0]);
-      auto pk_array = columns[ind];
-      columns.erase(columns.begin() + ind);
-      // Add capacity checking logic when performing the actual batch insert.
-      size_t new_size = indexer_.size() + batch->num_rows();
-      if (new_size > indexer_.capacity()) {
-        size_t cap = indexer_.capacity();
-        while (new_size >= cap) {
-          cap = cap < 4096 ? 4096 : cap + cap / 4;
+
+    // ── Streaming parallel: fetch → insert PK → write props ───────────────
+    const auto& property_names = vertex_schema_->property_names;
+    const auto pk_col_idx = std::get<2>(vertex_schema_->primary_keys[0]);
+    std::mutex supplier_mu;
+
+    auto worker = [&]() {
+      while (true) {
+        std::shared_ptr<arrow::RecordBatch> batch;
+        {
+          std::lock_guard<std::mutex> lock(supplier_mu);
+          batch = supplier->GetNextBatch();
         }
-        EnsureCapacity(cap);
-      }
+        if (batch == nullptr) {
+          break;
+        }
+        auto columns = batch->columns();
+        CHECK(columns.size() == property_names.size() + 1)
+            << "Number of columns in the batch (" << columns.size()
+            << ") does not match the number of properties ("
+            << property_names.size() + 1 << ").";
+        auto pk_array = columns[pk_col_idx];
+        columns.erase(columns.begin() + pk_col_idx);
 
-      auto vids = insert_primary_keys<PK_T>(pk_array);
+        auto vids = insert_primary_keys<PK_T>(pk_array);
 
-      for (size_t i = 0; i < columns.size(); ++i) {
-        auto col = table_->get_column_by_id(i);
-        auto chunked_array = std::make_shared<arrow::ChunkedArray>(columns[i]);
-        set_properties_column(col, chunked_array, vids);
+        for (size_t i = 0; i < columns.size(); ++i) {
+          auto col = table_->get_column_by_id(i);
+          auto chunked = std::make_shared<arrow::ChunkedArray>(columns[i]);
+          set_properties_column(col, chunked, vids);
+        }
       }
-      VLOG(10) << "Inserted " << pk_array->length()
-               << " vertices, current vertex num: " << VertexNum();
+    };
+
+    std::vector<std::thread> threads;
+    threads.reserve(num_threads);
+    for (int i = 0; i < num_threads; ++i) {
+      threads.emplace_back(worker);
+    }
+    for (auto& t : threads) {
+      t.join();
     }
   }
 

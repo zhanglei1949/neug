@@ -30,6 +30,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "absl/crc/crc32c.h"
 #include "neug/config.h"
 #include "neug/storages/container/container_utils.h"
 #include "neug/storages/container/file_header.h"
@@ -296,6 +297,9 @@ class TypedColumn<std::string_view> : public ColumnBase {
     // When there is nothing to compact we fall through and let the container
     // handle the write as usual (e.g. reflink / copy_file_range via
     // FileSharedMMap::Dump, or a single fwrite via MMapContainer::Dump).
+
+    resize(size_);  // First shrink the data buffer to reclaim stale space,
+                    // gives us the actual size of valid data to be dumped.
     size_t pos_val;
     if (size_ > 0) {
       auto plan = prepare_compaction_plan();
@@ -332,14 +336,15 @@ class TypedColumn<std::string_view> : public ColumnBase {
   void resize(size_t size) override {
     std::unique_lock<std::shared_mutex> lock(rw_mutex_);
     // Number of brand-new item slots being added (may be 0 for shrinks).
-    size_t new_items = (size > size_) ? (size - size_) : 0;
-    items_buffer_->Resize(size * sizeof(string_item));
-    // Guarantee the data buffer has room for new_items strings each up to
-    // width_ bytes.  Using width_ (not avg) makes set_value() safe for any
-    // string within the column's declared maximum length.
-    // Never shrink the allocation: pos_.load() bytes are already committed.
-    size_t needed = pos_.load() + new_items * static_cast<size_t>(width_);
-    data_buffer_->Resize(std::max(needed, data_buffer_->GetDataSize()));
+    if (items_buffer_->GetDataSize() == 0) {
+      items_buffer_->Resize(size * sizeof(string_item));
+      data_buffer_->Resize(
+          std::max(size * static_cast<size_t>(width_), pos_.load()));
+    } else {
+      size_t avg_size = string_avg_size() > 0 ? string_avg_size() : width_;
+      items_buffer_->Resize(size * sizeof(string_item));
+      data_buffer_->Resize(std::max(size * avg_size, pos_.load()));
+    }
     size_ = size;
   }
 
@@ -356,7 +361,8 @@ class TypedColumn<std::string_view> : public ColumnBase {
     size_t new_items = (size > old_size) ? (size - old_size) : 0;
     items_buffer_->Resize(size * sizeof(string_item));
     size_t needed = pos_.load() + new_items * static_cast<size_t>(width_);
-    data_buffer_->Resize(std::max(needed, data_buffer_->GetDataSize()));
+    size_t needed_based_on_avg = size * string_avg_size();
+    data_buffer_->Resize(std::max(needed, needed_based_on_avg));
 
     if (default_str.size() == 0) {
       return;
@@ -405,6 +411,8 @@ class TypedColumn<std::string_view> : public ColumnBase {
 
   void set_value_safe(size_t idx, const std::string_view& value);
 
+  uint16_t width() const { return width_; }
+
   inline std::string_view get_view(size_t idx) const {
     const auto& item = get_string_item(idx);
     assert(item.offset + item.length <= data_buffer_->GetDataSize());
@@ -448,6 +456,21 @@ class TypedColumn<std::string_view> : public ColumnBase {
     assert(idx < size_);
     auto raw_items = reinterpret_cast<string_item*>(items_buffer_->GetData());
     raw_items[idx] = item;
+  }
+
+  size_t string_avg_size() const {
+    if (size_ == 0) {
+      return 0;
+    }
+    size_t total_length = 0;
+    size_t non_zero_count = 0;
+    for (size_t i = 0; i < size_; ++i) {
+      if (get_string_item(i).length > 0) {
+        total_length += get_string_item(i).length;
+        non_zero_count++;
+      }
+    }
+    return non_zero_count > 0 ? total_length / non_zero_count : 0;
   }
 
   // Descriptor of a single live string entry used during compaction.
@@ -498,6 +521,9 @@ class TypedColumn<std::string_view> : public ColumnBase {
   // Returns the effective (compacted) data size.
   size_t stream_compact_and_dump(const CompactionPlan& plan,
                                  const std::string& data_filename) {
+    LOG(INFO) << "StringColumn compaction: " << plan.total_size
+              << " bytes with " << plan.reused_size
+              << " bytes to be reused, writing to " << data_filename;
     auto parent_dir = std::filesystem::path(data_filename).parent_path();
     if (!parent_dir.empty()) {
       std::filesystem::create_directories(parent_dir);
@@ -508,7 +534,8 @@ class TypedColumn<std::string_view> : public ColumnBase {
                          data_filename);
     }
 
-    // Write a placeholder header; will be overwritten after MD5 is finalised.
+    // Write a placeholder header; will be overwritten after CRC32C is
+    // finalised.
     FileHeader header{};
     if (fwrite(&header, sizeof(header), 1, fout) != 1) {
       fclose(fout);
@@ -520,8 +547,7 @@ class TypedColumn<std::string_view> : public ColumnBase {
         reinterpret_cast<const char*>(data_buffer_->GetData());
     size_t write_offset = 0;
     std::unordered_map<uint64_t, uint64_t> old_offset_to_new;
-    MD5_CTX md5_ctx;
-    MD5_Init(&md5_ctx);
+    absl::crc32c_t crc{0};
 
     for (const auto& entry : plan.entries) {
       if (entry.length > 0) {
@@ -539,15 +565,15 @@ class TypedColumn<std::string_view> : public ColumnBase {
           THROW_IO_EXCEPTION("Failed to fwrite compacted data to: " +
                              data_filename);
         }
-        MD5_Update(&md5_ctx, src, entry.length);
+        crc = absl::ExtendCrc32c(crc, absl::string_view(src, entry.length));
       }
       set_string_item(entry.index,
                       {write_offset, static_cast<uint32_t>(entry.length)});
       write_offset += entry.length;
     }
 
-    // Seek back and stamp the real MD5 into the file header.
-    MD5_Final(header.data_md5, &md5_ctx);
+    // Seek back and stamp the real CRC32C into the file header.
+    header.data_crc32c = static_cast<uint32_t>(crc);
     if (fseek(fout, 0, SEEK_SET) != 0) {
       fclose(fout);
       THROW_IO_EXCEPTION("Failed to seek to header in: " + data_filename);

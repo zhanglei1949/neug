@@ -22,6 +22,7 @@
 #include <filesystem>
 #include <stdexcept>
 
+#include "absl/crc/crc32c.h"
 #include "neug/storages/container/file_header.h"
 #include "neug/storages/container/mmap_container.h"
 #include "neug/utils/file_utils.h"
@@ -65,11 +66,13 @@ void MMapContainer::Open(const std::string& path) {
   }
   data_ = static_cast<char*>(mmap_data_) + sizeof(FileHeader);
   size_ = mmap_size_ - sizeof(FileHeader);
-  unsigned char data_md5[MD5_DIGEST_LENGTH];
-  MD5((unsigned char*) data_, size_, data_md5);
   if (size_ > 0) {
-    if (memcmp(data_md5, reinterpret_cast<FileHeader*>(mmap_data_)->data_md5,
-               MD5_DIGEST_LENGTH) != 0) {
+    uint32_t stored =
+        reinterpret_cast<const FileHeader*>(mmap_data_)->data_crc32c;
+    uint32_t actual = static_cast<uint32_t>(absl::ExtendCrc32c(
+        absl::crc32c_t{0},
+        absl::string_view(static_cast<const char*>(data_), size_)));
+    if (stored != actual) {
       Close();
       THROW_INTERNAL_EXCEPTION("Data integrity check failed for file: " + path);
     }
@@ -77,7 +80,7 @@ void MMapContainer::Open(const std::string& path) {
 }
 
 void MMapContainer::Close() {
-  // Flush MD5 header to the backing file before unmapping.
+  // Flush crc32 header to the backing file before unmapping.
   // For non-file containers the base Sync() is a no-op, so this is free.
   Sync();
   if (mmap_data_ && mmap_size_ > 0) {
@@ -139,7 +142,9 @@ void MMapContainer::Resize(size_t size) {
 
 void MMapContainer::Dump(const std::string& path) {
   FileHeader header;
-  MD5((unsigned char*) data_, size_, header.data_md5);
+  header.data_crc32c = static_cast<uint32_t>(absl::ExtendCrc32c(
+      absl::crc32c_t{0},
+      absl::string_view(static_cast<const char*>(data_), size_)));
   std::unique_ptr<FILE, decltype(&fclose)> fp(fopen(path.c_str(), "wb"),
                                               &fclose);
   if (fp == nullptr) {
@@ -155,6 +160,7 @@ void MMapContainer::Dump(const std::string& path) {
       THROW_IO_EXCEPTION("Failed to write data to file: " + path);
     }
   }
+  Close();
 }
 
 bool MMapContainer::IsDirty() {
@@ -170,10 +176,10 @@ bool MMapContainer::IsDirty() {
     // Header-only file: no payload to compare, so not dirty.
     return false;
   }
-  unsigned char md5[MD5_DIGEST_LENGTH];
-  MD5((unsigned char*) data_, size_, md5);
-  return memcmp(md5, reinterpret_cast<FileHeader*>(mmap_data_)->data_md5,
-                MD5_DIGEST_LENGTH) != 0;
+  uint32_t actual = static_cast<uint32_t>(absl::ExtendCrc32c(
+      absl::crc32c_t{0},
+      absl::string_view(static_cast<const char*>(data_), size_)));
+  return reinterpret_cast<const FileHeader*>(mmap_data_)->data_crc32c != actual;
 }
 
 }  // namespace neug

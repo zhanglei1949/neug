@@ -20,6 +20,7 @@
 #include <stdexcept>
 
 #include <filesystem>
+#include "absl/crc/crc32c.h"
 #include "neug/storages/container/file_header.h"
 #include "neug/storages/container/file_mmap_container.h"
 #include "neug/utils/file_utils.h"
@@ -98,7 +99,7 @@ void FileSharedMMap::Resize(size_t size) {
   }
   data_ = static_cast<char*>(mmap_data_) + sizeof(FileHeader);
   size_ = mmap_size_ - sizeof(FileHeader);
-  // Recompute and persist the MD5 for the new payload (including any
+  // Recompute and persist the CRC32C for the new payload (including any
   // zero-extended region from ftruncate), so that a subsequent Open()
   // passes the integrity check.
   Sync();
@@ -123,12 +124,12 @@ void FileSharedMMap::Sync() {
   if (mmap_data_ == nullptr || data_ == nullptr || size_ == 0) {
     return;
   }
-  unsigned char md5[MD5_DIGEST_LENGTH];
-  MD5((unsigned char*) this->data_, this->size_, md5);
-  if (memcmp(md5, reinterpret_cast<FileHeader*>(mmap_data_)->data_md5,
-             MD5_DIGEST_LENGTH) != 0) {
-    memcpy(reinterpret_cast<FileHeader*>(mmap_data_)->data_md5, md5,
-           MD5_DIGEST_LENGTH);
+  uint32_t actual = static_cast<uint32_t>(absl::ExtendCrc32c(
+      absl::crc32c_t{0},
+      absl::string_view(static_cast<const char*>(data_), size_)));
+  auto* hdr = reinterpret_cast<FileHeader*>(mmap_data_);
+  if (hdr->data_crc32c != actual) {
+    hdr->data_crc32c = actual;
     msync(mmap_data_, mmap_size_, MS_SYNC);
   }
 }
@@ -140,7 +141,7 @@ void FileSharedMMap::Dump(const std::string& path) {
     return;
   }
 
-  // Flush the MD5 header and all dirty pages to the backing file.
+  // Flush the CRC32C header and all dirty pages to the backing file.
   Sync();
 
   if (path == path_) {
@@ -159,6 +160,7 @@ void FileSharedMMap::Dump(const std::string& path) {
                  << "), falling back to fwrite for " << path;
     MMapContainer::Dump(path);
   }
+  Close();
 }
 
 }  // namespace neug

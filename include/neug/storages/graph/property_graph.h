@@ -137,8 +137,9 @@ class PropertyGraph {
   /**
    * @brief Dump the current graph state to persistent storage.
    * @param reopen If true, reopens the graph after dumping (default: true)
+   * @param thread_num Number of threads to use for dumping (default: 1)
    */
-  void Dump(bool reopen = true);
+  void Dump(bool reopen = true, int32_t thread_num = 1);
 
   /**
    * @brief Dump schema information to a file.
@@ -307,7 +308,8 @@ class PropertyGraph {
                         size_t capacity);
 
   Status BatchAddVertices(label_t v_label_id,
-                          std::shared_ptr<IRecordBatchSupplier> supplier);
+                          std::shared_ptr<IRecordBatchSupplier> supplier,
+                          int num_threads = 1);
 
   Status BatchAddEdges(label_t src_label, label_t dst_label, label_t edge_label,
                        std::shared_ptr<IRecordBatchSupplier> supplier);
