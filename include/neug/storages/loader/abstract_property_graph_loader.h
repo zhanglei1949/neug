@@ -57,7 +57,8 @@ class AbstractPropertyGraphLoader : public IFragmentLoader {
   void addVerticesToVertexTable(label_t v_label_id,
                                 const std::string& label_name, DataType pk_type,
                                 const std::string& pk_name, int pk_ind,
-                                const std::vector<std::string>& v_files);
+                                const std::vector<std::string>& v_files,
+                                int num_threads = 1);
 
   void loadEdges();
   void addEdges(label_t src_label_id, label_t dst_label_id, label_t e_label_id,

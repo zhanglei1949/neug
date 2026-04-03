@@ -30,6 +30,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/crc/crc32c.h"
 #include "neug/storages/container/container_utils.h"
 #include "neug/storages/container/file_mmap_container.h"
 #include "neug/storages/file_names.h"
@@ -80,8 +81,7 @@ void MutableCsr<EDATA_T>::open_internal(const std::string& snapshot_prefix,
   adj_list_capacity_->Resize(v_cap * sizeof(int));
   locks_ = new SpinLock[v_cap];
 
-  const auto* degree_ptr =
-      reinterpret_cast<const int*>(degree_list->GetData());
+  const auto* degree_ptr = reinterpret_cast<const int*>(degree_list->GetData());
   const auto* cap_ptr = reinterpret_cast<const int*>(cap_list->GetData());
   auto* adj_lists_ptr = reinterpret_cast<nbr_t**>(adj_list_buffer_->GetData());
   auto* adj_list_size_ptr =
@@ -160,8 +160,8 @@ void MutableCsr<EDATA_T>::dump(const std::string& name,
   const nbr_t* const* lists =
       reinterpret_cast<const nbr_t* const*>(adj_list_buffer_->GetData());
   const std::string nbr_path = new_snapshot_dir + "/" + name + ".nbr";
-  std::unique_ptr<FILE, decltype(&fclose)> fp(
-      fopen(nbr_path.c_str(), "wb"), &fclose);
+  std::unique_ptr<FILE, decltype(&fclose)> fp(fopen(nbr_path.c_str(), "wb"),
+                                              &fclose);
   if (fp == nullptr) {
     THROW_IO_EXCEPTION("Failed to open file for writing: " + nbr_path);
   }
@@ -169,8 +169,7 @@ void MutableCsr<EDATA_T>::dump(const std::string& name,
   if (fwrite(&header, sizeof(FileHeader), 1, fp.get()) != 1) {
     THROW_IO_EXCEPTION("Failed to write header to: " + nbr_path);
   }
-  MD5_CTX ctx;
-  MD5_Init(&ctx);
+  absl::crc32c_t crc{0};
   for (size_t i = 0; i < vnum; ++i) {
     const void* data = lists[i];
     size_t len = static_cast<size_t>(caps[i]) * sizeof(nbr_t);
@@ -181,9 +180,10 @@ void MutableCsr<EDATA_T>::dump(const std::string& name,
       THROW_IO_EXCEPTION("Failed to write segment " + std::to_string(i) +
                          " to: " + nbr_path);
     }
-    MD5_Update(&ctx, data, len);
+    crc = absl::ExtendCrc32c(
+        crc, absl::string_view(static_cast<const char*>(data), len));
   }
-  MD5_Final(header.data_md5, &ctx);
+  header.data_crc32c = static_cast<uint32_t>(crc);
   if (fseek(fp.get(), 0, SEEK_SET) != 0) {
     THROW_IO_EXCEPTION("Failed to seek in: " + nbr_path);
   }

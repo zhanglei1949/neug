@@ -22,7 +22,7 @@ namespace neug {
 void AbstractPropertyGraphLoader::addVerticesToVertexTable(
     label_t v_label_id, const std::string& label_name, DataType pk_type,
     const std::string& pk_name, int pk_ind,
-    const std::vector<std::string>& v_files) {
+    const std::vector<std::string>& v_files, int num_threads) {
   for (auto& v_file : v_files) {
     LOG(INFO) << "Start to load vertex label: " << label_name
               << " from file: " << v_file;
@@ -30,8 +30,10 @@ void AbstractPropertyGraphLoader::addVerticesToVertexTable(
         createVertexRecordBatchSupplier(v_label_id, label_name, v_file, pk_type,
                                         pk_name, pk_ind, loading_config_, 0);
     for (auto& supplier : suppliers) {
-      graph_.BatchAddVertices(v_label_id, supplier);
+      graph_.BatchAddVertices(v_label_id, supplier, num_threads);
     }
+    LOG(INFO) << "Finished loading vertex label: " << label_name
+              << " from file: " << v_file;
   }
 }
 
@@ -57,9 +59,9 @@ void AbstractPropertyGraphLoader::addVertices(
     return;
   }
 
-  return addVerticesToVertexTable(v_label_id,
-                                  schema_.get_vertex_label_name(v_label_id),
-                                  pk_type, pk_name, pk_ind, v_files);
+  return addVerticesToVertexTable(
+      v_label_id, schema_.get_vertex_label_name(v_label_id), pk_type, pk_name,
+      pk_ind, v_files, thread_num_);
 }
 
 void AbstractPropertyGraphLoader::loadVertices() {
@@ -187,7 +189,7 @@ result<bool> AbstractPropertyGraphLoader::LoadFragment() {
     loadVertices();
     loadEdges();
     graph_.Compact(false, 0.0, 1);
-    graph_.Dump(false);
+    graph_.Dump(false, thread_num_);
 
   } catch (const std::exception& e) {
     printDiskRemaining(work_dir_);

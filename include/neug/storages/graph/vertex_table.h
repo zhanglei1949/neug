@@ -14,11 +14,18 @@
  */
 #pragma once
 
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <queue>
+#include <thread>
+
 #include "neug/storages/graph/schema.h"
 #include "neug/storages/graph/vertex_timestamp.h"
 #include "neug/storages/loader/loader_utils.h"
 #include "neug/utils/arrow_utils.h"
 #include "neug/utils/indexers.h"
+#include "neug/utils/property/column.h"
 #include "neug/utils/property/table.h"
 
 namespace neug {
@@ -197,7 +204,25 @@ class VertexTable {
 
   inline std::string& work_dir() { return work_dir_; }
 
-  void insert_vertices(std::shared_ptr<IRecordBatchSupplier> suppliers);
+  // Producer-consumer parallel insert.
+  //
+  // Thread budget split:
+  //   - Producers: read batches + insert PKs → push (batch, vids) to queue.
+  //   - Consumers: pop (batch, vids) → write property columns.
+  //
+  // For fixed-length PKs with a reliable RowNum():
+  //   Capacity is pre-allocated upfront, so PK insertion is fully lock-free
+  //   (LFIndexer uses atomic fetch_add + CAS).  Multiple producer threads
+  //   compete only for GetNextBatch() under a lightweight fetch_mu, then
+  //   insert PKs for their batch in parallel.
+  //
+  // For varchar PKs (or unknown RowNum()):
+  //   A single producer serializes fetch + per-batch EnsureCapacity + PK
+  //   insertion; all remaining threads act as consumers.
+  //
+  // num_threads is clamped to at least 1.
+  void insert_vertices(std::shared_ptr<IRecordBatchSupplier> supplier,
+                       int num_threads = 1);
 
   const VertexTimestamp& get_vertex_timestamp() const { return v_ts_; }
 
@@ -272,55 +297,172 @@ class VertexTable {
     return vids;
   }
 
+  // Write the property columns of one batch (code-reuse helper).
+  void write_batch_properties(const std::shared_ptr<arrow::RecordBatch>& batch,
+                              const std::vector<vid_t>& vids, int pk_col_idx) {
+    auto columns = batch->columns();
+    columns.erase(columns.begin() + pk_col_idx);
+    for (size_t i = 0; i < columns.size(); ++i) {
+      auto col = table_->get_column_by_id(i);
+      auto chunked = std::make_shared<arrow::ChunkedArray>(columns[i]);
+      set_properties_column(col, chunked, vids);
+    }
+  }
+
+  // Grow indexer + table capacity to fit at least `needed` elements.
+  // Must be called while holding a lock that excludes concurrent indexer ops.
+  void ensure_capacity_for(size_t needed) {
+    if (needed <= indexer_.capacity())
+      return;
+    size_t cap = indexer_.capacity();
+    while (needed >= cap) {
+      cap = cap < 4096 ? 4096 : cap + cap / 4;
+    }
+    EnsureCapacity(cap);
+  }
+
   template <typename PK_T>
-  void insert_vertices_impl(std::shared_ptr<IRecordBatchSupplier> supplier) {
+  void insert_vertices_parallel_impl(
+      std::shared_ptr<IRecordBatchSupplier> supplier, int num_threads) {
+    num_threads = std::max(1, num_threads);
+
+    constexpr bool kVarcharPK = std::is_same_v<PK_T, std::string_view> ||
+                                std::is_same_v<PK_T, std::string>;
+
+    const auto& property_names = vertex_schema_->property_names;
+    const int pk_col_idx =
+        static_cast<int>(std::get<2>(vertex_schema_->primary_keys[0]));
+
+    // ── Upfront pre-allocation (serial) ───────────────────────────────────
+    // Pre-reserve capacity based on RowNum() so that, in the common case,
+    // no per-batch EnsureCapacity is needed during parallel execution.
     auto row_nums = supplier->RowNum();
-    if (row_nums <= 0) {
-      LOG(WARNING) << "Row number from supplier is negative, treat it as 0.";
-      row_nums = 0;
+    const bool reliable = (row_nums > 0);
+    if (reliable) {
+      ensure_capacity_for(indexer_.size() + static_cast<size_t>(row_nums));
     }
-    size_t new_size = indexer_.size() + row_nums;
-    if (new_size > indexer_.capacity()) {
-      size_t cap = indexer_.capacity();
-      while (new_size >= cap) {
-        cap = cap < 4096 ? 4096 : cap + cap / 4;
-      }
-      EnsureCapacity(cap);
+
+    // ── Thread allocation ──────────────────────────────────────────────────
+    // varchar PKs:
+    //   String key writes through LFIndexer are inherently serial (the string
+    //   data buffer uses a linear allocator; concurrent appends would race).
+    //   Use 1 producer; all other threads become consumers.
+    //
+    // fixed-length PKs + reliable RowNum():
+    //   LFIndexer::insert() is lock-free (atomic fetch_add for slot index +
+    //   CAS for hash slot) once capacity is reserved.  Scale producers with
+    //   data volume: 1 per 250 K rows, capped at num_threads/4.
+    //
+    // fixed-length PKs + unreliable RowNum():
+    //   Per-batch EnsureCapacity must exclude concurrent insertions → 1 serial
+    //   producer.
+    int num_producers;
+    if constexpr (kVarcharPK) {
+      num_producers = 1;
+    } else if (!reliable) {
+      num_producers = 1;
+    } else {
+      int scaled = static_cast<int>(static_cast<size_t>(row_nums) / 250000) + 1;
+      num_producers =
+          std::max(1, std::min({scaled, num_threads / 4, num_threads}));
     }
-    while (true) {
-      auto batch = supplier->GetNextBatch();
-      if (batch == nullptr) {
-        break;
-      }
-      auto columns = batch->columns();
-      const auto& property_names = vertex_schema_->property_names;
-      CHECK(columns.size() == property_names.size() + 1)
-          << "Number of columns in the batch (" << columns.size()
-          << ") does not match the number of properties ("
-          << property_names.size() + 1 << ").";
-      auto ind = std::get<2>(vertex_schema_->primary_keys[0]);
-      auto pk_array = columns[ind];
-      columns.erase(columns.begin() + ind);
-      // Add capacity checking logic when performing the actual batch insert.
-      size_t new_size = indexer_.size() + batch->num_rows();
-      if (new_size > indexer_.capacity()) {
-        size_t cap = indexer_.capacity();
-        while (new_size >= cap) {
-          cap = cap < 4096 ? 4096 : cap + cap / 4;
+    const int num_consumers = std::max(1, num_threads - num_producers);
+
+    // ── Producer-consumer queue ────────────────────────────────────────────
+    struct BatchWork {
+      std::shared_ptr<arrow::RecordBatch> batch;
+      std::vector<vid_t> vids;
+    };
+    // Bound queue depth to limit peak RAM: a few batches ahead of consumers.
+    const size_t kMaxQueue = static_cast<size_t>(num_producers) * 4 + 4;
+    std::queue<BatchWork> work_queue;
+    std::mutex queue_mu;
+    std::condition_variable not_empty_cv;
+    std::condition_variable not_full_cv;
+    std::atomic<int> active_producers{num_producers};
+
+    // Guards GetNextBatch() (not thread-safe), per-batch EnsureCapacity, and
+    // — for varchar / unreliable-count cases — PK insertion as well.
+    std::mutex fetch_mu;
+
+    // ── Consumer ──────────────────────────────────────────────────────────
+    auto consume = [&]() {
+      while (true) {
+        BatchWork work;
+        {
+          std::unique_lock<std::mutex> lk(queue_mu);
+          not_empty_cv.wait(lk, [&] {
+            return !work_queue.empty() || active_producers.load() == 0;
+          });
+          if (work_queue.empty())
+            break;  // all producers done
+          work = std::move(work_queue.front());
+          work_queue.pop();
         }
-        EnsureCapacity(cap);
+        not_full_cv.notify_one();
+        write_batch_properties(work.batch, work.vids, pk_col_idx);
+      }
+    };
+
+    // ── Producer ──────────────────────────────────────────────────────────
+    auto produce = [&]() {
+      while (true) {
+        BatchWork work;
+        {
+          std::lock_guard<std::mutex> lk(fetch_mu);
+          work.batch = supplier->GetNextBatch();
+          if (!work.batch)
+            break;
+
+          auto cols = work.batch->columns();
+          CHECK(cols.size() == property_names.size() + 1)
+              << "Number of columns in the batch (" << cols.size()
+              << ") does not match the number of properties ("
+              << (property_names.size() + 1) << ").";
+
+          if (!reliable) {
+            // Fallback: RowNum() was unreliable; grow per batch under lock.
+            ensure_capacity_for(indexer_.size() +
+                                static_cast<size_t>(work.batch->num_rows()));
+          }
+
+          if constexpr (kVarcharPK) {
+            // Serial: string key writes must not race with each other.
+            work.vids = insert_primary_keys<PK_T>(cols[pk_col_idx]);
+          }
+          // For fixed-length types PKs are inserted OUTSIDE fetch_mu below.
+        }
+
+        if constexpr (!kVarcharPK) {
+          // Lock-free: capacity already reserved; LFIndexer::insert() uses
+          // atomic fetch_add for the slot and CAS for the hash entry.
+          work.vids =
+              insert_primary_keys<PK_T>(work.batch->columns()[pk_col_idx]);
+        }
+
+        {
+          std::unique_lock<std::mutex> lk(queue_mu);
+          not_full_cv.wait(lk, [&] { return work_queue.size() < kMaxQueue; });
+          work_queue.push(std::move(work));
+        }
+        not_empty_cv.notify_one();
       }
 
-      auto vids = insert_primary_keys<PK_T>(pk_array);
-
-      for (size_t i = 0; i < columns.size(); ++i) {
-        auto col = table_->get_column_by_id(i);
-        auto chunked_array = std::make_shared<arrow::ChunkedArray>(columns[i]);
-        set_properties_column(col, chunked_array, vids);
+      // Last producer wakes all blocked consumers.
+      if (active_producers.fetch_sub(1) == 1) {
+        not_empty_cv.notify_all();
       }
-      VLOG(10) << "Inserted " << pk_array->length()
-               << " vertices, current vertex num: " << VertexNum();
-    }
+    };
+
+    // ── Launch threads ─────────────────────────────────────────────────────
+    std::vector<std::thread> threads;
+    threads.reserve(static_cast<size_t>(num_producers + num_consumers));
+    for (int i = 0; i < num_consumers; ++i)
+      threads.emplace_back(consume);
+    for (int i = 0; i < num_producers; ++i)
+      threads.emplace_back(produce);
+    for (auto& t : threads)
+      t.join();
   }
 
   IndexerType indexer_;
