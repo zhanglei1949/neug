@@ -795,6 +795,7 @@ void set_column_from_string_array(std::shared_ptr<neug::ColumnBase> col,
   if (enable_resize) {
     CHECK(typed_col != nullptr) << "Only support TypedColumn<std::string_view>";
   }
+  std::shared_mutex rw_mutex_;
   CHECK(type->Equals(arrow::large_utf8()) || type->Equals(arrow::utf8()))
       << "Inconsistent data type, expect string, but got " << type->ToString();
   if (type->Equals(arrow::large_utf8())) {
@@ -817,7 +818,15 @@ void set_column_from_string_array(std::shared_ptr<neug::ColumnBase> col,
           Property any_val = Property::From(sw);
           col->set_any(vids[k], any_val);
         } else {
-          typed_col->set_value_safe(vids[k], std::move(sw));
+          std::shared_lock<std::shared_mutex> lock(rw_mutex_);
+          if (typed_col->available_space() <= sw.size()) {
+            lock.unlock();
+            std::unique_lock<std::shared_mutex> w_lock(rw_mutex_);
+            typed_col->resize(typed_col->size());
+            w_lock.unlock();
+            lock.lock();
+          }
+          typed_col->set_value(vids[k], std::move(sw));
         }
       }
     }
@@ -836,7 +845,15 @@ void set_column_from_string_array(std::shared_ptr<neug::ColumnBase> col,
           Property any_val = Property::From(sw);
           col->set_any(vids[k], std::move(any_val));
         } else {
-          typed_col->set_value_safe(vids[k], std::move(sw));
+          std::shared_lock<std::shared_mutex> lock(rw_mutex_);
+          if (typed_col->available_space() <= sw.size()) {
+            lock.unlock();
+            std::unique_lock<std::shared_mutex> w_lock(rw_mutex_);
+            typed_col->resize(typed_col->size());
+            w_lock.unlock();
+            lock.lock();
+          }
+          typed_col->set_value(vids[k], std::move(sw));
         }
       }
     }

@@ -29,7 +29,7 @@ namespace neug {
  */
 class FilePrivateMMap : public MMapContainer {
  public:
-  FilePrivateMMap();
+  FilePrivateMMap(bool enable_checksum = true);
   ~FilePrivateMMap() override;
   ContainerType GetContainerType() const override {
     return ContainerType::kFilePrivateMMap;
@@ -53,7 +53,7 @@ class FilePrivateMMap : public MMapContainer {
  */
 class FileSharedMMap : public MMapContainer {
  public:
-  FileSharedMMap();
+  FileSharedMMap(bool enable_checksum = true);
   ~FileSharedMMap() override;
   ContainerType GetContainerType() const override {
     return ContainerType::kFileSharedMMap;

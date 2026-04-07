@@ -38,6 +38,7 @@ namespace neug {
  */
 std::unique_ptr<IDataContainer> OpenContainer(const std::string& snapshot_file,
                                               const std::string& tmp_file,
-                                              MemoryLevel memory_level);
+                                              MemoryLevel memory_level,
+                                              bool enable_checksum = true);
 
 }  // namespace neug
