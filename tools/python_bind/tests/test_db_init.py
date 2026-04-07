@@ -329,19 +329,19 @@ def test_memory_level_in_memory(tmp_path):
     """Verify that all aliases for 'InMemory' memory level are accepted."""
     db_dir = tmp_path / "in_memory_level_db"
     # canonical form
-    db = Database(db_path=str(db_dir), mode="w", memory_level="InMemory")
+    db = Database(db_path=str(db_dir), mode="w", buffer_strategy="InMemory")
     assert db is not None
     db.close()
     # lowercase alias
-    db = Database(db_path=str(db_dir), mode="w", memory_level="inmemory")
+    db = Database(db_path=str(db_dir), mode="w", buffer_strategy="inmemory")
     assert db is not None
     db.close()
     # underscore alias
-    db = Database(db_path=str(db_dir), mode="w", memory_level="in_memory")
+    db = Database(db_path=str(db_dir), mode="w", buffer_strategy="in_memory")
     assert db is not None
     db.close()
     # short literal
-    db = Database(db_path=str(db_dir), mode="w", memory_level="M_FULL")
+    db = Database(db_path=str(db_dir), mode="w", buffer_strategy="M_FULL")
     assert db is not None
     db.close()
 
@@ -351,19 +351,19 @@ def test_memory_level_sync_to_file(tmp_path):
     """Verify that all aliases for 'SyncToFile' memory level are accepted."""
     db_dir = tmp_path / "sync_to_file_level_db"
     # canonical form
-    db = Database(db_path=str(db_dir), mode="w", memory_level="SyncToFile")
+    db = Database(db_path=str(db_dir), mode="w", buffer_strategy="SyncToFile")
     assert db is not None
     db.close()
     # lowercase alias
-    db = Database(db_path=str(db_dir), mode="w", memory_level="synctofile")
+    db = Database(db_path=str(db_dir), mode="w", buffer_strategy="synctofile")
     assert db is not None
     db.close()
     # underscore alias
-    db = Database(db_path=str(db_dir), mode="w", memory_level="sync_to_file")
+    db = Database(db_path=str(db_dir), mode="w", buffer_strategy="sync_to_file")
     assert db is not None
     db.close()
     # short literal
-    db = Database(db_path=str(db_dir), mode="w", memory_level="M_LAZY")
+    db = Database(db_path=str(db_dir), mode="w", buffer_strategy="M_LAZY")
     assert db is not None
     db.close()
 
@@ -373,19 +373,19 @@ def test_memory_level_huge_page_preferred(tmp_path):
     """Verify that all aliases for 'HugePagePreferred' memory level are accepted."""
     db_dir = tmp_path / "huge_page_preferred_level_db"
     # canonical form
-    db = Database(db_path=str(db_dir), mode="w", memory_level="HugePagePreferred")
+    db = Database(db_path=str(db_dir), mode="w", buffer_strategy="HugePagePreferred")
     assert db is not None
     db.close()
     # lowercase alias
-    db = Database(db_path=str(db_dir), mode="w", memory_level="hugepagepreferred")
+    db = Database(db_path=str(db_dir), mode="w", buffer_strategy="hugepagepreferred")
     assert db is not None
     db.close()
     # underscore alias
-    db = Database(db_path=str(db_dir), mode="w", memory_level="huge_page_preferred")
+    db = Database(db_path=str(db_dir), mode="w", buffer_strategy="huge_page_preferred")
     assert db is not None
     db.close()
     # short literal
-    db = Database(db_path=str(db_dir), mode="w", memory_level="M_HUGE")
+    db = Database(db_path=str(db_dir), mode="w", buffer_strategy="M_HUGE")
     assert db is not None
     db.close()
 
@@ -395,5 +395,5 @@ def test_memory_level_invalid(tmp_path):
     """Verify that an invalid memory_level raises ERR_INVALID_ARGUMENT."""
     db_dir = tmp_path / "invalid_memory_level_db"
     with pytest.raises(Exception) as excinfo:
-        Database(db_path=str(db_dir), mode="w", memory_level="invalid_level")
-    assert str(ERR_INVALID_ARGUMENT) in str(excinfo.value)
+        Database(db_path=str(db_dir), mode="w", buffer_strategy="invalid_level")
+        assert str(ERR_INVALID_ARGUMENT) in str(excinfo.value)
