@@ -532,7 +532,7 @@ class TypedColumn<std::string_view> : public ColumnBase {
                          data_filename);
     }
 
-    // Write a empty header.
+    // Write a placeholder header; will be overwritten after MD5 is finalised.
     FileHeader header{};
     if (fwrite(&header, sizeof(header), 1, fout) != 1) {
       fclose(fout);
@@ -544,6 +544,8 @@ class TypedColumn<std::string_view> : public ColumnBase {
         reinterpret_cast<const char*>(data_buffer_->GetData());
     size_t write_offset = 0;
     std::unordered_map<uint64_t, uint64_t> old_offset_to_new;
+    MD5_CTX md5_ctx;
+    MD5_Init(&md5_ctx);
 
     for (const auto& entry : plan.entries) {
       if (entry.length > 0) {
@@ -561,10 +563,22 @@ class TypedColumn<std::string_view> : public ColumnBase {
           THROW_IO_EXCEPTION("Failed to fwrite compacted data to: " +
                              data_filename);
         }
+        MD5_Update(&md5_ctx, src, entry.length);
       }
       set_string_item(entry.index,
                       {write_offset, static_cast<uint32_t>(entry.length)});
       write_offset += entry.length;
+    }
+
+    // Seek back and stamp the real MD5 into the file header.
+    MD5_Final(header.data_md5, &md5_ctx);
+    if (fseek(fout, 0, SEEK_SET) != 0) {
+      fclose(fout);
+      THROW_IO_EXCEPTION("Failed to seek to header in: " + data_filename);
+    }
+    if (fwrite(&header, sizeof(header), 1, fout) != 1) {
+      fclose(fout);
+      THROW_IO_EXCEPTION("Failed to write final header to: " + data_filename);
     }
 
     if (fflush(fout) != 0) {
