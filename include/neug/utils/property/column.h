@@ -284,7 +284,12 @@ class TypedColumn<std::string_view> : public ColumnBase {
   }
 
   void dump(const std::string& filename) override {
+    if (!items_buffer_ || !data_buffer_) {
+      THROW_RUNTIME_ERROR("Buffers not initialized for dumping");
+    }
     compact_in_place();
+    resize(size_);  // Resize the string column with avg size to shrink or
+                    // expand data buffer
     size_t pos_val = pos_.load();
     write_file(filename + ".pos", &pos_val, sizeof(pos_val), 1);
     items_buffer_->Dump(filename + ".items");
@@ -491,7 +496,7 @@ class TypedColumn<std::string_view> : public ColumnBase {
 
     for (const auto& e : entries) {
       if (e.length == 0) {
-        // Empty string: no bytes to move; slot keeps offset 0.
+        set_string_item(e.index, {0, 0});
         continue;
       }
       auto it = old_to_new.find(e.offset);
