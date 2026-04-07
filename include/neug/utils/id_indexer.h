@@ -340,24 +340,20 @@ class LFIndexer {
   size_t size() const { return num_elements_.load(); }
   DataTypeId get_type() const { return keys_->type(); }
 
-  // only for update transaction
-  INDEX_T insert_safe(const Property& oid) {
-    INDEX_T ind = static_cast<INDEX_T>(num_elements_.load());
-    if (ind >= capacity()) {
-      reserve(capacity() + (capacity() >> 2));
-    }
-    return insert(oid);
-  }
-
-  INDEX_T insert(const Property& oid) {
+  INDEX_T insert(const Property& oid, bool insert_safe = false) {
     assert(oid.type() == get_type());
-    INDEX_T ind = static_cast<INDEX_T>(num_elements_.fetch_add(1));
-    if (!NEUG_LIKELY(ind >= 0 && ind < capacity())) {
-      THROW_INTERNAL_EXCEPTION(
-          "Reserved size is not enough: " + std::to_string(capacity()) +
-          " vs " + std::to_string(ind));
+    INDEX_T ind = static_cast<INDEX_T>(num_elements_.load());
+    if (NEUG_UNLIKELY(ind >= capacity())) {
+      if (!insert_safe) {
+        THROW_INTERNAL_EXCEPTION(
+            "Reserved size is not enough: " + std::to_string(capacity()) +
+            " vs " + std::to_string(ind));
+      } else {
+        reserve(capacity() + (capacity() >> 2));
+      }
     }
-    keys_->set_any(ind, oid);
+    ind = static_cast<INDEX_T>(num_elements_.fetch_add(1));
+    keys_->set_any(ind, oid, insert_safe);
     auto* indices_ptr = reinterpret_cast<INDEX_T*>(indices_->GetData());
     size_t index =
         hash_policy_.index_for_hash(hasher_(oid), num_slots_minus_one_);
