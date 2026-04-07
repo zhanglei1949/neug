@@ -70,7 +70,7 @@ void MMapContainer::Open(const std::string& path) {
   size_ = mmap_size_ - sizeof(FileHeader);
   unsigned char data_md5[MD5_DIGEST_LENGTH];
   MD5((unsigned char*) data_, size_, data_md5);
-  if (size_ > 0) {
+  if (size_ > 0 && enable_checksum_) {
     if (memcmp(data_md5, reinterpret_cast<FileHeader*>(mmap_data_)->data_md5,
                MD5_DIGEST_LENGTH) != 0) {
       Close();
@@ -142,7 +142,11 @@ void MMapContainer::Resize(size_t size) {
 
 void MMapContainer::Dump(const std::string& path) {
   FileHeader header;
-  MD5((unsigned char*) data_, size_, header.data_md5);
+  if (enable_checksum_) {
+    MD5((unsigned char*) data_, size_, header.data_md5);
+  } else {
+    memset(header.data_md5, 0, MD5_DIGEST_LENGTH);
+  }
   std::unique_ptr<FILE, decltype(&fclose)> fp(fopen(path.c_str(), "wb"),
                                               &fclose);
   if (fp == nullptr) {
@@ -158,6 +162,7 @@ void MMapContainer::Dump(const std::string& path) {
       THROW_IO_EXCEPTION("Failed to write data to file: " + path);
     }
   }
+  Close();
 }
 
 bool MMapContainer::IsDirty() {
@@ -172,6 +177,13 @@ bool MMapContainer::IsDirty() {
   if (size_ == 0) {
     // Header-only file: no payload to compare, so not dirty.
     return false;
+  }
+  // TODO(zhanglei): Is this correct?
+  if (!enable_checksum_) {
+    LOG(WARNING)
+        << "IsDirty() called on MMapContainer with checksum disabled; "
+        << "this will always return true even if data is not modified.";
+    return true;
   }
   unsigned char md5[MD5_DIGEST_LENGTH];
   MD5((unsigned char*) data_, size_, md5);

@@ -122,7 +122,8 @@ void FileSharedMMap::munmapImpl(void* mmap_data, size_t mmap_size) {
 }
 
 void FileSharedMMap::Sync() {
-  if (mmap_data_ == nullptr || data_ == nullptr || size_ == 0) {
+  if (mmap_data_ == nullptr || data_ == nullptr || size_ == 0 ||
+      !enable_checksum_) {
     return;
   }
   unsigned char md5[MD5_DIGEST_LENGTH];
@@ -161,6 +162,7 @@ void FileSharedMMap::Dump(const std::string& path) {
                  << "), falling back to fwrite for " << path;
     MMapContainer::Dump(path);
   }
+  Close();
 }
 
 }  // namespace neug
