@@ -31,8 +31,11 @@
 
 namespace neug {
 
-MMapContainer::MMapContainer()
-    : IDataContainer(), mmap_data_(nullptr), mmap_size_(0) {}
+MMapContainer::MMapContainer(bool enable_checksum)
+    : IDataContainer(),
+      mmap_data_(nullptr),
+      mmap_size_(0),
+      enable_checksum_(enable_checksum) {}
 
 std::string MMapContainer::GetPath() const { return path_; }
 
@@ -66,7 +69,7 @@ void MMapContainer::Open(const std::string& path) {
   }
   data_ = static_cast<char*>(mmap_data_) + sizeof(FileHeader);
   size_ = mmap_size_ - sizeof(FileHeader);
-  if (size_ > 0) {
+  if (size_ > 0 && enable_checksum_) {
     uint32_t stored =
         reinterpret_cast<const FileHeader*>(mmap_data_)->data_crc32c;
     uint32_t actual = static_cast<uint32_t>(absl::ExtendCrc32c(
@@ -142,9 +145,13 @@ void MMapContainer::Resize(size_t size) {
 
 void MMapContainer::Dump(const std::string& path) {
   FileHeader header;
-  header.data_crc32c = static_cast<uint32_t>(absl::ExtendCrc32c(
-      absl::crc32c_t{0},
-      absl::string_view(static_cast<const char*>(data_), size_)));
+  if (enable_checksum_) {
+    header.data_crc32c = static_cast<uint32_t>(absl::ExtendCrc32c(
+        absl::crc32c_t{0},
+        absl::string_view(static_cast<const char*>(data_), size_)));
+  } else {
+    header.data_crc32c = 0;
+  }
   std::unique_ptr<FILE, decltype(&fclose)> fp(fopen(path.c_str(), "wb"),
                                               &fclose);
   if (fp == nullptr) {
@@ -175,6 +182,13 @@ bool MMapContainer::IsDirty() {
   if (size_ == 0) {
     // Header-only file: no payload to compare, so not dirty.
     return false;
+  }
+  // TODO(zhanglei): Is this correct?
+  if (!enable_checksum_) {
+    LOG(WARNING)
+        << "IsDirty() called on MMapContainer with checksum disabled; "
+        << "this will always return true even if data is not modified.";
+    return true;
   }
   uint32_t actual = static_cast<uint32_t>(absl::ExtendCrc32c(
       absl::crc32c_t{0},

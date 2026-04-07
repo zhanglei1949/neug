@@ -253,9 +253,10 @@ class TypedColumn<std::string_view> : public ColumnBase {
     items_buffer_ = OpenContainer(snapshot_dir + "/" + name + ".items",
                                   work_dir + "/" + name + ".items",
                                   MemoryLevel::kSyncToFile);
+    // Skip checksum for data buffer.
     data_buffer_ = OpenContainer(snapshot_dir + "/" + name + ".data",
                                  work_dir + "/" + name + ".data",
-                                 MemoryLevel::kSyncToFile);
+                                 MemoryLevel::kSyncToFile, false);
     size_ = items_buffer_->GetDataSize() / sizeof(string_item);
     init_pos(snapshot_dir + "/" + name + ".pos");
   }
@@ -547,7 +548,6 @@ class TypedColumn<std::string_view> : public ColumnBase {
         reinterpret_cast<const char*>(data_buffer_->GetData());
     size_t write_offset = 0;
     std::unordered_map<uint64_t, uint64_t> old_offset_to_new;
-    absl::crc32c_t crc{0};
 
     for (const auto& entry : plan.entries) {
       if (entry.length > 0) {
@@ -565,23 +565,12 @@ class TypedColumn<std::string_view> : public ColumnBase {
           THROW_IO_EXCEPTION("Failed to fwrite compacted data to: " +
                              data_filename);
         }
-        crc = absl::ExtendCrc32c(crc, absl::string_view(src, entry.length));
       }
       set_string_item(entry.index,
                       {write_offset, static_cast<uint32_t>(entry.length)});
       write_offset += entry.length;
     }
 
-    // Seek back and stamp the real CRC32C into the file header.
-    header.data_crc32c = static_cast<uint32_t>(crc);
-    if (fseek(fout, 0, SEEK_SET) != 0) {
-      fclose(fout);
-      THROW_IO_EXCEPTION("Failed to seek to header in: " + data_filename);
-    }
-    if (fwrite(&header, sizeof(header), 1, fout) != 1) {
-      fclose(fout);
-      THROW_IO_EXCEPTION("Failed to write final header to: " + data_filename);
-    }
     if (fflush(fout) != 0) {
       fclose(fout);
       THROW_IO_EXCEPTION("Failed to fflush: " + data_filename);
