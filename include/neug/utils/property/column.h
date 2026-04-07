@@ -262,7 +262,8 @@ class TypedColumn<std::string_view> : public ColumnBase {
   void open_in_memory(const std::string& prefix) override {
     items_buffer_ =
         OpenContainer(prefix + ".items", "", MemoryLevel::kInMemory);
-    data_buffer_ = OpenContainer(prefix + ".data", "", MemoryLevel::kInMemory);
+    data_buffer_ =
+        OpenContainer(prefix + ".data", "", MemoryLevel::kInMemory, false);
     size_ = items_buffer_->GetDataSize() / sizeof(string_item);
     init_pos(prefix + ".pos");
   }
@@ -270,8 +271,8 @@ class TypedColumn<std::string_view> : public ColumnBase {
   void open_with_hugepages(const std::string& prefix) override {
     items_buffer_ =
         OpenContainer(prefix + ".items", "", MemoryLevel::kHugePagePrefered);
-    data_buffer_ =
-        OpenContainer(prefix + ".data", "", MemoryLevel::kHugePagePrefered);
+    data_buffer_ = OpenContainer(prefix + ".data", "",
+                                 MemoryLevel::kHugePagePrefered, false);
     size_ = items_buffer_->GetDataSize() / sizeof(string_item);
     init_pos(prefix + ".pos");
   }
@@ -390,7 +391,7 @@ class TypedColumn<std::string_view> : public ColumnBase {
     }
   }
 
-  // TODO(zhanglei): Maybe set_any should not need insert_safe parameter
+  // TODO(zhanglei): Maybe set_any dose not need insert_safe parameter
   void set_any(size_t idx, const Property& value, bool insert_safe) override {
     set_value(idx, value.as_string_view());
   }
@@ -417,6 +418,10 @@ class TypedColumn<std::string_view> : public ColumnBase {
   }
 
   size_t available_space() const {
+    if (!data_buffer_) {
+      return 0;
+    }
+    assert(pos_.load() <= data_buffer_->GetDataSize());
     return data_buffer_->GetDataSize() - pos_.load();
   }
 
