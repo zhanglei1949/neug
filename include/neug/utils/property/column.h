@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -507,8 +508,9 @@ class TypedColumn<std::string_view> : public ColumnBase {
     size_t old_pos = pos_.load();
     // After compaction, also reserve some extra space based on average string
     // length.
-    size_t avg_size = string_avg_size() > 0 ? string_avg_size() : width_;
-    data_buffer_->Resize(std::max(size_ * avg_size, write_ptr));
+    size_t avg_size = string_avg_size();
+    data_buffer_->Resize(
+        std::max(size_ * (avg_size > 0 ? avg_size : width_), write_ptr));
     pos_.store(write_ptr);
     VLOG(1) << "StringColumn compact_in_place: " << old_pos << " -> "
             << write_ptr << " bytes";
