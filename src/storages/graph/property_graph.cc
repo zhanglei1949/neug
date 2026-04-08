@@ -28,6 +28,7 @@
 #include <utility>
 
 #include "neug/storages/file_names.h"
+#include "neug/utils/bulk_load_profiler.h"
 #include "neug/utils/exception/exception.h"
 #include "neug/utils/file_utils.h"
 #include "neug/utils/indexers.h"
@@ -932,6 +933,7 @@ void PropertyGraph::compact_schema() {
 
 void PropertyGraph::Compact(bool compact_csr, float reserve_ratio,
                             timestamp_t ts) {
+  BLPROF_SCOPE("PropertyGraph::Compact");
   /**
    * The compaction process includes two parts:
    * 1. Schema: remove the deleted properties and labels from
@@ -974,6 +976,7 @@ void PropertyGraph::Compact(bool compact_csr, float reserve_ratio,
 }
 
 void PropertyGraph::Dump(bool reopen) {
+  BLPROF_SCOPE("PropertyGraph::Dump");
   // First dump to the  temp dir, then move to the checkpoint dir
   std::string target_dir = temp_checkpoint_dir(work_dir_);
   if (std::filesystem::exists(target_dir)) {
@@ -1034,7 +1037,10 @@ void PropertyGraph::Dump(bool reopen) {
     }
   }
   DumpSchema();
-  copy_directory(target_dir, checkpoint_dir(work_dir_), true, true);
+  {
+    BLPROF_SCOPE("PropertyGraph::Dump/copy_directory");
+    copy_directory(target_dir, checkpoint_dir(work_dir_), true, true);
+  }
   remove_directory(target_dir);
   remove_directory(tmp_dir(work_dir_));
   remove_directory(wal_dir(work_dir_));

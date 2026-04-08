@@ -33,6 +33,7 @@
 #include "neug/storages/file_names.h"
 #include "neug/storages/loader/loader_utils.h"
 #include "neug/utils/arrow_utils.h"
+#include "neug/utils/bulk_load_profiler.h"
 #include "neug/utils/file_utils.h"
 #include "neug/utils/property/types.h"
 
@@ -601,6 +602,8 @@ void EdgeTable::Open(const std::string& work_dir, MemoryLevel memory_level) {
 }
 
 void EdgeTable::Dump(const std::string& checkpoint_dir_path) {
+  BLPROF_SCOPE_STR("EdgeTable::Dump[" + meta_->src_label_name + "-" +
+                   meta_->edge_label_name + "-" + meta_->dst_label_name + "]");
   in_csr_->dump(ie_prefix(meta_->src_label_name, meta_->dst_label_name,
                           meta_->edge_label_name),
                 checkpoint_dir_path);
@@ -878,6 +881,8 @@ int32_t EdgeTable::AddEdge(vid_t src_lid, vid_t dst_lid,
 void EdgeTable::BatchAddEdges(const IndexerType& src_indexer,
                               const IndexerType& dst_indexer,
                               std::shared_ptr<IRecordBatchSupplier> supplier) {
+  BLPROF_SCOPE_STR("EdgeTable::BatchAddEdges[" + meta_->src_label_name + "-" +
+                   meta_->edge_label_name + "-" + meta_->dst_label_name + "]");
   in_csr_->resize(dst_indexer.size());
   out_csr_->resize(src_indexer.size());
   std::vector<vid_t> src_lid, dst_lid;
@@ -963,6 +968,8 @@ void EdgeTable::BatchAddEdges(
 
 void EdgeTable::Compact(bool compact_csr, bool sort_on_compaction,
                         timestamp_t ts) {
+  BLPROF_SCOPE_STR("EdgeTable::Compact[" + meta_->src_label_name + "-" +
+                   meta_->edge_label_name + "-" + meta_->dst_label_name + "]");
   if (compact_csr) {
     out_csr_->compact();
     in_csr_->compact();

@@ -32,6 +32,7 @@
 #include "neug/storages/loader/i_fragment_loader.h"
 #include "neug/storages/loader/loader_factory.h"
 #include "neug/storages/loader/loading_config.h"
+#include "neug/utils/bulk_load_profiler.h"
 #include "neug/utils/result.h"
 
 static std::string work_dir;
@@ -189,6 +190,7 @@ int main(int argc, char** argv) {
   auto end = std::chrono::high_resolution_clock::now();
   double elapsed = std::chrono::duration<double>(end - start).count();
   LOG(INFO) << "Finished bulk loading in " << elapsed << " seconds.";
+  neug::BulkLoadProfiler::Get().PrintReport(data_path + "/bulk_load_perf.txt");
 
   // Also copy the graph.yaml to the data directory
   std::error_code ec;

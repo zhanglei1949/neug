@@ -16,6 +16,7 @@
 #include "neug/storages/loader/abstract_property_graph_loader.h"
 #include "neug/storages/loader/loader_utils.h"
 #include "neug/utils/arrow_utils.h"
+#include "neug/utils/bulk_load_profiler.h"
 
 namespace neug {
 
@@ -23,6 +24,7 @@ void AbstractPropertyGraphLoader::addVerticesToVertexTable(
     label_t v_label_id, const std::string& label_name, DataType pk_type,
     const std::string& pk_name, int pk_ind,
     const std::vector<std::string>& v_files) {
+  BLPROF_SCOPE_STR("addVertices[" + label_name + "]");
   for (auto& v_file : v_files) {
     LOG(INFO) << "Start to load vertex label: " << label_name
               << " from file: " << v_file;
@@ -112,6 +114,7 @@ void AbstractPropertyGraphLoader::loadVertices() {
 void AbstractPropertyGraphLoader::addEdgesToEdgeTable(
     label_t src_label_id, label_t dst_label_id, label_t e_label_id,
     const std::vector<std::string>& e_files) {
+  BLPROF_SCOPE_STR("addEdges[" + schema_.get_edge_label_name(e_label_id) + "]");
   for (auto& e_file : e_files) {
     LOG(INFO) << "Start to load edge label: "
               << schema_.get_edge_label_name(e_label_id)
@@ -184,10 +187,22 @@ void AbstractPropertyGraphLoader::loadEdges() {
 
 result<bool> AbstractPropertyGraphLoader::LoadFragment() {
   try {
-    loadVertices();
-    loadEdges();
-    graph_.Compact(false, 0.0, 1);
-    graph_.Dump(false);
+    {
+      BLPROF_SCOPE("Phase/loadVertices");
+      loadVertices();
+    }
+    {
+      BLPROF_SCOPE("Phase/loadEdges");
+      loadEdges();
+    }
+    {
+      BLPROF_SCOPE("Phase/Compact");
+      graph_.Compact(false, 0.0, 1);
+    }
+    {
+      BLPROF_SCOPE("Phase/Dump");
+      graph_.Dump(false);
+    }
 
   } catch (const std::exception& e) {
     printDiskRemaining(work_dir_);

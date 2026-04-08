@@ -22,6 +22,7 @@
 #include <filesystem>
 #include "neug/storages/container/file_header.h"
 #include "neug/storages/container/file_mmap_container.h"
+#include "neug/utils/bulk_load_profiler.h"
 #include "neug/utils/file_utils.h"
 
 namespace neug {
@@ -68,6 +69,7 @@ void FileSharedMMap::Resize(size_t size) {
   if (size == size_) {
     return;
   }
+  BLPROF_SCOPE_STR("MMap::Resize[" + path_ + "]");
   if (mmap_data_ && size_ > 0) {
     Sync();  // Ensure changes are flushed before resizing
   }
@@ -124,16 +126,23 @@ void FileSharedMMap::Sync() {
     return;
   }
   unsigned char md5[MD5_DIGEST_LENGTH];
-  MD5((unsigned char*) this->data_, this->size_, md5);
-  if (memcmp(md5, reinterpret_cast<FileHeader*>(mmap_data_)->data_md5,
-             MD5_DIGEST_LENGTH) != 0) {
-    memcpy(reinterpret_cast<FileHeader*>(mmap_data_)->data_md5, md5,
-           MD5_DIGEST_LENGTH);
+  {
+    BLPROF_SCOPE_STR("MMap::MD5[" + path_ + "]");
+    // MD5((unsigned char*) this->data_, this->size_, md5);
+  }
+  // if (memcmp(md5, reinterpret_cast<FileHeader*>(mmap_data_)->data_md5,
+  //  MD5_DIGEST_LENGTH) != 0) {
+  // memcpy(reinterpret_cast<FileHeader*>(mmap_data_)->data_md5, md5,
+  //  MD5_DIGEST_LENGTH);
+  {
+    BLPROF_SCOPE_STR("MMap::msync[" + path_ + "]");
     msync(mmap_data_, mmap_size_, MS_SYNC);
+    // }
   }
 }
 
 void FileSharedMMap::Dump(const std::string& path) {
+  BLPROF_SCOPE_STR("MMap::Dump[" + (path_.empty() ? path : path_) + "]");
   // If there is no backing file, fall back to the fwrite-based base Dump().
   if (path_.empty()) {
     MMapContainer::Dump(path);

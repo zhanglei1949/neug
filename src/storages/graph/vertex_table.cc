@@ -14,6 +14,7 @@
  */
 
 #include "neug/storages/graph/vertex_table.h"
+#include "neug/utils/bulk_load_profiler.h"
 #include "neug/utils/file_utils.h"
 #include "neug/utils/likely.h"
 
@@ -56,6 +57,7 @@ void VertexTable::Open(const std::string& work_dir, MemoryLevel memory_level) {
 
 void VertexTable::insert_vertices(
     std::shared_ptr<IRecordBatchSupplier> supplier) {
+  BLPROF_SCOPE_STR("VertexTable::insert[" + vertex_schema_->label_name + "]");
   auto pk_type_id = pk_type_.id();
   if (pk_type_id == DataTypeId::kInt64) {
     insert_vertices_impl<int64_t>(supplier);
@@ -75,6 +77,7 @@ void VertexTable::insert_vertices(
 }
 
 void VertexTable::Dump(const std::string& target_dir) {
+  BLPROF_SCOPE_STR("VertexTable::Dump[" + vertex_schema_->label_name + "]");
   const auto& label_name = vertex_schema_->label_name;
   indexer_.dump(IndexerType::prefix() + "_" + vertex_map_prefix(label_name),
                 target_dir);

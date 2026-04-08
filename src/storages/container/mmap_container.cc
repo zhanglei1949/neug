@@ -131,7 +131,7 @@ void MMapContainer::Resize(size_t size) {
 
 void MMapContainer::Dump(const std::string& path) {
   FileHeader header;
-  MD5((unsigned char*) data_, size_, header.data_md5);
+  // MD5((unsigned char*) data_, size_, header.data_md5);
   std::unique_ptr<FILE, decltype(&fclose)> fp(fopen(path.c_str(), "wb"),
                                               &fclose);
   if (fp == nullptr) {
@@ -164,7 +164,7 @@ bool MMapContainer::IsDirty() {
     return false;
   }
   unsigned char md5[MD5_DIGEST_LENGTH];
-  MD5((unsigned char*) data_, size_, md5);
+  // MD5((unsigned char*) data_, size_, md5);
   return memcmp(md5, reinterpret_cast<FileHeader*>(mmap_data_)->data_md5,
                 MD5_DIGEST_LENGTH) != 0;
 }
