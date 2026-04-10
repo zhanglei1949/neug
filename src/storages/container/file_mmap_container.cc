@@ -152,11 +152,6 @@ void FileSharedMMap::Dump(const std::string& path) {
                  << "), falling back to fwrite for " << path;
     MMapContainer::Dump(path);
   }
-  // Sync() has already been executed above, so avoid Close() here to prevent
-  // an extra full-payload MD5 pass.
-  if (mmap_data_ && mmap_size_ > 0) {
-    munmapImpl(mmap_data_, mmap_size_);
-  }
   Close();
 }
 
