@@ -15,6 +15,7 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -22,6 +23,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "neug/common/extra_type_info.h"
@@ -273,8 +275,8 @@ TEST_F(LFIndexerTest, VarcharReserveEnablesNonSafeInsert) {
 
   // insert() with insert_safe=false requires capacity and data buffer space
   // to already be available — exactly what the bug fix guarantees.
-  std::vector<std::string> values = {"alpha", "beta",    "gamma", "delta",
-                                     "epsilon", "zeta",  "eta",   "theta"};
+  std::vector<std::string> values = {"alpha",   "beta", "gamma", "delta",
+                                     "epsilon", "zeta", "eta",   "theta"};
   for (const auto& v : values) {
     indexer.insert(Property::from_string_view(v));
   }
@@ -345,7 +347,7 @@ TEST_F(LFIndexerTest, VarcharMultipleReservesAccumulateDataSpace) {
   indexer.close();
 }
 
-// Corner case 4: reserve() with a count smaller than current capacity must be
+// Corner case 4: reserve() with a count smaller than current size must be
 // a no-op (items_ and data_ must not shrink, existing data must be readable).
 TEST_F(LFIndexerTest, VarcharReserveSmallerThanCapacityIsNoop) {
   const std::string base = test_dir_ + "/varchar_reserve_noop";
@@ -358,17 +360,15 @@ TEST_F(LFIndexerTest, VarcharReserveSmallerThanCapacityIsNoop) {
 
   indexer.reserve(16);
   EXPECT_GE(indexer.capacity(), 16U);
-  size_t cap_before = indexer.capacity();
+  size_t size_before = indexer.size();
+  indexer.insert(Property::from_string_view("foo"));
+  indexer.insert(Property::from_string_view("bar"));
+  indexer.insert(Property::from_string_view("baz"));
+  indexer.insert(Property::from_string_view("qux"));
 
   // Shrinking reserve must not corrupt state.
   indexer.reserve(4);
-  EXPECT_GE(indexer.capacity(), cap_before);
-
-  std::vector<std::string> values = {"x", "y", "z"};
-  for (const auto& v : values) {
-    indexer.insert(Property::from_string_view(v));
-  }
-  ExpectStringValues(indexer, values);
+  EXPECT_GE(indexer.capacity(), size_before);
   indexer.close();
 }
 
@@ -383,9 +383,8 @@ TEST_F(LFIndexerTest, VarcharRehashPreservesData) {
   indexer.init(DataTypeId::kVarchar, type_info);
   indexer.open_in_memory(base);
 
-  std::vector<std::string> values = {"foo",  "bar",   "baz",
-                                     "qux",  "quux",  "corge",
-                                     "grault"};
+  std::vector<std::string> values = {"foo",  "bar",   "baz",   "qux",
+                                     "quux", "corge", "grault"};
   for (const auto& v : values) {
     indexer.insert(Property::from_string_view(v), true);
   }

@@ -342,17 +342,23 @@ class LFIndexer {
 
   INDEX_T insert(const Property& oid, bool insert_safe = false) {
     assert(oid.type() == get_type());
-    INDEX_T ind = static_cast<INDEX_T>(num_elements_.load());
-    if (NEUG_UNLIKELY(ind >= capacity())) {
-      if (!insert_safe) {
-        THROW_INTERNAL_EXCEPTION(
-            "Reserved size is not enough: " + std::to_string(capacity()) +
-            " vs " + std::to_string(ind));
-      } else {
-        reserve(capacity() + (capacity() >> 2));
+
+    if (insert_safe) {
+      if (NEUG_UNLIKELY(num_elements_.load(std::memory_order_relaxed) >=
+                        capacity())) {
+        size_t cap = capacity();
+        reserve(cap + (cap >> 2));
       }
     }
-    ind = static_cast<INDEX_T>(num_elements_.fetch_add(1));
+    INDEX_T ind = static_cast<INDEX_T>(
+        num_elements_.fetch_add(1, std::memory_order_acq_rel));
+
+    if (!insert_safe && NEUG_UNLIKELY(static_cast<size_t>(ind) >= capacity())) {
+      THROW_INTERNAL_EXCEPTION(
+          "Reserved size is not enough: " + std::to_string(capacity()) +
+          " vs " + std::to_string(ind));
+    }
+
     keys_->set_any(ind, oid, insert_safe);
     auto* indices_ptr = reinterpret_cast<INDEX_T*>(indices_->GetData());
     size_t index =
