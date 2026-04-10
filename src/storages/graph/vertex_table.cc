@@ -125,7 +125,7 @@ bool VertexTable::AddVertex(const Property& id,
   if (indexer_.capacity() <= indexer_.size()) {
     return false;
   }
-  vid = insert_vertex_pk(id, ts);
+  vid = insert_vertex_pk(id, ts, insert_safe);
   assert([&]() {
     if (table_->col_num() > 0) {
       return vid < table_->get_column_by_id(0)->size();
@@ -263,7 +263,8 @@ void VertexTable::Compact(timestamp_t ts) {
   // TODO(zhanglei): Support compact unused lid in indexer_ and table
 }
 
-vid_t VertexTable::insert_vertex_pk(const Property& id, timestamp_t ts) {
+vid_t VertexTable::insert_vertex_pk(const Property& id, timestamp_t ts,
+                                    bool insert_safe) {
   vid_t vid;
   if (NEUG_UNLIKELY(indexer_.get_index(id, vid))) {
     if (NEUG_UNLIKELY(v_ts_.IsVertexValid(vid, ts))) {
@@ -272,7 +273,7 @@ vid_t VertexTable::insert_vertex_pk(const Property& id, timestamp_t ts) {
                                        std::to_string(vid));
     }
   } else {
-    vid = indexer_.insert(id);
+    vid = indexer_.insert(id, insert_safe);
   }
   v_ts_.InsertVertex(vid, ts);
   return vid;
