@@ -70,9 +70,6 @@ void FileSharedMMap::Resize(size_t size) {
     return;
   }
   BLPROF_SCOPE_STR("MMap::Resize[" + path_ + "]");
-  if (mmap_data_ && size_ > 0) {
-    Sync();  // Ensure changes are flushed before resizing
-  }
   size_t real_size = size + sizeof(FileHeader);
   if (mmap_data_ && mmap_size_ > 0) {
     munmapImpl(mmap_data_, mmap_size_);
@@ -100,10 +97,6 @@ void FileSharedMMap::Resize(size_t size) {
   }
   data_ = static_cast<char*>(mmap_data_) + sizeof(FileHeader);
   size_ = mmap_size_ - sizeof(FileHeader);
-  // Recompute and persist the MD5 for the new payload (including any
-  // zero-extended region from ftruncate), so that a subsequent Open()
-  // passes the integrity check.
-  Sync();
 }
 
 void* FileSharedMMap::mmapImpl(const std::string& path, size_t mmap_size) {
@@ -128,16 +121,16 @@ void FileSharedMMap::Sync() {
   unsigned char md5[MD5_DIGEST_LENGTH];
   {
     BLPROF_SCOPE_STR("MMap::MD5[" + path_ + "]");
-    // MD5((unsigned char*) this->data_, this->size_, md5);
+    MD5((unsigned char*) this->data_, this->size_, md5);
   }
-  // if (memcmp(md5, reinterpret_cast<FileHeader*>(mmap_data_)->data_md5,
-  //  MD5_DIGEST_LENGTH) != 0) {
-  // memcpy(reinterpret_cast<FileHeader*>(mmap_data_)->data_md5, md5,
-  //  MD5_DIGEST_LENGTH);
-  {
-    BLPROF_SCOPE_STR("MMap::msync[" + path_ + "]");
-    msync(mmap_data_, mmap_size_, MS_SYNC);
-    // }
+  if (memcmp(md5, reinterpret_cast<FileHeader*>(mmap_data_)->data_md5,
+             MD5_DIGEST_LENGTH) != 0) {
+    memcpy(reinterpret_cast<FileHeader*>(mmap_data_)->data_md5, md5,
+           MD5_DIGEST_LENGTH);
+    {
+      BLPROF_SCOPE_STR("MMap::msync[" + path_ + "]");
+      msync(mmap_data_, mmap_size_, MS_SYNC);
+    }
   }
 }
 
@@ -168,7 +161,17 @@ void FileSharedMMap::Dump(const std::string& path) {
                  << "), falling back to fwrite for " << path;
     MMapContainer::Dump(path);
   }
-  Close();
+
+  // Sync() has already been executed above, so avoid Close() here to prevent
+  // an extra full-payload MD5 pass.
+  if (mmap_data_ && mmap_size_ > 0) {
+    munmapImpl(mmap_data_, mmap_size_);
+  }
+  path_.clear();
+  mmap_data_ = nullptr;
+  mmap_size_ = 0;
+  data_ = nullptr;
+  size_ = 0;
 }
 
 }  // namespace neug

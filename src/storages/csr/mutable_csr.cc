@@ -168,8 +168,8 @@ void MutableCsr<EDATA_T>::dump(const std::string& name,
   if (fwrite(&header, sizeof(FileHeader), 1, fp.get()) != 1) {
     THROW_IO_EXCEPTION("Failed to write header to: " + nbr_path);
   }
-  // MD5_CTX ctx;
-  // MD5_Init(&ctx);
+  MD5_CTX ctx;
+  MD5_Init(&ctx);
   for (size_t i = 0; i < vnum; ++i) {
     const void* data = lists[i];
     size_t len = static_cast<size_t>(caps[i]) * sizeof(nbr_t);
@@ -180,9 +180,9 @@ void MutableCsr<EDATA_T>::dump(const std::string& name,
       THROW_IO_EXCEPTION("Failed to write segment " + std::to_string(i) +
                          " to: " + nbr_path);
     }
-    // MD5_Update(&ctx, data, len);
+    MD5_Update(&ctx, data, len);
   }
-  // MD5_Final(header.data_md5, &ctx);
+  MD5_Final(header.data_md5, &ctx);
   if (fseek(fp.get(), 0, SEEK_SET) != 0) {
     THROW_IO_EXCEPTION("Failed to seek in: " + nbr_path);
   }

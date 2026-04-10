@@ -26,12 +26,15 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <array>
 #include <cassert>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <iostream>
+#include <random>
 #include <string>
 
 #include <glog/logging.h>
@@ -50,11 +53,51 @@ static constexpr size_t kFileSize =
 static constexpr size_t kFileSize = static_cast<size_t>(FILE_SIZE);
 #endif
 
+// Pure in-memory MD5 benchmark payload size. Override at compile time via
+// -DMD5_STRING_DATA_SIZE=... or at runtime via NEUG_TEST_MD5_BYTES.
+#ifndef MD5_STRING_DATA_SIZE
+static constexpr size_t kMD5StringDataSize =
+    static_cast<size_t>(256) * 1024 * 1024;  // 256 MiB
+#else
+static constexpr size_t kMD5StringDataSize =
+    static_cast<size_t>(MD5_STRING_DATA_SIZE);
+#endif
+
+#ifndef MD5_STRING_ITERATIONS
+static constexpr size_t kMD5StringIterations = 1;
+#else
+static constexpr size_t kMD5StringIterations =
+    static_cast<size_t>(MD5_STRING_ITERATIONS);
+#endif
+
 using Clock = std::chrono::high_resolution_clock;
 using Ms = std::chrono::duration<double, std::milli>;
 
 static double elapsed_ms(Clock::time_point t0) {
   return Ms(Clock::now() - t0).count();
+}
+
+static size_t ReadSizeEnvOrDefault(const char* name, size_t default_value) {
+  const char* value = std::getenv(name);
+  if (value == nullptr || value[0] == '\0') {
+    return default_value;
+  }
+  char* end = nullptr;
+  unsigned long long parsed = std::strtoull(value, &end, 10);
+  if (end == value || *end != '\0') {
+    return default_value;
+  }
+  return static_cast<size_t>(parsed);
+}
+
+static std::string MakeRandomStringData(size_t size) {
+  std::string data(size, '\0');
+  std::mt19937_64 generator(std::random_device{}());
+  std::uniform_int_distribution<int> distribution(0, 255);
+  for (size_t index = 0; index < size; ++index) {
+    data[index] = static_cast<char>(distribution(generator));
+  }
+  return data;
 }
 
 // ---------------------------------------------------------------------------
@@ -230,4 +273,37 @@ TEST_F(FileSharedMMapPerfTest, DumpToSameFile) {
 
   // mapping is NOT closed for same-path Dump.
   mm.Close();
+}
+
+// ---------------------------------------------------------------------------
+// Test 5 - cost of calculating the MD5 sum for an in-memory string data array
+//   This isolates the digest computation from mmap/file-system overhead.
+// ---------------------------------------------------------------------------
+TEST(FileSharedMMapPerfStandaloneTest, MD5StringDataArray) {
+  size_t data_size =
+      ReadSizeEnvOrDefault("NEUG_TEST_MD5_BYTES", kMD5StringDataSize);
+  size_t iterations =
+      ReadSizeEnvOrDefault("NEUG_TEST_MD5_ITERATIONS", kMD5StringIterations);
+  ASSERT_GT(data_size, 0U);
+  ASSERT_GT(iterations, 0U);
+
+  std::string payload = MakeRandomStringData(data_size);
+  std::array<unsigned char, MD5_DIGEST_LENGTH> digest{};
+
+  auto t0 = Clock::now();
+  for (size_t iteration = 0; iteration < iterations; ++iteration) {
+    unsigned char* result =
+        MD5(reinterpret_cast<const unsigned char*>(payload.data()),
+            payload.size(), digest.data());
+    ASSERT_NE(result, nullptr);
+  }
+  double total_ms = elapsed_ms(t0);
+
+  std::array<unsigned char, MD5_DIGEST_LENGTH> zero_digest{};
+  EXPECT_NE(std::memcmp(digest.data(), zero_digest.data(), digest.size()), 0);
+
+  std::cout << "[MD5 string data array] " << total_ms << " ms total, "
+            << (total_ms / static_cast<double>(iterations))
+            << " ms avg per iteration (" << data_size / (1024.0 * 1024.0)
+            << " MiB, iterations=" << iterations << ")\n";
 }

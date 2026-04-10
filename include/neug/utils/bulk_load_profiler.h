@@ -117,37 +117,23 @@ class BulkLoadProfiler {
     std::sort(sorted.begin(), sorted.end(),
               [](const auto& a, const auto& b) { return a.second.total_ms > b.second.total_ms; });
 
-    // Format the table.
-    constexpr int kKeyW = 80;
-    constexpr int kCntW = 7;
-    constexpr int kTotW = 12;
-    constexpr int kAvgW = 11;
-    constexpr int kMinW = 11;
-    constexpr int kMaxW = 11;
-    constexpr int kRowW = kKeyW + kCntW + kTotW + kAvgW + kMinW + kMaxW;
-
+    // Format as markdown table.
     std::ostringstream oss;
-    oss << "\n=== Bulk Load Profiling Report ===\n";
-    oss << std::left << std::setw(kKeyW) << "Operation" << std::right << std::setw(kCntW) << "Calls"
-        << std::setw(kTotW) << "Total(s)" << std::setw(kAvgW) << "Avg(ms)" << std::setw(kMinW)
-        << "Min(ms)" << std::setw(kMaxW) << "Max(ms)"
-        << "\n";
-    oss << std::string(kRowW, '-') << "\n";
+    oss << "# Bulk Load Profiling Report\n\n";
+    oss << "| Operation | Calls | Total(s) | Avg(ms) | Min(ms) | Max(ms) |\n";
+    oss << "|-----------|-------|----------|---------|---------|----------|\n";
 
     for (auto& [key, e] : sorted) {
       double avg = e.count > 0 ? e.total_ms / static_cast<double>(e.count) : 0.0;
       double min_ms = e.count > 0 ? e.min_ms : 0.0;
-      // Truncate long keys so the table doesn't wrap.
-      std::string display_key = key;
-      if (static_cast<int>(display_key.size()) > kKeyW - 1) {
-        display_key = display_key.substr(0, kKeyW - 4) + "...";
-      }
-      oss << std::left << std::setw(kKeyW) << display_key << std::right << std::fixed
-          << std::setprecision(3) << std::setw(kCntW) << e.count << std::setw(kTotW)
-          << e.total_ms / 1000.0 << std::setw(kAvgW) << avg << std::setw(kMinW) << min_ms
-          << std::setw(kMaxW) << e.max_ms << "\n";
+
+      oss << "| " << key << " | " << e.count << " | " << std::fixed << std::setprecision(3)
+          << e.total_ms / 1000.0 << " | " << std::fixed << std::setprecision(3) << avg << " | "
+          << std::fixed << std::setprecision(3) << min_ms << " | " << std::fixed
+          << std::setprecision(3) << e.max_ms << " |\n";
     }
-    oss << "=== End of Report ===\n";
+    oss << "\n---\n*Report generated at "
+        << std::chrono::system_clock::now().time_since_epoch().count() << "*\n";
 
     std::string report = oss.str();
 
@@ -160,9 +146,16 @@ class BulkLoadProfiler {
       if (f.is_open()) {
         f << report;
         f.flush();
-        LOG(INFO) << "Bulk load profiling report written to: " << file_path;
+        // Extract just the filename from the path
+        auto last_slash = file_path.find_last_of("/\\");
+        std::string file_name =
+            (last_slash != std::string::npos) ? file_path.substr(last_slash + 1) : file_path;
+        LOG(INFO) << "Bulk load profiling report written to: " << file_name;
       } else {
-        LOG(WARNING) << "Failed to open profiling report file: " << file_path;
+        auto last_slash = file_path.find_last_of("/\\");
+        std::string file_name =
+            (last_slash != std::string::npos) ? file_path.substr(last_slash + 1) : file_path;
+        LOG(WARNING) << "Failed to open profiling report file: " << file_name;
       }
     }
   }
