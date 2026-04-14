@@ -374,7 +374,7 @@ TEST_F(UpdateTransactionTest, AddVertex) {
   {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto person_label = gi.schema().get_vertex_label_id("person");
     EXPECT_EQ(count_vertices(gi, person_label), 3);
   }
@@ -406,7 +406,7 @@ TEST_F(UpdateTransactionTest, AddVertexBatch) {
   {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto person_label = gi.schema().get_vertex_label_id("person");
     EXPECT_EQ(count_vertices(gi, person_label), 9999);
   }
@@ -442,7 +442,7 @@ TEST_F(UpdateTransactionTest, AddEdge) {
   {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto person_label = gi.schema().get_vertex_label_id("person");
     auto software_label = gi.schema().get_vertex_label_id("software");
     auto created_label = gi.schema().get_edge_label_id("created");
@@ -512,7 +512,7 @@ TEST_F(UpdateTransactionTest, AddVertexEdge) {
   {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto person_label = gi.schema().get_vertex_label_id("person");
     EXPECT_EQ(count_vertices(gi, person_label), 3);
     auto software_label = gi.schema().get_vertex_label_id("software");
@@ -573,7 +573,7 @@ TEST_F(UpdateTransactionTest, AddVertexEdgeAbort) {
   {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto person_label = gi.schema().get_vertex_label_id("person");
     EXPECT_EQ(count_vertices(gi, person_label), 2);
     auto software_label = gi.schema().get_vertex_label_id("software");
@@ -615,7 +615,7 @@ TEST_F(UpdateTransactionTest, UpdateVertexProperty) {
   {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto person_label = gi.schema().get_vertex_label_id("person");
     auto vprop_accessor = std::dynamic_pointer_cast<
         neug::StorageReadInterface::vertex_column_t<int64_t>>(
@@ -659,7 +659,7 @@ TEST_F(UpdateTransactionTest, UpdateEdgeProperty) {
   {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto person_label = gi.schema().get_vertex_label_id("person");
     auto software_label = gi.schema().get_vertex_label_id("software");
     auto created_label = gi.schema().get_edge_label_id("created");
@@ -702,7 +702,7 @@ TEST_F(UpdateTransactionTest, AddVertexAbort) {
   {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto person_label = gi.schema().get_vertex_label_id("person");
     EXPECT_EQ(count_vertices(gi, person_label), 2);
   }
@@ -743,7 +743,7 @@ TEST_F(UpdateTransactionTest, AddEdgeAbort) {
   {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto person_label = gi.schema().get_vertex_label_id("person");
     auto software_label = gi.schema().get_vertex_label_id("software");
     auto created_label = gi.schema().get_edge_label_id("created");
@@ -785,7 +785,7 @@ TEST_F(UpdateTransactionTest, UpdateVertexAbort) {
   {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto person_label = gi.schema().get_vertex_label_id("person");
     auto vprop_accessor = std::dynamic_pointer_cast<
         neug::StorageReadInterface::vertex_column_t<int64_t>>(
@@ -843,7 +843,7 @@ TEST_F(UpdateTransactionTest, UpdateEdgeAbort) {
   {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto person_label = gi.schema().get_vertex_label_id("person");
     auto software_label = gi.schema().get_vertex_label_id("software");
     auto created_label = gi.schema().get_edge_label_id("created");
@@ -912,7 +912,7 @@ TEST_F(UpdateTransactionTest, UpdateEdgeAbort2) {
   {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto person_label = gi.schema().get_vertex_label_id("person");
     auto knows_label = gi.schema().get_edge_label_id("knows");
     auto view =
@@ -989,7 +989,7 @@ TEST_F(UpdateTransactionTest, AddEdgeAndUpdateAndAbort) {
   {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto person_label = gi.schema().get_vertex_label_id("person");
     auto software_label = gi.schema().get_vertex_label_id("software");
     auto created_label = gi.schema().get_edge_label_id("created");
@@ -1039,7 +1039,7 @@ TEST_F(UpdateTransactionTest, DeleteVertex) {
   {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto person_label = gi.schema().get_vertex_label_id("person");
     auto created_label = gi.schema().get_edge_label_id("created");
     auto software_label = gi.schema().get_vertex_label_id("software");
@@ -1140,7 +1140,7 @@ TEST_F(UpdateTransactionTest, DeleteEdgeAbort) {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
     // Check edge count
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto p_label_id = gi.schema().get_vertex_label_id("person");
     auto s_label_id = gi.schema().get_vertex_label_id("software");
     auto e_label_id = gi.schema().get_edge_label_id("created");
@@ -1187,7 +1187,7 @@ TEST_F(UpdateTransactionTest, AddDeleteVertexAbort) {
   {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto person_label = gi.schema().get_vertex_label_id("person");
     EXPECT_EQ(count_vertices(gi, person_label), 2);
     neug::vid_t vertex_id;
@@ -1212,7 +1212,7 @@ TEST_F(UpdateTransactionTest, AddDeleteVertexAbort) {
   {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto person_label = gi.schema().get_vertex_label_id("person");
     EXPECT_EQ(count_vertices(gi, person_label), 3);
     neug::vid_t vertex_id;
@@ -1241,7 +1241,7 @@ TEST_F(UpdateTransactionTest, CreteEdgeTypeAndAbort) {
   {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto person_label = gi.schema().get_vertex_label_id("person");
     auto software_label = gi.schema().get_vertex_label_id("software");
     EXPECT_THROW(gi.schema().get_edge_label_id("developed"),
@@ -1281,7 +1281,7 @@ TEST_F(UpdateTransactionTest, CreteEdgeTypeAndCommit) {
   {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto person_label = gi.schema().get_vertex_label_id("person");
     auto software_label = gi.schema().get_vertex_label_id("software");
     EXPECT_EQ(gi.schema().get_edge_label_id("developed"), dev_label);
@@ -1315,7 +1315,7 @@ TEST_F(UpdateTransactionTest, DeleteEdgeTypeAbort) {
   {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto created_label = gi.schema().get_edge_label_id("created");
     auto person_label = gi.schema().get_vertex_label_id("person");
     auto software_label = gi.schema().get_vertex_label_id("software");
@@ -1374,7 +1374,7 @@ TEST_F(UpdateTransactionTest, AddVertexProperties) {
   {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto person_label = gi.schema().get_vertex_label_id("person");
     EXPECT_EQ(gi.GetVertexPropColumn(person_label, "address"), nullptr);
 
@@ -1428,7 +1428,7 @@ TEST_F(UpdateTransactionTest, AddEdgeProperties) {
   {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    auto gi = neug::StorageReadInterface(txn.graph(), txn.timestamp());
+    auto gi = neug::StorageReadInterface(txn.view(), txn.timestamp());
     auto created_label = gi.schema().get_edge_label_id("created");
     auto person_label = gi.schema().get_vertex_label_id("person");
     auto software_label = gi.schema().get_vertex_label_id("software");
@@ -1485,7 +1485,7 @@ TEST_F(UpdateTransactionTest, RenameVertexProperty) {
   {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto person_label = gi.schema().get_vertex_label_id("person");
     auto software_label = gi.schema().get_vertex_label_id("software");
     EXPECT_EQ(gi.GetVertexPropColumn(person_label, "age"), nullptr);
@@ -1525,7 +1525,7 @@ TEST_F(UpdateTransactionTest, RenameEdgeProperty) {
   {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto created_label = gi.schema().get_edge_label_id("created");
     auto person_label = gi.schema().get_vertex_label_id("person");
     auto software_label = gi.schema().get_vertex_label_id("software");
@@ -1584,7 +1584,7 @@ TEST_F(UpdateTransactionTest, DeleteEdgeProperties) {
   {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto created_label = gi.schema().get_edge_label_id("created");
     auto person_label = gi.schema().get_vertex_label_id("person");
     auto software_label = gi.schema().get_vertex_label_id("software");
@@ -1657,7 +1657,7 @@ TEST_F(UpdateTransactionTest, DeleteVertexProperties) {
   {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto person_label = gi.schema().get_vertex_label_id("person");
     auto software_label = gi.schema().get_vertex_label_id("software");
     EXPECT_EQ(gi.GetVertexPropColumn(person_label, "age"), nullptr);
@@ -1719,7 +1719,7 @@ TEST_F(UpdateTransactionTest, TestReplayWal) {
     auto svc = std::make_shared<neug::NeugDBService>(db);
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto person_label = gi.schema().get_vertex_label_id("person");
     EXPECT_EQ(count_vertices(gi, person_label), 3);
     neug::vid_t src_p, dst_p;
@@ -1759,7 +1759,7 @@ TEST_F(UpdateTransactionTest, TestReplayWal) {
     auto svc = std::make_shared<neug::NeugDBService>(db);
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
 
     auto person_label = gi.schema().get_vertex_label_id("person");
     auto knows_label = gi.schema().get_edge_label_id("knows");
@@ -1823,15 +1823,16 @@ TEST_F(UpdateTransactionTest, TestAPIAfterDeleteVertexLabel) {
     auto person_label = interface.schema().get_vertex_label_id("person");
     EXPECT_TRUE(interface.DeleteVertexProperties(
         BuildDeleteVertexPropertiesParam("person", {"age"})));
-    EXPECT_THROW(
+    // Renaming a just-deleted property must fail. PropertyGraph::Rename*
+    // returns Status::ERR_SCHEMA_MISMATCH (not throw) for missing properties,
+    // so check the Status's bool conversion.
+    EXPECT_FALSE(
         interface.RenameVertexProperties(BuildRenameVertexPropertiesParam(
-            "person", {std::make_pair("age", "full_name")})),
-        neug::exception::Exception);
+            "person", {std::make_pair("age", "full_name")})));
     EXPECT_THROW(txn.GetVertexProperty(person_label, 0, 2),
                  neug::exception::Exception);
     EXPECT_NO_THROW(txn.GetVertexId(person_label, 0));
-    EXPECT_THROW(txn.get_vertex_property_column(person_label, "age"),
-                 neug::exception::Exception);
+    EXPECT_EQ(txn.get_vertex_property_column(person_label, "age"), nullptr);
 
     // add back age property
     std::vector<std::pair<std::string, neug::execution::Value>> new_props = {
@@ -1892,10 +1893,12 @@ TEST_F(UpdateTransactionTest, TestAPIAfterDeleteEdgeLabel) {
     auto knows_label = txn.schema().get_edge_label_id("knows");
     EXPECT_TRUE(txn.DeleteEdgeProperties(BuildDeleteEdgePropertiesParam(
         "person", "person", "knows", {"closeness"})));
-    EXPECT_THROW(txn.RenameEdgeProperties(BuildRenameEdgePropertiesParam(
-                     "person", "person", "knows",
-                     {std::make_pair("closeness", "importance")})),
-                 neug::exception::Exception);
+    // Renaming a just-deleted property must fail. PropertyGraph::Rename*
+    // returns Status::ERR_SCHEMA_MISMATCH (not throw) for missing properties,
+    // so check the Status's bool conversion.
+    EXPECT_FALSE(txn.RenameEdgeProperties(BuildRenameEdgePropertiesParam(
+        "person", "person", "knows",
+        {std::make_pair("closeness", "importance")})));
     neug::vid_t src_vid, dst_vid;
     EXPECT_TRUE(txn.GetVertexIndex(person_label,
                                    neug::execution::Value::INT64(1), src_vid));
@@ -1929,7 +1932,7 @@ TEST_F(UpdateTransactionTest, DeleteVertexWithOutgoingEdges) {
   {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto person_label = gi.schema().get_vertex_label_id("person");
     auto software_label = gi.schema().get_vertex_label_id("software");
     auto created_label = gi.schema().get_edge_label_id("created");
@@ -1973,7 +1976,7 @@ TEST_F(UpdateTransactionTest, DeleteVertexWithBidirectionalEdges) {
   {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto person_label = gi.schema().get_vertex_label_id("person");
     auto knows_label = gi.schema().get_edge_label_id("knows");
     EXPECT_EQ(count_edges(gi, person_label, person_label, knows_label, true),
@@ -1993,7 +1996,7 @@ TEST_F(UpdateTransactionTest, DeleteVertexWithBidirectionalEdges) {
   {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto person_label = gi.schema().get_vertex_label_id("person");
     auto knows_label = gi.schema().get_edge_label_id("knows");
     EXPECT_EQ(count_edges(gi, person_label, person_label, knows_label, true),
@@ -2049,7 +2052,7 @@ TEST_F(UpdateTransactionTest, DeleteVertexAbortRestoresEdges) {
   {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto person_label = gi.schema().get_vertex_label_id("person");
     auto software_label = gi.schema().get_vertex_label_id("software");
     auto created_label = gi.schema().get_edge_label_id("created");
@@ -2073,7 +2076,7 @@ TEST_F(UpdateTransactionTest, DeleteVertexAbortRestoresEdges) {
     // Verify person 1 and all edges are restored
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto person_label = gi.schema().get_vertex_label_id("person");
     auto software_label = gi.schema().get_vertex_label_id("software");
     auto created_label = gi.schema().get_edge_label_id("created");
@@ -2134,7 +2137,7 @@ TEST_F(UpdateTransactionTest, DeleteVertexWithMultipleEdgeTypes) {
     // Verify all edge types are deleted
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto person_label = gi.schema().get_vertex_label_id("person");
     auto software_label = gi.schema().get_vertex_label_id("software");
     auto created_label = gi.schema().get_edge_label_id("created");
@@ -2212,7 +2215,7 @@ TEST_F(UpdateTransactionTest, BatchDeleteVertices) {
   {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto person_label = gi.schema().get_vertex_label_id("person");
     EXPECT_EQ(count_vertices(gi, person_label), 0);
   }
@@ -2253,7 +2256,7 @@ TEST_F(UpdateTransactionTest, BatchDeleteEdges) {
   {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto person_label = gi.schema().get_vertex_label_id("person");
     auto software_label = gi.schema().get_vertex_label_id("software");
     auto created_label = gi.schema().get_edge_label_id("created");
@@ -2289,7 +2292,7 @@ TEST_F(UpdateTransactionTest, BatchDeleteVerticesFailure) {
   {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto person_label = gi.schema().get_vertex_label_id("person");
     EXPECT_EQ(count_vertices(gi, person_label), 2);
   }
@@ -2321,7 +2324,7 @@ TEST_F(UpdateTransactionTest, BatchDeleteEdgesFailure) {
   {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto person_label = gi.schema().get_vertex_label_id("person");
     auto software_label = gi.schema().get_vertex_label_id("software");
     auto created_label = gi.schema().get_edge_label_id("created");
@@ -2370,7 +2373,7 @@ TEST_F(UpdateTransactionTest, TestUpdateStringProperty) {
   {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto person_label = gi.schema().get_vertex_label_id("person");
     neug::vid_t p1_vid;
     EXPECT_TRUE(gi.GetVertexIndex(person_label,
@@ -2405,7 +2408,7 @@ TEST_F(UpdateTransactionTest, TestUpdateEdgeStringPropertyCompact) {
   {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto person_label = gi.schema().get_vertex_label_id("person");
     auto software_label = gi.schema().get_vertex_label_id("software");
     auto review_label = gi.schema().get_edge_label_id("reviewed");
@@ -2464,7 +2467,7 @@ TEST_F(UpdateTransactionTest, TestUpdateEdgeStringPropertyCompact) {
   {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto person_label = gi.schema().get_vertex_label_id("person");
     auto software_label = gi.schema().get_vertex_label_id("software");
     auto review_label = gi.schema().get_edge_label_id("reviewed");
@@ -2486,7 +2489,7 @@ TEST_F(UpdateTransactionTest, TestUpdateEdgeStringPropertyCompact) {
     auto svc2 = std::make_shared<neug::NeugDBService>(db2);
     auto sess = svc2->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto person_label = gi.schema().get_vertex_label_id("person");
     auto software_label = gi.schema().get_vertex_label_id("software");
     auto review_label = gi.schema().get_edge_label_id("reviewed");
@@ -2537,7 +2540,7 @@ TEST_F(UpdateTransactionTest, TestTPServiceStart) {
   {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
-    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::StorageReadInterface gi(txn.view(), txn.timestamp());
     auto person_label = gi.schema().get_vertex_label_id("person");
     auto software_label = gi.schema().get_vertex_label_id("software");
     auto created_label = gi.schema().get_edge_label_id("created");
