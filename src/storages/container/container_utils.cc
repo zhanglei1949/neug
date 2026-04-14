@@ -96,8 +96,6 @@ std::unique_ptr<IDataContainer> OpenContainer(const std::string& snapshot_file,
           "Temporary file path is required for disk-backed containers");
     }
     // For disk-backed containers, prepare the file first
-    LOG(INFO) << "Preparing container file for SyncToFile strategy: "
-              << tmp_file;
     prepare_container_file(snapshot_file, tmp_file);
     return OpenDataContainer(memory_level, tmp_file);
   } else {
