@@ -142,7 +142,6 @@ void NeugDB::Close() {
   if (closed_.exchange(true)) {
     return;
   }
-  closed_.store(true);
   if (connection_manager_) {
     connection_manager_->Close();
     connection_manager_.reset();
@@ -154,7 +153,8 @@ void NeugDB::Close() {
     query_processor_.reset();
   }
   // -----------Create checkpoint if needed----------------
-  if (config_.checkpoint_on_close) {
+  if (config_.checkpoint_on_close && config_.mode == DBMode::READ_WRITE) {
+    VLOG(1) << "Creating checkpoint on close...";
     createCheckpoint(false, false);
   }
   graph_.Clear();
@@ -162,6 +162,7 @@ void NeugDB::Close() {
   if (file_lock_) {
     file_lock_->unlock();
   }
+  closed_.store(true);
 }
 
 std::shared_ptr<Connection> NeugDB::Connect() {
