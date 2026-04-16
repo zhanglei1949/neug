@@ -29,6 +29,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "../"))
 
 from neug.database import Database
 from neug.session import Session
+from conftest import wait_for_server_ready
 
 logger = logging.getLogger(__name__)
 
@@ -1083,7 +1084,7 @@ def test_readonly_db_rejects_write_queries_via_session():
     # Step 2: reopen in read-only mode and start serving.
     db_ro = Database(db_dir, "r")
     uri = db_ro.serve(10006, "localhost", False)
-    time.sleep(1)
+    wait_for_server_ready(uri)
 
     session = Session(uri, timeout="10s")
 
