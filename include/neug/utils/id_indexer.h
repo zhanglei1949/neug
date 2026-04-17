@@ -987,27 +987,4 @@ class IdIndexer : public IdIndexerBase<INDEX_T> {
   GHash<KEY_T> hasher_;
 };
 
-template <typename KEY_T, typename INDEX_T>
-struct _move_data {
-  using key_buffer_t = typename id_indexer_impl::KeyBuffer<KEY_T>::type;
-  void operator()(const key_buffer_t& input, ColumnBase& col, size_t size) {
-    auto& keys = dynamic_cast<TypedColumn<KEY_T>&>(col);
-    for (size_t idx = 0; idx < size; ++idx) {
-      keys.set_value(idx, input[idx]);
-    }
-  }
-};
-
-template <typename INDEX_T>
-struct _move_data<std::string_view, INDEX_T> {
-  using key_buffer_t =
-      typename id_indexer_impl::KeyBuffer<std::string_view>::type;
-  void operator()(const key_buffer_t& input, ColumnBase& col, size_t size) {
-    auto& keys = dynamic_cast<StringColumn&>(col);
-    for (size_t idx = 0; idx < size; ++idx) {
-      keys.set_value(idx, input[idx]);
-    }
-  }
-};
-
 }  // namespace neug
