@@ -138,29 +138,35 @@ bool NeugDB::Open(const NeugDBConfig& config) {
 }
 
 void NeugDB::Close() {
-  // atomic flag to avoid double close
   if (closed_.exchange(true)) {
     return;
   }
-  closed_.store(true);
   if (connection_manager_) {
     connection_manager_->Close();
     connection_manager_.reset();
   }
-  if (planner_) {
-    planner_.reset();
-  }
+
   if (query_processor_) {
     query_processor_.reset();
   }
-  // -----------Create checkpoint if needed----------------
-  if (config_.checkpoint_on_close) {
-    createCheckpoint(false, false);
+  if (planner_) {
+    planner_.reset();
   }
+
+  if (config_.checkpoint_on_close && config_.mode == DBMode::READ_WRITE) {
+    VLOG(1) << "Creating checkpoint on close...";
+    try {
+      createCheckpoint(false, false);
+    } catch (const std::exception& e) {
+      LOG(ERROR) << "Checkpoint on close failed: " << e.what();
+    }
+  }
+
   graph_.Clear();
 
   if (file_lock_) {
     file_lock_->unlock();
+    file_lock_.reset();
   }
 }
 
