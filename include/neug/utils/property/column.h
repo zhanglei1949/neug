@@ -303,6 +303,8 @@ class TypedColumn<std::string_view> : public ColumnBase {
     if (!item_out) {
       THROW_IO_EXCEPTION("Failed to open file for dumping: " + item_file);
     }
+    MD5(reinterpret_cast<unsigned char*>(items_buffer_->GetData()),
+        items_buffer_->GetDataSize(), header.data_md5);
     item_out.write(reinterpret_cast<const char*>(&header.data_md5),
                    sizeof(header.data_md5));
     auto raw_items =
