@@ -98,7 +98,7 @@ struct NeugDBConfig {
         enable_auto_compaction(false),
         memory_level(MemoryLevel::kInMemory),
         compact_csr(true),
-        compact_on_close(true),
+        compact_on_close(false),
         checkpoint_on_close(false),
         checkpoint_after_recovery(false) {}
 
@@ -117,7 +117,7 @@ struct NeugDBConfig {
         enable_auto_compaction(false),
         memory_level(MemoryLevel::kInMemory),
         compact_csr(true),
-        compact_on_close(true),
+        compact_on_close(false),
         checkpoint_on_close(false),
         checkpoint_after_recovery(false) {}
 
