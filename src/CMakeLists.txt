@@ -26,12 +26,21 @@ add_subdirectory(execution)
 
 message(STATUS "Compiler libraries: ${COMPILER_LIBRARIES}")
 add_library(neug SHARED ${ALL_OBJECT_FILES})
+# Define NEUG_EXPORTS so that NEUG_API resolves to __attribute__((visibility("default")))
+# for symbols we want to export, while all other symbols (including Arrow) remain hidden
+# due to CMAKE_CXX_VISIBILITY_PRESET=hidden.
+target_compile_definitions(neug PRIVATE NEUG_EXPORTS)
 if (ENABLE_GCOV)
     target_link_options(neug PRIVATE --coverage)
 endif()
 target_link_libraries(neug PUBLIC OpenSSL::SSL OpenSSL::Crypto)
 target_link_libraries(neug PRIVATE ${GFLAGS_LIBRARIES} ${YAML_CPP_LIBRARIES} ${COMPILER_LIBRARIES})
-target_link_libraries(neug PUBLIC ${ARROW_LIB} ${GLOG_LIBRARIES})
+target_link_libraries(neug PRIVATE ${ARROW_LIB})
+target_link_libraries(neug PUBLIC ${GLOG_LIBRARIES})
+# Protobuf is PRIVATE to avoid double-initialization of global statics when
+# downstream shared libraries (e.g. neug_py_bind.so) also load libneug.dylib.
+# Executables that use protobuf-generated headers (e.g. examples) must link
+# ${Protobuf_LIBRARIES} themselves.
 target_link_libraries(neug PRIVATE ${Protobuf_LIBRARIES})
 if (BUILD_HTTP_SERVER)
     target_link_libraries(neug PRIVATE ${BRPC_LIB} ${LEVELDB_LIB})
@@ -46,6 +55,23 @@ if (WITH_MIMALLOC)
 endif()
 target_include_directories(neug PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/compiler>
     $<INSTALL_INTERFACE:include/neug/compiler>)
+
+# Hide Arrow, protobuf, and abseil symbols from the dynamic symbol table to
+# prevent conflicts with pyarrow (which bundles its own Arrow/protobuf/abseil).
+if(APPLE)
+    # macOS: use -unexported_symbols_list to hide specific symbol patterns.
+    target_link_options(neug PRIVATE
+        "LINKER:-unexported_symbols_list,${CMAKE_SOURCE_DIR}/cmake/neug_unexported.sym")
+    set_target_properties(neug PROPERTIES LINK_DEPENDS
+        "${CMAKE_SOURCE_DIR}/cmake/neug_unexported.sym")
+elseif(NOT WIN32)
+    # Linux: use a version script (global: export all, local: hide arrow/protobuf).
+    target_link_options(neug PRIVATE
+        "LINKER:--version-script=${CMAKE_SOURCE_DIR}/cmake/neug_exports.ld")
+    set_target_properties(neug PROPERTIES LINK_DEPENDS
+        "${CMAKE_SOURCE_DIR}/cmake/neug_exports.ld")
+endif()
+
 install_neug_target(neug)
 if (ENABLE_BACKTRACES)
     target_link_libraries(neug PUBLIC cpptrace::cpptrace)

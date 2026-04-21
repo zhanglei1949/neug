@@ -34,6 +34,7 @@ endif()
 # for .o files (which fails on clean builds since GLOB runs at configure time).
 target_link_libraries(neug_parquet_extension PRIVATE
     neug
+    ${ARROW_LIB}
 )
 
 # Build test by compiling extension sources directly (no link to neug_parquet_extension)
