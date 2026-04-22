@@ -31,8 +31,6 @@
 #include <arrow/api.h>
 #include <arrow/array/concatenate.h>
 #include <arrow/io/api.h>
-#include <arrow/ipc/reader.h>
-#include <arrow/ipc/writer.h>
 #include <arrow/memory_pool.h>
 #include <arrow/pretty_print.h>
 #include <arrow/scalar.h>
