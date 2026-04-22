@@ -306,9 +306,9 @@ static void build_column_array(ArrowArray& arr, const neug::Array& col,
                                /*n_children=*/1);
     // Offsets
     std::vector<uint8_t> offsets_buf((length + 1) * sizeof(int32_t));
-    auto* offsets = reinterpret_cast<int32_t*>(offsets_buf.data());
+    auto* offsets = reinterpret_cast<uint32_t*>(offsets_buf.data());
     for (int64_t i = 0; i <= length; ++i) {
-      offsets[i] = static_cast<int32_t>(la.offsets(i));
+      offsets[i] = static_cast<uint32_t>(la.offsets(i));
     }
     h->owned_buffers.push_back(std::move(offsets_buf));
     h->buffer_ptrs[1] = h->owned_buffers.back().data();
@@ -331,10 +331,15 @@ static void build_column_array(ArrowArray& arr, const neug::Array& col,
       h->child_ptrs[i] = &h->children[i];
     }
     arr.children = h->child_ptrs.data();
-  }
-  // Fallback: empty utf8
-  else {
-    auto* h = init_arrow_array(arr, "", 0, /*n_buffers=*/3);
+  } else {
+    std::string validity((length + 7) / 8, '\0');
+    auto* h = init_arrow_array(arr, validity, length, /*n_buffers=*/3);
+    std::vector<uint8_t> offsets_buf((length + 1) * sizeof(int32_t), 0);
+    h->owned_buffers.push_back(std::move(offsets_buf));
+    h->buffer_ptrs[1] = h->owned_buffers.back().data();
+    std::vector<uint8_t> data_buf;
+    h->owned_buffers.push_back(std::move(data_buf));
+    h->buffer_ptrs[2] = h->owned_buffers.back().data();
     arr.buffers = h->buffer_ptrs.data();
   }
 }

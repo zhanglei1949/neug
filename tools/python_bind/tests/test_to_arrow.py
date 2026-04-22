@@ -262,6 +262,132 @@ def test_to_arrow_pyarrow_compute(tmp_path):
     db.close()
 
 
+def _make_db(tmp_path, name):
+    """Helper: create a fresh writable database and return (db, conn)."""
+    db_dir = tmp_path / name
+    db_dir.mkdir()
+    db = Database(db_path=str(db_dir), mode="w")
+    return db, db.connect()
+
+
+def test_to_arrow_null_handling(tmp_path):
+    """to_arrow() produces the same values as getNext() for columns with
+    missing properties, verifying that validity bitmaps (if present) are
+    correctly propagated through the Arrow C Data Interface."""
+    db, conn = _make_db(tmp_path, "nulls")
+    conn.execute(
+        "CREATE NODE TABLE N(id INT32, val INT64, label STRING, "
+        "flag BOOL, score DOUBLE, PRIMARY KEY(id));"
+    )
+    conn.execute("CREATE (n:N {id:1, val:100, label:'a', flag:true, score:1.5});")
+    conn.execute("CREATE (n:N {id:2});")
+    conn.execute("CREATE (n:N {id:3, val:300, label:'c', flag:false, score:3.5});")
+
+    table = conn.execute(
+        "MATCH (n:N) RETURN n.id AS id, n.val AS val, n.label AS label, "
+        "n.flag AS flag, n.score AS score ORDER BY n.id;"
+    ).to_arrow()
+
+    assert table.num_rows == 3
+    assert table.column("id").to_pylist() == [1, 2, 3]
+    assert table.column("val").to_pylist() == [100, 0, 300]
+    assert table.column("label").to_pylist() == ["a", "", "c"]
+    assert table.column("flag").to_pylist() == [True, True, False]
+    scores = table.column("score").to_pylist()
+    assert (
+        abs(scores[0] - 1.5) < 1e-10
+        and scores[1] == 0.0
+        and abs(scores[2] - 3.5) < 1e-10
+    )
+    conn.close()
+    db.close()
+
+
+def test_to_arrow_date_column(tmp_path):
+    """to_arrow() handles DATE columns (mapped to timestamp[ms])."""
+    db, conn = _make_db(tmp_path, "date")
+    conn.execute("CREATE NODE TABLE D(id INT32, d DATE, PRIMARY KEY(id));")
+    conn.execute("CREATE (n:D {id:1, d:date('2024-01-15')});")
+    conn.execute("CREATE (n:D {id:2, d:date('2000-06-30')});")
+
+    dates = (
+        conn.execute("MATCH (n:D) RETURN n.d AS d ORDER BY n.id;")
+        .to_arrow()
+        .column("d")
+        .to_pylist()
+    )
+
+    assert (dates[0].year, dates[0].month, dates[0].day) == (2024, 1, 15)
+    assert (dates[1].year, dates[1].month, dates[1].day) == (2000, 6, 30)
+    conn.close()
+    db.close()
+
+
+def test_to_arrow_timestamp_column(tmp_path):
+    """to_arrow() handles TIMESTAMP columns."""
+    db, conn = _make_db(tmp_path, "ts")
+    conn.execute("CREATE NODE TABLE TS(id INT32, ts TIMESTAMP, PRIMARY KEY(id));")
+    conn.execute("CREATE (n:TS {id:1, ts:timestamp('2024-03-15 10:30:00')});")
+    conn.execute("CREATE (n:TS {id:2, ts:timestamp('2000-01-01 00:00:00')});")
+
+    timestamps = (
+        conn.execute("MATCH (n:TS) RETURN n.ts AS ts ORDER BY n.id;")
+        .to_arrow()
+        .column("ts")
+        .to_pylist()
+    )
+
+    assert (timestamps[0].year, timestamps[0].month, timestamps[0].day) == (2024, 3, 15)
+    assert (timestamps[0].hour, timestamps[0].minute) == (10, 30)
+    conn.close()
+    db.close()
+
+
+@pytest.mark.skip(reason="LIST support not implemented yet")
+def test_to_arrow_list_column(tmp_path):
+    """to_arrow() handles LIST columns with nested offsets."""
+    db, conn = _make_db(tmp_path, "list")
+    conn.execute("CREATE NODE TABLE Person(id INT32, nums INT64[], PRIMARY KEY(id));")
+    conn.execute("CREATE (n:Person {id:1, nums:[10,20,30]});")
+    conn.execute("CREATE (n:Person {id:2, nums:[40]});")
+    conn.execute("CREATE (n:Person {id:3, nums:[]});")
+
+    lists = (
+        conn.execute("MATCH (n:Person) RETURN n.nums AS nums ORDER BY n.id;")
+        .to_arrow()
+        .column("nums")
+        .to_pylist()
+    )
+
+    assert lists == [[10, 20, 30], [40], []]
+    conn.close()
+    db.close()
+
+
+@pytest.mark.skip(reason="STRUCT support not implemented yet")
+def test_to_arrow_struct_column(tmp_path):
+    """to_arrow() handles STRUCT columns with multiple fields."""
+    db, conn = _make_db(tmp_path, "struct")
+    conn.execute(
+        "CREATE NODE TABLE ST(id INT32, info STRUCT(x INT32, y STRING), "
+        "PRIMARY KEY(id));"
+    )
+    conn.execute("CREATE (n:ST {id:1, info:{x:10, y:'hello'}});")
+    conn.execute("CREATE (n:ST {id:2, info:{x:20, y:'world'}});")
+
+    structs = (
+        conn.execute("MATCH (n:ST) RETURN n.info AS info ORDER BY n.id;")
+        .to_arrow()
+        .column("info")
+        .to_pylist()
+    )
+
+    assert structs[0].get("f0", structs[0].get("x")) == 10
+    assert structs[1].get("f0", structs[1].get("x")) == 20
+    conn.close()
+    db.close()
+
+
 def test_to_arrow_to_pandas(tmp_path):
     """The pyarrow.Table returned by to_arrow() can be converted to pandas."""
     pd = pytest.importorskip("pandas")  # noqa: F841

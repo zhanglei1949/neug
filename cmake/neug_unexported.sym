@@ -41,4 +41,4 @@ __ZTV*4absl*
 __ZTS*4absl*
 
 # utf8_range (protobuf dependency)
-_utf8_range*
+__ZN10utf8_range*
