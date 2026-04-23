@@ -38,7 +38,7 @@ target_link_libraries(neug PRIVATE ${GFLAGS_LIBRARIES} ${YAML_CPP_LIBRARIES} ${C
 if(NOT APPLE AND TARGET arrow_bundled_dependencies)
     target_link_libraries(neug PRIVATE arrow_bundled_dependencies)
 else()
-    target_link_libraries(neug PRIVATE ${ARROW_LIBRARIES})
+    target_link_libraries(neug PRIVATE ${ARROW_LIB})
 endif()
 target_link_libraries(neug PUBLIC ${GLOG_LIBRARIES})
 # Protobuf is PRIVATE to avoid double-initialization of global statics when

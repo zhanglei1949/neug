@@ -697,10 +697,17 @@ if(NEUG_USE_SYSTEM_ARROW)
     # find_package(Parquet) must be called first to register Parquet::parquet_*
     # targets, which resolve_system_arrow_component can then locate.
     if(ARROW_ENABLE_PARQUET)
+        set(_SYSTEM_PARQUET_TARGET "")
         find_package(Parquet CONFIG QUIET)
         if(NOT Parquet_FOUND)
             message(WARNING "System Parquet package not found; parquet extension headers may be missing")
         else()
+            foreach(_parquet_target Parquet::parquet_static Parquet::parquet parquet_static parquet)
+                if(TARGET ${_parquet_target})
+                    set(_SYSTEM_PARQUET_TARGET ${_parquet_target})
+                    break()
+                endif()
+            endforeach()
             # Extract Parquet include directories so extension sources and tests
             # can find <parquet/properties.h> and <parquet/arrow/writer.h> when
             # compiling against system Arrow.
@@ -739,6 +746,10 @@ if(NEUG_USE_SYSTEM_ARROW)
             endif()
         endif()
         resolve_system_arrow_component(parquet ARROW_PARQUET_LIB)
+        if((NOT ARROW_PARQUET_LIB) AND _SYSTEM_PARQUET_TARGET)
+            set(ARROW_PARQUET_LIB ${_SYSTEM_PARQUET_TARGET})
+            message(STATUS "Using system Parquet target fallback: ${ARROW_PARQUET_LIB}")
+        endif()
         if(ARROW_PARQUET_LIB)
             list(APPEND ARROW_LIB ${ARROW_PARQUET_LIB})
             message(STATUS "Found system parquet lib: ${ARROW_PARQUET_LIB}")
