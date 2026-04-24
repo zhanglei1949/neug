@@ -437,11 +437,6 @@ function(add_neug_test TEST_NAME)
 	gtest_add_tests(TARGET ${TEST_NAME} TEST_LIST ${TEST_NAME}_tests)
 endfunction()
 
-function(add_neug_svc_test TEST_NAME)
-    add_neug_test(${TEST_NAME} ${ARGN})
-    target_link_libraries(${TEST_NAME} PRIVATE ${BRPC_LIB} ${LEVELDB_LIB})
-endfunction()
-
 
 set(TEST_PROGRAM "
 #define _GNU_SOURCE

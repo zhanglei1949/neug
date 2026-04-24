@@ -105,7 +105,6 @@ function(add_extension_test)
         ${GLOG_LIBRARIES}
         ${ARROW_LIB}
         ${Protobuf_LIBRARIES}
-        ${BRPC_LIB} ${LEVELDB_LIB}
         ${ARG_EXTRA_LINK_LIBS}
         ${OPENSSL_LIBRARIES}
         ${CRYPTO_LIB})

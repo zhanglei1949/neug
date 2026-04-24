@@ -22,9 +22,6 @@ endif()
 # libneug.dylib hides these symbols to avoid conflicts with pyarrow, so
 # neug_py_bind must link its own copy.
 target_link_libraries(neug_py_bind PRIVATE ${NEUG_LIBRARIES} ${GLOG_LIBRARIES} ${Protobuf_LIBRARIES})
-if (BUILD_HTTP_SERVER)
-    target_link_libraries(neug_py_bind PRIVATE ${BRPC_LIB} ${LEVELDB_LIB})
-endif()
 
 # Suppress VLA warnings from brpc third-party headers (bvar/detail/percentile.h
 # uses DEFINE_SMALL_ARRAY which is a GCC VLA extension unsupported by Clang).
