@@ -57,8 +57,12 @@ if (WITH_MIMALLOC)
     # It must be PUBLIC, otherwise there will be performance differences.
     target_link_libraries(neug PUBLIC mimalloc)
 endif()
-target_include_directories(neug PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/compiler>
-    $<INSTALL_INTERFACE:include/neug/compiler>)
+target_include_directories(neug PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/compiler>
+    $<INSTALL_INTERFACE:include/neug/compiler>
+    # Arrow and other third-party headers are included in neug's public API.
+    # Expose the top-level include/ tree so consumers can find them after installation.
+    $<INSTALL_INTERFACE:include>)
 
 neug_apply_symbol_visibility(neug)
 
