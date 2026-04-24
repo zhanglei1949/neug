@@ -26,6 +26,12 @@ if (BUILD_HTTP_SERVER)
     target_link_libraries(neug_py_bind PRIVATE ${BRPC_LIB} ${LEVELDB_LIB})
 endif()
 
+# Suppress VLA warnings from brpc third-party headers (bvar/detail/percentile.h
+# uses DEFINE_SMALL_ARRAY which is a GCC VLA extension unsupported by Clang).
+if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    target_compile_options(neug_py_bind PRIVATE -Wno-vla-extension)
+endif()
+
 # Hide protobuf/abseil/arrow symbols from neug_py_bind.so as well, so they
 # don't leak into the Python process and conflict with pyarrow's copies.
 neug_apply_symbol_visibility(neug_py_bind)
