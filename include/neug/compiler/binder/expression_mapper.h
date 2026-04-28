@@ -41,6 +41,8 @@ class ExpressionMapper {
       std::shared_ptr<binder::Expression> expression);
   std::unique_ptr<evaluator::ExpressionEvaluator> getConstantEvaluator(
       std::shared_ptr<binder::Expression> expression);
+  std::unique_ptr<evaluator::ExpressionEvaluator> getFunctionEvaluator(
+      std::shared_ptr<binder::Expression> expression);
 
  private:
   static std::unique_ptr<evaluator::ExpressionEvaluator> getLiteralEvaluator(
@@ -56,9 +58,6 @@ class ExpressionMapper {
   getLambdaParamEvaluator(std::shared_ptr<binder::Expression> expression);
 
   std::unique_ptr<evaluator::ExpressionEvaluator> getCaseEvaluator(
-      std::shared_ptr<binder::Expression> expression);
-
-  std::unique_ptr<evaluator::ExpressionEvaluator> getFunctionEvaluator(
       std::shared_ptr<binder::Expression> expression);
 
   std::unique_ptr<evaluator::ExpressionEvaluator> getNodeEvaluator(

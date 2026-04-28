@@ -29,6 +29,7 @@
 #include "neug/compiler/binder/expression/scalar_function_expression.h"
 #include "neug/compiler/binder/expression/variable_expression.h"
 #include "neug/compiler/binder/expression_evaluator_utils.h"
+#include "neug/compiler/binder/expression_mapper.h"
 #include "neug/compiler/common/enums/expression_type.h"
 #include "neug/compiler/common/string_utils.h"
 #include "neug/compiler/common/types/date_t.h"
@@ -267,7 +268,9 @@ std::unique_ptr<::common::Value> GExprConverter::castLiteral(
   return convertValue(*castValue);
 }
 
-bool needFold(std::shared_ptr<binder::Expression> expr) {
+// if the function can be folded to a constant, return true, otherwise return
+// false
+bool canFold(std::shared_ptr<binder::Expression> expr) {
   if (expr->expressionType != common::ExpressionType::FUNCTION) {
     return false;
   }
@@ -276,17 +279,27 @@ bool needFold(std::shared_ptr<binder::Expression> expr) {
   auto children = funcExpr.getChildren();
   for (auto child : children) {
     if (child->expressionType != common::ExpressionType::LITERAL &&
-        !needFold(child)) {
+        !canFold(child)) {
       return false;
     }
   }
   return true;
 }
 
-std::shared_ptr<binder::Expression> GExprConverter::foldExpression(
+// fold the function expression to a constant
+std::shared_ptr<binder::Expression> GExprConverter::foldFunction(
     std::shared_ptr<binder::Expression> expr) {
-  auto value = evaluator::ExpressionEvaluatorUtils::evaluateConstantExpression(
-      expr, ctx);
+  if (!canFold(expr)) {
+    return expr;
+  }
+  auto exprMapper = processor::ExpressionMapper();
+  auto evaluator = exprMapper.getFunctionEvaluator(expr);
+  auto emptyResultSet = std::make_unique<processor::ResultSet>(0);
+  evaluator->init(*emptyResultSet, ctx);
+  evaluator->evaluate();
+  auto& selVector = evaluator->resultVector->state->getSelVector();
+  NEUG_ASSERT(selVector.getSelSize() == 1);
+  auto value = *evaluator->resultVector->getAsValue(selVector[0]);
   return std::make_shared<binder::LiteralExpression>(value, "");
 }
 
@@ -312,8 +325,8 @@ std::unique_ptr<::common::Value> GExprConverter::convertDefaultValue(
             "child");
       }
       defaultExpr = funcExpr->getChild(0);
-    } else if (needFold(defaultExpr)) {
-      defaultExpr = foldExpression(defaultExpr);
+    } else {
+      defaultExpr = foldFunction(defaultExpr);
     }
   }
   auto valuePB = convert(*defaultExpr, {});
