@@ -29,7 +29,6 @@
 #include "kuzu_fwd.h"
 #include "neug/compiler/parser/statement.h"
 #include "neug/utils/api.h"
-#include "neug/utils/result.h"
 #include "query_summary.h"
 
 namespace neug {
