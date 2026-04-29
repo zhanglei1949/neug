@@ -343,6 +343,50 @@ bool common_value_to_value(const DataType& type, const common::Value& value,
   return true;
 }
 
+// Convert a protobuf Expression (e.g. ToList, scalar const) into an
+// execution::Value.  This is needed because the compiler serialises default
+// values for complex types (nested lists) into the `default_expr` field of
+// PropertyDef rather than the flat `default_value` field.
+static bool common_expr_to_value(const DataType& type,
+                                 const common::Expression& expr,
+                                 execution::Value& out_value) {
+  if (expr.operators_size() == 0) {
+    LOG(ERROR) << "Empty expression in default_expr";
+    return false;
+  }
+  const auto& opr = expr.operators(0);
+
+  if (opr.has_to_list()) {
+    if (type.id() != DataTypeId::kList) {
+      LOG(ERROR) << "ToList expression but type is not list: "
+                 << type.ToString();
+      return false;
+    }
+    DataType child_type = ListType::GetChildType(type);
+    const auto& to_list = opr.to_list();
+    std::vector<execution::Value> items;
+    items.reserve(to_list.fields_size());
+    for (const auto& field_expr : to_list.fields()) {
+      execution::Value child_value(DataType::SQLNULL);
+      if (!common_expr_to_value(child_type, field_expr, child_value)) {
+        LOG(ERROR) << "Failed to convert ToList child expression";
+        return false;
+      }
+      items.push_back(std::move(child_value));
+    }
+    out_value = execution::Value::LIST(child_type, std::move(items));
+    return true;
+  }
+
+  if (opr.has_const_()) {
+    return common_value_to_value(type, opr.const_(), out_value);
+  }
+
+  LOG(ERROR) << "Unsupported expression operator in default_expr: "
+             << expr.DebugString();
+  return false;
+}
+
 neug::result<std::vector<std::pair<std::string, execution::Value>>>
 property_defs_to_value(
     const google::protobuf::RepeatedPtrField<physical::PropertyDef>&
@@ -357,7 +401,11 @@ property_defs_to_value(
                           "Invalid property type: " + property.DebugString()));
     }
 
-    if (property.has_default_value()) {
+    if (property.has_default_expr() &&
+        common_expr_to_value(type, property.default_expr(), default_value)) {
+      VLOG(10) << "Default expr convert to value success:"
+               << property.default_expr().DebugString();
+    } else if (property.has_default_value()) {
       if (!common_value_to_value(type, property.default_value(),
                                  default_value)) {
         RETURN_ERROR(
