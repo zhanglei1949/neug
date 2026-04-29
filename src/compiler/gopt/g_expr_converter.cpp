@@ -227,7 +227,7 @@ std::unique_ptr<::algebra::IndexPredicate> GExprConverter::convertPrimaryKey(
   return indexPB;
 }
 
-std::unique_ptr<::common::Value> GExprConverter::castLiteral(
+std::unique_ptr<::common::Expression> GExprConverter::castLiteral(
     const binder::Expression& castExpr) {
   GScalarType type(castExpr);
   if (type.getType() != ScalarType::CAST) {
@@ -267,31 +267,8 @@ std::unique_ptr<::common::Value> GExprConverter::castLiteral(
   return convertValue(*castValue);
 }
 
-bool needFold(std::shared_ptr<binder::Expression> expr) {
-  if (expr->expressionType != common::ExpressionType::FUNCTION) {
-    return false;
-  }
-
-  auto& funcExpr = expr->constCast<binder::ScalarFunctionExpression>();
-  auto children = funcExpr.getChildren();
-  for (auto child : children) {
-    if (child->expressionType != common::ExpressionType::LITERAL &&
-        !needFold(child)) {
-      return false;
-    }
-  }
-  return true;
-}
-
-std::shared_ptr<binder::Expression> GExprConverter::foldExpression(
-    std::shared_ptr<binder::Expression> expr) {
-  auto value = evaluator::ExpressionEvaluatorUtils::evaluateConstantExpression(
-      expr, ctx);
-  return std::make_shared<binder::LiteralExpression>(value, "");
-}
-
 // set default value for property definition
-std::unique_ptr<::common::Value> GExprConverter::convertDefaultValue(
+std::unique_ptr<::common::Expression> GExprConverter::convertDefaultValue(
     const binder::PropertyDefinition& propertyDef) {
   std::shared_ptr<binder::Expression> defaultExpr = propertyDef.boundExpr;
   // the query default value of temporal type (date, datetime, interval) is
@@ -312,31 +289,34 @@ std::unique_ptr<::common::Value> GExprConverter::convertDefaultValue(
             "child");
       }
       defaultExpr = funcExpr->getChild(0);
-    } else if (needFold(defaultExpr)) {
-      defaultExpr = foldExpression(defaultExpr);
     }
   }
-  auto valuePB = convert(*defaultExpr, {});
-  if (valuePB->operators_size() == 0) {
-    THROW_EXCEPTION_WITH_FILE_LINE(
-        "Default value expression should not be empty");
-  }
-  auto oprPB = valuePB->operators(0);
-  if (!oprPB.has_const_()) {
-    THROW_EXCEPTION_WITH_FILE_LINE(
-        "Default value expression should be a constant");
-  }
-  return std::unique_ptr<::common::Value>(oprPB.release_const_());
+  return convert(*defaultExpr, {});
 }
 
-std::unique_ptr<::common::Value> GExprConverter::convertValue(
+std::unique_ptr<::common::Expression> GExprConverter::convertValue(
     const neug::common::Value& value) {
-  std::unique_ptr<::common::Value> valuePB =
-      std::make_unique<::common::Value>();
   if (value.isNull()) {
+    auto valuePB = std::make_unique<::common::Value>();
     valuePB->set_allocated_none(new ::common::None());
-    return valuePB;
+    auto exprPB = std::make_unique<::common::Expression>();
+    exprPB->add_operators()->set_allocated_const_(valuePB.release());
+    return exprPB;
   }
+  if (value.getDataType().getLogicalTypeID() == common::LogicalTypeID::ARRAY ||
+      value.getDataType().getLogicalTypeID() == common::LogicalTypeID::LIST) {
+    auto toListPB = std::make_unique<::common::ToList>();
+    for (const auto& child : value.children) {
+      toListPB->mutable_fields()->AddAllocated(convertValue(*child).release());
+    }
+    auto exprPB = std::make_unique<::common::Expression>();
+    auto oprPB = exprPB->add_operators();
+    oprPB->set_allocated_to_list(toListPB.release());
+    oprPB->set_allocated_node_type(
+        typeConverter.convertLogicalType(value.getDataType()).release());
+    return exprPB;
+  }
+  auto valuePB = std::make_unique<::common::Value>();
   switch (value.getDataType().getLogicalTypeID()) {
   case common::LogicalTypeID::BOOL:
     valuePB->set_boolean(value.getValue<bool>());
@@ -374,29 +354,13 @@ std::unique_ptr<::common::Value> GExprConverter::convertValue(
     valuePB->set_str(neug::common::Interval::toString(
         value.getValue<neug::common::interval_t>()));
     break;
-  case common::LogicalTypeID::ARRAY: {
-    auto extraInfo = value.getDataType().getExtraTypeInfo();
-    if (extraInfo == nullptr) {
-      THROW_EXCEPTION_WITH_FILE_LINE("List type should have extra info");
-    }
-    auto arrayInfo = extraInfo->constPtrCast<common::ArrayTypeInfo>();
-    auto& childType = arrayInfo->getChildType();
-    return convertToLiteralArray(value, childType);
-  }
-  case common::LogicalTypeID::LIST: {
-    auto extraInfo = value.getDataType().getExtraTypeInfo();
-    if (extraInfo == nullptr) {
-      THROW_EXCEPTION_WITH_FILE_LINE("List type should have extra info");
-    }
-    auto listInfo = extraInfo->constPtrCast<common::ListTypeInfo>();
-    auto& childType = listInfo->getChildType();
-    return convertToLiteralArray(value, childType);
-  }
   default:
     THROW_EXCEPTION_WITH_FILE_LINE("Unsupported value type " +
                                    value.getDataType().toString());
   }
-  return valuePB;
+  auto exprPB = std::make_unique<::common::Expression>();
+  exprPB->add_operators()->set_allocated_const_(valuePB.release());
+  return exprPB;
 }
 
 std::string GExprConverter::convertRegexValue(const std::string& regex,
@@ -448,54 +412,6 @@ std::unique_ptr<::common::Expression> GExprConverter::convertRegexFunc(
   return convertChildren(expr, schemaAlias);
 }
 
-std::unique_ptr<::common::Value> GExprConverter::convertToLiteralArray(
-    const common::Value& value, const common::LogicalType& childType) {
-  // Empty list is valid (e.g. the implicit default for a list column with no
-  // DEFAULT clause).  The proto repeated field simply stays empty.
-  auto valuePB = std::make_unique<::common::Value>();
-  switch (childType.getLogicalTypeID()) {
-  case common::LogicalTypeID::INT32: {
-    auto i32Array = valuePB->mutable_i32_array();
-    for (auto& child : value.children) {
-      i32Array->add_item(child->getValue<int32_t>());
-    }
-    break;
-  }
-  case common::LogicalTypeID::INT64: {
-    auto i64Array = valuePB->mutable_i64_array();
-    for (auto& child : value.children) {
-      i64Array->add_item(child->getValue<int64_t>());
-    }
-    break;
-  }
-  case common::LogicalTypeID::FLOAT: {
-    auto f32Array = valuePB->mutable_f64_array();
-    for (auto& child : value.children) {
-      f32Array->add_item(child->getValue<float>());
-    }
-    break;
-  }
-  case common::LogicalTypeID::DOUBLE: {
-    auto f64Array = valuePB->mutable_f64_array();
-    for (auto& child : value.children) {
-      f64Array->add_item(child->getValue<double>());
-    }
-    break;
-  }
-  case common::LogicalTypeID::STRING: {
-    auto strArray = valuePB->mutable_str_array();
-    for (auto& child : value.children) {
-      strArray->add_item(child->getValue<std::string>());
-    }
-    break;
-  }
-  default:
-    THROW_EXCEPTION_WITH_FILE_LINE("Unsupported value type " +
-                                   childType.toString());
-  }
-  return valuePB;
-}
-
 std::unique_ptr<::common::NameOrId> GExprConverter::convertAlias(
     common::alias_id_t aliasId) {
   auto alias = std::make_unique<::common::NameOrId>();
@@ -519,10 +435,7 @@ std::unique_ptr<::common::Expression> GExprConverter::convertParam(
 
 std::unique_ptr<::common::Expression> GExprConverter::convertLiteral(
     const binder::LiteralExpression& expr) {
-  auto result = std::make_unique<::common::Expression>();
-  auto literal = result->add_operators();
-  literal->set_allocated_const_(convertValue(expr.getValue()).release());
-  return result;
+  return convertValue(expr.getValue());
 }
 
 std::unique_ptr<::common::Variable> GExprConverter::convertDefaultVar() {
@@ -970,7 +883,7 @@ std::unique_ptr<::common::ExprOpr> GExprConverter::convertOperator(
   return result;
 }
 
-::std::unique_ptr<::common::Expression> GExprConverter::convertCast(
+std::unique_ptr<::common::Expression> GExprConverter::convertCast(
     const binder::Expression& expr,
     const std::vector<std::string>& schemaAlias) {
   if (expr.expressionType != common::ExpressionType::FUNCTION) {
@@ -986,12 +899,7 @@ std::unique_ptr<::common::ExprOpr> GExprConverter::convertOperator(
   auto sourceExpr = children[0];
   switch (sourceExpr->expressionType) {
   case common::ExpressionType::LITERAL: {
-    auto valuePB = castLiteral(expr);
-    if (valuePB) {
-      auto exprPB = std::make_unique<::common::Expression>();
-      exprPB->add_operators()->set_allocated_const_(valuePB.release());
-      return exprPB;
-    }
+    return castLiteral(expr);
   }
   case common::ExpressionType::PARAMETER: {  // cast dynamic param by
                                              // setting its meta data with

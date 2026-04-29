@@ -63,7 +63,7 @@ class GExprConverter {
       const binder::AggregateFunctionExpression& expr,
       const planner::LogicalOperator& child);
   std::unique_ptr<::common::Variable> convertDefaultVar();
-  std::unique_ptr<::common::Value> convertDefaultValue(
+  std::unique_ptr<::common::Expression> convertDefaultValue(
       const binder::PropertyDefinition& propertyDef);
   std::unique_ptr<::common::Property> convertPropertyExpr(
       const std::string& propName);
@@ -124,7 +124,7 @@ class GExprConverter {
       const std::vector<std::string>& schemaAlias);
 
   // helper functions
-  std::unique_ptr<::common::Value> convertValue(
+  std::unique_ptr<::common::Expression> convertValue(
       const neug::common::Value& value);
   std::unique_ptr<::common::Variable> convertVarProperty(
       const std::string& aliasName, const std::string& propertyName,
@@ -147,8 +147,6 @@ class GExprConverter {
   std::unique_ptr<::common::Expression> convertUDFFunc(
       const std::string& funcName, const binder::Expression& expr,
       size_t paramNum, const std::vector<std::string>& schemaAlias);
-  std::unique_ptr<::common::Value> convertToLiteralArray(
-      const common::Value& value, const common::LogicalType& childType);
   std::unique_ptr<::common::Expression> convertRegexFunc(
       const binder::Expression& expr, const GScalarType& scalarType,
       const std::vector<std::string>& schemaAlias);
@@ -158,10 +156,8 @@ class GExprConverter {
       const binder::Expression& expr, const GScalarType& scalarType,
       const std::vector<std::string>& schemaAlias);
 
-  std::unique_ptr<::common::Value> castLiteral(
+  std::unique_ptr<::common::Expression> castLiteral(
       const binder::Expression& castExpr);
-  std::shared_ptr<binder::Expression> foldExpression(
-      std::shared_ptr<binder::Expression> expr);
 
  private:
   const std::shared_ptr<gopt::GAliasManager> aliasManager;

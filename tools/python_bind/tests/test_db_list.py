@@ -115,3 +115,34 @@ def test_nested_list(tmp_path):
 
     conn.close()
     db.close()
+
+
+def test_nested_list_default_value(tmp_path):
+    db_dir = tmp_path / "nested_list_default"
+    shutil.rmtree(db_dir, ignore_errors=True)
+    db_dir.mkdir()
+    db = Database(db_path=str(db_dir), mode="w")
+    conn = db.connect()
+
+    conn.execute(
+        "CREATE NODE TABLE PERSON("
+        "id INT64 PRIMARY KEY, "
+        "string_prop STRING[][] DEFAULT [['x'], ['y', 'z']]);"
+    )
+
+    conn.execute("CREATE (p: PERSON {id: 0});")
+    conn.execute("CREATE (p: PERSON {id: 1, string_prop: [['a', 'b'], ['c']]} );")
+
+    result = conn.execute("MATCH (p: PERSON) RETURN p.id, p.string_prop ORDER BY p.id;")
+    rows = list(result)
+    assert rows[0] == [
+        0,
+        [["x"], ["y", "z"]],
+    ], f"expected nested default, got {rows[0]}"
+    assert rows[1] == [
+        1,
+        [["a", "b"], ["c"]],
+    ], f"expected explicit nested list, got {rows[1]}"
+
+    conn.close()
+    db.close()
