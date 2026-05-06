@@ -79,6 +79,18 @@ void MMapContainer::Close() {
   size_ = 0;
 }
 
+void MMapContainer::Drop() {
+  if (!path_.empty()) {
+    try {
+      std::filesystem::remove(path_);
+    } catch (const std::filesystem::filesystem_error& e) {
+      LOG(WARNING) << "Failed to delete file: " << path_
+                   << ", error: " << e.what();
+    }
+  }
+  Close();
+}
+
 void MMapContainer::Sync() {}
 
 void MMapContainer::Resize(size_t size) {

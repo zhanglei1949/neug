@@ -269,23 +269,22 @@ void MutableCsr<EDATA_T>::drop() {
     delete[] locks_;
     locks_ = nullptr;
   }
-  auto close_and_delete = [](std::unique_ptr<IDataContainer>& container) {
-    if (container) {
-      std::string path = container->GetPath();
-      auto con_type = container->GetContainerType();
-      container->Close();
-      container.reset();
-      if (con_type == ContainerType::kFileSharedMMap && !path.empty() &&
-          std::filesystem::exists(path)) {
-        std::error_code ec;
-        std::filesystem::remove(path, ec);
-      }
-    }
-  };
-  close_and_delete(adj_list_buffer_);
-  close_and_delete(degree_list_);
-  close_and_delete(cap_list_);
-  close_and_delete(nbr_list_);
+  if (adj_list_buffer_) {
+    adj_list_buffer_->Drop();
+    adj_list_buffer_.reset();
+  }
+  if (degree_list_) {
+    degree_list_->Drop();
+    degree_list_.reset();
+  }
+  if (cap_list_) {
+    cap_list_->Drop();
+    cap_list_.reset();
+  }
+  if (nbr_list_) {
+    nbr_list_->Drop();
+    nbr_list_.reset();
+  }
 }
 
 template <typename EDATA_T>
@@ -663,15 +662,8 @@ void SingleMutableCsr<EDATA_T>::close() {
 template <typename EDATA_T>
 void SingleMutableCsr<EDATA_T>::drop() {
   if (nbr_list_) {
-    std::string path = nbr_list_->GetPath();
-    auto con_type = nbr_list_->GetContainerType();
-    nbr_list_->Close();
+    nbr_list_->Drop();
     nbr_list_.reset();
-    if (con_type == ContainerType::kFileSharedMMap && !path.empty() &&
-        std::filesystem::exists(path)) {
-      std::error_code ec;
-      std::filesystem::remove(path, ec);
-    }
   }
 }
 

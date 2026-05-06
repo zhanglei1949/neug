@@ -196,6 +196,19 @@ class CheckpointTestBase : public ::testing::Test {
     std::filesystem::create_directories(dir);
   }
 
+  // -- Unique per-test directory generation --------------------------------
+
+  static std::string MakeUniqueDir(const std::string& prefix) {
+    const auto* test_info =
+        ::testing::UnitTest::GetInstance()->current_test_info();
+    std::string dir = (std::filesystem::temp_directory_path() /
+                       (prefix + "_" + test_info->test_suite_name() + "_" +
+                        test_info->name()))
+                          .string();
+    EnsureCleanDir(dir);
+    return dir;
+  }
+
   // -- Query helpers (avoid repetitive boilerplate) ------------------------
 
   static void ExpectQuery(neug::Connection& conn, const std::string& cypher) {
@@ -227,12 +240,12 @@ class CheckpointTestBase : public ::testing::Test {
 template <typename T>
 class CheckpointTest : public CheckpointTestBase<T> {
  protected:
-  static constexpr const char* DB_DIR = "/tmp/checkpoint_test";
+  std::string db_dir_;
 
   void SetUp() override {
-    this->EnsureCleanDir(DB_DIR);
+    db_dir_ = this->MakeUniqueDir("checkpoint_test");
     neug::NeugDB db;
-    this->OpenDB(db, DB_DIR);
+    this->OpenDB(db, db_dir_);
     auto conn = db.Connect();
     load_modern_graph(conn);
     LOG(INFO) << "[CheckPointTest]: Finished loading modern graph";
@@ -240,28 +253,28 @@ class CheckpointTest : public CheckpointTestBase<T> {
     db.Close();
   }
 
-  void TearDown() override { this->CleanDir(DB_DIR); }
+  void TearDown() override { this->CleanDir(db_dir_); }
 };
 
 TYPED_TEST_SUITE(CheckpointTest, AllMemoryLevels);
 
 TYPED_TEST(CheckpointTest, basic) {
   neug::NeugDB db;
-  this->OpenDB(db, this->DB_DIR);
+  this->OpenDB(db, this->db_dir_);
   db.Close();
-  this->OpenDB(db, this->DB_DIR);
+  this->OpenDB(db, this->db_dir_);
   auto conn = db.Connect();
   this->AssertBasicPersonAndKnows(*conn, {0.5, 1.0});
 }
 
 TYPED_TEST(CheckpointTest, after_add_vertex_property) {
   neug::NeugDB db;
-  this->OpenDB(db, this->DB_DIR);
+  this->OpenDB(db, this->db_dir_);
   auto conn = db.Connect();
   this->ExpectQuery(*conn, "ALTER TABLE person ADD created STRING;");
 
   db.Close();
-  this->OpenDB(db, this->DB_DIR);
+  this->OpenDB(db, this->db_dir_);
   conn = db.Connect();
 
   AssertPersonVertexWithCreated(
@@ -274,12 +287,12 @@ TYPED_TEST(CheckpointTest, after_add_vertex_property) {
 
 TYPED_TEST(CheckpointTest, after_delete_vertex_property) {
   neug::NeugDB db;
-  this->OpenDB(db, this->DB_DIR);
+  this->OpenDB(db, this->db_dir_);
   auto conn = db.Connect();
   this->ExpectQuery(*conn, "ALTER TABLE person DROP age;");
 
   db.Close();
-  this->OpenDB(db, this->DB_DIR);
+  this->OpenDB(db, this->db_dir_);
   conn = db.Connect();
 
   AssertPersonVertexWithoutAge(
@@ -292,12 +305,12 @@ TYPED_TEST(CheckpointTest, after_delete_vertex_property) {
 
 TYPED_TEST(CheckpointTest, after_delete_vertex) {
   neug::NeugDB db;
-  this->OpenDB(db, this->DB_DIR);
+  this->OpenDB(db, this->db_dir_);
   auto conn = db.Connect();
   this->ExpectQuery(*conn, "MATCH (v:person) WHERE v.id = 1 DELETE v;");
 
   db.Close();
-  this->OpenDB(db, this->DB_DIR);
+  this->OpenDB(db, this->db_dir_);
   conn = db.Connect();
 
   AssertPersonVertexAfterDelete(
@@ -310,7 +323,7 @@ TYPED_TEST(CheckpointTest, after_delete_vertex) {
 
 TYPED_TEST(CheckpointTest, after_add_edge_property1) {
   neug::NeugDB db;
-  this->OpenDB(db, this->DB_DIR);
+  this->OpenDB(db, this->db_dir_);
   auto conn = db.Connect();
   this->ExpectQuery(*conn, "ALTER TABLE knows ADD registration DATE;");
 
@@ -320,7 +333,7 @@ TYPED_TEST(CheckpointTest, after_add_edge_property1) {
       {0.5, 1.0}, {0, 0});
 
   db.Close();
-  this->OpenDB(db, this->DB_DIR);
+  this->OpenDB(db, this->db_dir_);
   conn = db.Connect();
 
   AssertPersonVertexBasic(
@@ -333,7 +346,7 @@ TYPED_TEST(CheckpointTest, after_add_edge_property1) {
 
 TYPED_TEST(CheckpointTest, after_add_edge_property2) {
   neug::NeugDB db;
-  this->OpenDB(db, this->DB_DIR);
+  this->OpenDB(db, this->db_dir_);
   auto conn = db.Connect();
 
   AssertPersonVertexBasic(
@@ -341,7 +354,7 @@ TYPED_TEST(CheckpointTest, after_add_edge_property2) {
   this->ExpectQuery(*conn, "ALTER TABLE knows ADD description STRING;");
 
   db.Close();
-  this->OpenDB(db, this->DB_DIR);
+  this->OpenDB(db, this->db_dir_);
   conn = db.Connect();
 
   AssertKnowsWeightAndDescription(
@@ -352,7 +365,7 @@ TYPED_TEST(CheckpointTest, after_add_edge_property2) {
   this->ExpectQuery(*conn, "ALTER TABLE knows ADD date DATE;");
 
   db.Close();
-  this->OpenDB(db, this->DB_DIR);
+  this->OpenDB(db, this->db_dir_);
   conn = db.Connect();
 
   AssertPersonVertexBasic(
@@ -365,14 +378,14 @@ TYPED_TEST(CheckpointTest, after_add_edge_property2) {
 
 TYPED_TEST(CheckpointTest, after_delete_edge_property) {
   neug::NeugDB db;
-  this->OpenDB(db, this->DB_DIR);
+  this->OpenDB(db, this->db_dir_);
   {
     auto conn = db.Connect();
     this->ExpectQuery(*conn, "ALTER TABLE knows DROP weight");
   }
 
   db.Close();
-  this->OpenDB(db, this->DB_DIR);
+  this->OpenDB(db, this->db_dir_);
   auto conn = db.Connect();
 
   AssertPersonVertexBasic(
@@ -384,7 +397,7 @@ TYPED_TEST(CheckpointTest, after_delete_edge_property) {
 
 TYPED_TEST(CheckpointTest, after_delete_edge) {
   neug::NeugDB db;
-  this->OpenDB(db, this->DB_DIR);
+  this->OpenDB(db, this->db_dir_);
   {
     auto conn = db.Connect();
     this->ExpectQuery(
@@ -393,7 +406,7 @@ TYPED_TEST(CheckpointTest, after_delete_edge) {
   }
 
   db.Close();
-  this->OpenDB(db, this->DB_DIR);
+  this->OpenDB(db, this->db_dir_);
   auto conn = db.Connect();
 
   AssertPersonVertexBasic(
@@ -405,8 +418,7 @@ TYPED_TEST(CheckpointTest, after_delete_edge) {
 }
 
 TYPED_TEST(CheckpointTest, compact) {
-  std::string db_path = "/tmp/test_compact_db";
-  this->EnsureCleanDir(db_path);
+  std::string db_path = this->MakeUniqueDir("compact");
 
   {
     neug::NeugDB db;
@@ -445,7 +457,7 @@ TYPED_TEST(CheckpointTest, compact) {
 
 TYPED_TEST(CheckpointTest, recover_from_checkpoint) {
   neug::NeugDB db;
-  this->OpenDB(db, this->DB_DIR);
+  this->OpenDB(db, this->db_dir_);
   auto conn = db.Connect();
 
   AssertSingleInt64Result(
@@ -466,7 +478,7 @@ TYPED_TEST(CheckpointTest, recover_from_checkpoint) {
   db.Close();
 
   neug::NeugDB db2;
-  this->OpenDB(db2, this->DB_DIR);
+  this->OpenDB(db2, this->db_dir_);
   auto conn2 = db2.Connect();
   AssertSingleInt64Result(
       this->RunQuery(*conn2, "MATCH (v:person) RETURN COUNT(v);"), 3);
@@ -475,8 +487,7 @@ TYPED_TEST(CheckpointTest, recover_from_checkpoint) {
 }
 
 TYPED_TEST(CheckpointTest, checkpoint_with_string_edge_prop) {
-  std::string db_path = "/tmp/test_checkpoint_string_edge_prop_db";
-  this->EnsureCleanDir(db_path);
+  std::string db_path = this->MakeUniqueDir("string_edge_prop");
   {
     neug::NeugDB db;
     this->OpenDB(db, db_path);
@@ -505,14 +516,14 @@ TYPED_TEST(CheckpointTest, checkpoint_with_string_edge_prop) {
 template <typename T>
 class DropTableCheckpointTest : public CheckpointTestBase<T> {
  protected:
-  static constexpr const char* DB_DIR = "/tmp/drop_table_checkpoint_test";
+  std::string db_dir_;
 
-  void SetUp() override { this->EnsureCleanDir(DB_DIR); }
-  void TearDown() override { this->CleanDir(DB_DIR); }
+  void SetUp() override { db_dir_ = this->MakeUniqueDir("drop_table_ckpt"); }
+  void TearDown() override { this->CleanDir(db_dir_); }
 
   void CreateAndCheckpointPerson() {
     neug::NeugDB db;
-    this->OpenDB(db, DB_DIR);
+    this->OpenDB(db, db_dir_);
     auto conn = db.Connect();
     this->ExpectQuery(*conn,
                       "CREATE NODE TABLE IF NOT EXISTS Person"
@@ -529,7 +540,7 @@ class DropTableCheckpointTest : public CheckpointTestBase<T> {
   // inserts sample data, and checkpoints.
   void CreateGraphWithEdgesAndCheckpoint() {
     neug::NeugDB db;
-    this->OpenDB(db, DB_DIR);
+    this->OpenDB(db, db_dir_);
     auto conn = db.Connect();
     this->ExpectQuery(*conn,
                       "CREATE NODE TABLE IF NOT EXISTS Person"
@@ -559,7 +570,7 @@ class DropTableCheckpointTest : public CheckpointTestBase<T> {
 
   void ReopenAndVerifyPersonEmpty() {
     neug::NeugDB db;
-    this->OpenDB(db, DB_DIR);
+    this->OpenDB(db, db_dir_);
     auto conn = db.Connect();
     this->ExpectQuery(*conn,
                       "CREATE NODE TABLE IF NOT EXISTS Person"
@@ -577,7 +588,7 @@ TYPED_TEST(DropTableCheckpointTest, drop_and_recreate_clears_stale_data) {
   this->CreateAndCheckpointPerson();
 
   neug::NeugDB db;
-  this->OpenDB(db, this->DB_DIR);
+  this->OpenDB(db, this->db_dir_);
   auto conn = db.Connect();
 
   this->ExpectQuery(*conn, "DROP TABLE IF EXISTS Person;");
@@ -604,7 +615,7 @@ TYPED_TEST(DropTableCheckpointTest, checkpoint_after_drop_succeeds) {
 
   {
     neug::NeugDB db;
-    this->OpenDB(db, this->DB_DIR);
+    this->OpenDB(db, this->db_dir_);
     auto conn = db.Connect();
     this->ExpectQuery(*conn, "DROP TABLE IF EXISTS Person;");
     this->ExpectQuery(*conn, "CHECKPOINT;");
@@ -621,7 +632,7 @@ TYPED_TEST(DropTableCheckpointTest,
 
   {
     neug::NeugDB db;
-    this->OpenDB(db, this->DB_DIR);
+    this->OpenDB(db, this->db_dir_);
     auto conn = db.Connect();
     this->ExpectQuery(*conn, "DROP TABLE IF EXISTS Person;");
     this->ExpectQuery(*conn, "CHECKPOINT;");
@@ -637,7 +648,7 @@ TYPED_TEST(DropTableCheckpointTest, drop_edge_table_and_checkpoint) {
 
   {
     neug::NeugDB db;
-    this->OpenDB(db, this->DB_DIR);
+    this->OpenDB(db, this->db_dir_);
     auto conn = db.Connect();
 
     // Drop the edge table while keeping vertex tables intact
@@ -651,12 +662,11 @@ TYPED_TEST(DropTableCheckpointTest, drop_edge_table_and_checkpoint) {
   // Reopen: vertex tables should survive, edge table should be gone
   {
     neug::NeugDB db;
-    this->OpenDB(db, this->DB_DIR);
+    this->OpenDB(db, this->db_dir_);
     auto conn = db.Connect();
 
     // Vertices are still present
-    auto person_table =
-        this->RunQuery(*conn, "MATCH (p:Person) RETURN p.id;");
+    auto person_table = this->RunQuery(*conn, "MATCH (p:Person) RETURN p.id;");
     EXPECT_EQ(person_table.row_count(), 1);
 
     auto software_table =
@@ -683,7 +693,7 @@ TYPED_TEST(DropTableCheckpointTest,
   this->CreateGraphWithEdgesAndCheckpoint();
 
   neug::NeugDB db;
-  this->OpenDB(db, this->DB_DIR);
+  this->OpenDB(db, this->db_dir_);
   auto conn = db.Connect();
 
   // Drop + re-create in the same session
@@ -695,19 +705,16 @@ TYPED_TEST(DropTableCheckpointTest,
   // Old edge data must not be visible
   AssertSingleInt64Result(
       this->RunQuery(
-          *conn,
-          "MATCH (p:Person)-[e:Created]->(s:Software) RETURN count(e);"),
+          *conn, "MATCH (p:Person)-[e:Created]->(s:Software) RETURN count(e);"),
       0);
 
   // Insert fresh edge — only this one should appear
-  this->ExpectQuery(
-      *conn,
-      "MATCH (p:Person {id: 'alice'}), (s:Software {id: 'neug'}) "
-      "CREATE (p)-[:Created {weight: 2.0}]->(s);");
+  this->ExpectQuery(*conn,
+                    "MATCH (p:Person {id: 'alice'}), (s:Software {id: 'neug'}) "
+                    "CREATE (p)-[:Created {weight: 2.0}]->(s);");
   AssertSingleInt64Result(
       this->RunQuery(
-          *conn,
-          "MATCH (p:Person)-[e:Created]->(s:Software) RETURN count(e);"),
+          *conn, "MATCH (p:Person)-[e:Created]->(s:Software) RETURN count(e);"),
       1);
 
   conn->Close();
@@ -721,7 +728,7 @@ TYPED_TEST(DropTableCheckpointTest,
   // Drop edge table + checkpoint
   {
     neug::NeugDB db;
-    this->OpenDB(db, this->DB_DIR);
+    this->OpenDB(db, this->db_dir_);
     auto conn = db.Connect();
     this->ExpectQuery(*conn, "DROP TABLE IF EXISTS Created;");
     this->ExpectQuery(*conn, "CHECKPOINT;");
@@ -732,7 +739,7 @@ TYPED_TEST(DropTableCheckpointTest,
   // Reopen, re-create edge table, verify empty
   {
     neug::NeugDB db;
-    this->OpenDB(db, this->DB_DIR);
+    this->OpenDB(db, this->db_dir_);
     auto conn = db.Connect();
     this->ExpectQuery(*conn,
                       "CREATE REL TABLE IF NOT EXISTS Created"

@@ -3036,7 +3036,7 @@ def test_drop_and_recreate_node_table_no_stale_data(tmp_path):
 
 
 def test_delete_all_rows_then_reinsert_visible(tmp_path):
-    """After deleting all rows and checkpointing, newly inserted rows must be visible."""
+    """After deleting all rows, newly inserted rows must be visible."""
     db_dir = tmp_path / "delete_reinsert"
     db = Database(db_path=str(db_dir), mode="w")
     conn = db.connect()

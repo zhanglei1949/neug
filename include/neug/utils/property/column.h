@@ -115,15 +115,7 @@ class TypedColumn : public ColumnBase {
 
   void drop() override {
     if (buffer_) {
-      std::string path = buffer_->GetPath();
-      auto con_type = buffer_->GetContainerType();
-      buffer_->Close();
-      buffer_.reset();
-      if (con_type == ContainerType::kFileSharedMMap && !path.empty() &&
-          std::filesystem::exists(path)) {
-        std::error_code ec;
-        std::filesystem::remove(path, ec);
-      }
+      buffer_->Drop();
     }
   }
 
@@ -304,21 +296,12 @@ class TypedColumn<std::string_view> : public ColumnBase {
   }
 
   void drop() override {
-    auto remove_file = [](std::unique_ptr<IDataContainer>& buf) {
-      if (buf) {
-        std::string path = buf->GetPath();
-        auto con_type = buf->GetContainerType();
-        buf->Close();
-        buf.reset();
-        if (con_type == ContainerType::kFileSharedMMap && !path.empty() &&
-            std::filesystem::exists(path)) {
-          std::error_code ec;
-          std::filesystem::remove(path, ec);
-        }
-      }
-    };
-    remove_file(items_buffer_);
-    remove_file(data_buffer_);
+    if (items_buffer_) {
+      items_buffer_->Drop();
+    }
+    if (data_buffer_) {
+      data_buffer_->Drop();
+    }
   }
 
   void dump(const std::string& filename) override {

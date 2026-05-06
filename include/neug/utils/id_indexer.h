@@ -479,13 +479,8 @@ class LFIndexer {
       keys_->drop();
     }
     if (indices_) {
-      std::string path = indices_->GetPath();
-      indices_->Close();
+      indices_->Drop();
       indices_.reset();
-      if (!path.empty() && std::filesystem::exists(path)) {
-        std::error_code ec;
-        std::filesystem::remove(path, ec);
-      }
     }
     indices_size_ = 0;
     num_elements_.store(0);

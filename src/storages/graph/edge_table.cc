@@ -617,9 +617,11 @@ void EdgeTable::Close() {
 void EdgeTable::Drop() {
   if (out_csr_) {
     out_csr_->drop();
+    out_csr_.reset();
   }
   if (in_csr_) {
     in_csr_->drop();
+    in_csr_.reset();
   }
   if (table_) {
     table_->drop();

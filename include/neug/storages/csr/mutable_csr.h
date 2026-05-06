@@ -342,6 +342,8 @@ class EmptyCsr : public TypedCsrBase<EDATA_T> {
   void dump(const std::string& name,
             const std::string& new_snapshot_dir) override {}
 
+  void drop() override {}
+
   void reset_timestamp() override {}
 
   void compact() override {}
