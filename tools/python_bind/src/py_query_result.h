@@ -71,8 +71,8 @@ class PyQueryResult {
    * the Arrow shared library used by pyarrow.
    *
    * @return pybind11::object  A `pyarrow.Table` Python object.
-   * @throws std::runtime_error if pyarrow is not installed or the conversion
-   *         fails.
+   * @throws pybind11::error_already_set if importing `pyarrow` fails or if
+   *         Python-side Arrow conversion raises an exception.
    */
   pybind11::object to_arrow() const;
 

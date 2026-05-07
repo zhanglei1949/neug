@@ -26,8 +26,6 @@
 #include "neug/utils/exception/exception.h"
 #include "neug/utils/property/types.h"
 
-#include <datetime.h>
-
 // ---------------------------------------------------------------------------
 // Arrow C Data Interface helpers – build ArrowSchema / ArrowArray from the
 // protobuf QueryResponse *without* touching any Arrow C++ symbol.
