@@ -43,6 +43,7 @@ GLOG_v=10 lldb -- python3 -m pytest -sv tests/test_db_query.py
 ### Pre-commit
 
 ```bash
+# From repository root
 make format-check    # clang-format + isort + black + flake8
 ```
 
