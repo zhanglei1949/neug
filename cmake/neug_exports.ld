@@ -24,13 +24,6 @@
     _ZTS*5arrow*;
     _ZTh*5arrow*;
 
-    /* Parquet symbols */
-    _ZN7parquet*;
-    _ZNK7parquet*;
-    _ZTI*7parquet*;
-    _ZTV*7parquet*;
-    _ZTS*7parquet*;
-
     /* Protobuf symbols (google::protobuf::*) */
     _ZN6google8protobuf*;
     _ZNK6google8protobuf*;

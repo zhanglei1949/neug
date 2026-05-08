@@ -19,12 +19,32 @@ endif()
 
 # Link only the Arrow components this extension actually needs, instead of
 # the full ${ARROW_LIB} (which includes acero, etc.).
-# This significantly reduces the extension binary size.
+#
+# When Arrow is built from source as static archives, prefer object
+# libraries (e.g., arrow_dataset_objlib) to avoid undefined-symbol errors
+# from the linker's demand-driven archive scan (it may omit .o files whose
+# symbols are only referenced indirectly, e.g. ParquetFragmentScanOptions).
+#
+# The extension is loaded with RTLD_LOCAL (see extension.cc) so its Arrow
+# global objects stay isolated from libneug.so's copy, preventing the
+# double-free / heap corruption that RTLD_GLOBAL would cause.
+if(TARGET arrow_dataset_objlib)
+    set(_EXT_ARROW_DATASET_LIB arrow_dataset_objlib)
+else()
+    set(_EXT_ARROW_DATASET_LIB ${ARROW_DATASET_LIB})
+endif()
+if(TARGET parquet_objlib)
+    set(_EXT_ARROW_PARQUET_LIB parquet_objlib)
+elseif(TARGET arrow_parquet_objlib)
+    set(_EXT_ARROW_PARQUET_LIB arrow_parquet_objlib)
+else()
+    set(_EXT_ARROW_PARQUET_LIB ${ARROW_PARQUET_LIB})
+endif()
 target_link_libraries(neug_parquet_extension PRIVATE
     neug
     ${ARROW_BASE_LIB}
-    ${ARROW_DATASET_LIB}
-    ${ARROW_PARQUET_LIB}
+    ${_EXT_ARROW_DATASET_LIB}
+    ${_EXT_ARROW_PARQUET_LIB}
 )
 
 # Build test by compiling extension sources directly (no link to neug_parquet_extension)
