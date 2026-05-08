@@ -90,8 +90,8 @@ jobs:
         export BUILD_EXTENSIONS="json;parquet"
         sudo mkdir -p /opt/neug-install
         sudo chown -R $USER:$USER /opt/neug-install/
-        export CC="ccache gcc"
-        export CXX="ccache g++"
+        export CMAKE_C_COMPILER_LAUNCHER=ccache
+        export CMAKE_CXX_COMPILER_LAUNCHER=ccache
         cd tools/python_bind
         make clean
         make requirements
