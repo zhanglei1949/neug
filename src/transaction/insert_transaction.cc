@@ -23,6 +23,7 @@
 #include <thread>
 
 #include "neug/storages/allocators.h"
+#include "neug/storages/csr/generic_view_utils.h"
 #include "neug/storages/graph/property_graph.h"
 #include "neug/storages/graph/schema.h"
 #include "neug/transaction/transaction_utils.h"
@@ -147,6 +148,10 @@ bool InsertTransaction::Commit() {
     clear();
     return true;
   }
+
+  // Add TxEnd marker before writing WAL for atomicity
+  arc_ << OpType::kTxEnd;
+
   auto* header = reinterpret_cast<WalHeader*>(arc_.GetBuffer());
   header->length = arc_.GetSize() - sizeof(WalHeader);
   header->type = 0;
@@ -157,8 +162,17 @@ bool InsertTransaction::Commit() {
     Abort();
     return false;
   }
-  IngestWal(graph_, timestamp_, arc_.GetBuffer() + sizeof(WalHeader),
-            header->length, alloc_);
+
+  try {
+    IngestWal(graph_, timestamp_, arc_.GetBuffer() + sizeof(WalHeader),
+              header->length, alloc_);
+  } catch (const std::exception& e) {
+    LOG(ERROR) << "IngestWal failed during commit, transaction rolled back: "
+               << e.what();
+    vm_.release_insert_timestamp(timestamp_);
+    clear();
+    return false;
+  }
 
   vm_.release_insert_timestamp(timestamp_);
   clear();
@@ -179,32 +193,150 @@ void InsertTransaction::IngestWal(PropertyGraph& graph, uint32_t timestamp,
                                   char* data, size_t length, Allocator& alloc) {
   OutArchive arc;
   arc.SetSlice(data, length);
-  while (!arc.Empty()) {
-    OpType op_type;
-    arc >> op_type;
-    if (op_type == OpType::kInsertVertex) {
-      InsertVertexRedo redo;
-      arc >> redo;
-      vid_t vid;
-      auto ret =
-          graph.AddVertex(redo.label, redo.oid, redo.props, vid, timestamp);
-      if (!ret.ok()) {
-        THROW_STORAGE_EXCEPTION("Failed to add vertex during WAL ingestion: " +
-                                ret.ToString());
+
+  // Helper lambda: check if WAL has TxEnd marker as the final opcode.
+  // kTxEnd must be the last record in the slice; any trailing data after it
+  // indicates corruption and the transaction is treated as invalid.
+  auto has_tx_end_marker = [&arc]() -> bool {
+    while (!arc.Empty()) {
+      OpType op_type;
+      arc >> op_type;
+      if (op_type == OpType::kTxEnd) {
+        return arc.Empty();
       }
-    } else if (op_type == OpType::kInsertEdge) {
-      InsertEdgeRedo redo;
-      arc >> redo;
-      vid_t src_lid, dst_lid;
-      CHECK(get_vertex_with_retries(graph, redo.src_label, redo.src, src_lid,
-                                    timestamp));
-      CHECK(get_vertex_with_retries(graph, redo.dst_label, redo.dst, dst_lid,
-                                    timestamp));
-      graph.AddEdge(redo.src_label, src_lid, redo.dst_label, dst_lid,
-                    redo.edge_label, redo.properties, timestamp, alloc);
-    } else {
-      LOG(FATAL) << "Unexpected op-" << static_cast<int>(op_type);
+      // Skip operation data
+      if (op_type == OpType::kInsertVertex) {
+        InsertVertexRedo redo;
+        arc >> redo;
+      } else if (op_type == OpType::kInsertEdge) {
+        InsertEdgeRedo redo;
+        arc >> redo;
+      } else {
+        LOG(FATAL) << "Unexpected op-" << static_cast<int>(op_type);
+      }
     }
+    return false;
+  };
+
+  // First pass: validate transaction completeness
+  if (!has_tx_end_marker()) {
+    LOG(WARNING) << "Skipping incomplete transaction at timestamp "
+                 << timestamp;
+    return;
+  }
+
+  // Second pass: apply operations with rollback support
+  arc.SetSlice(data, length);  // rewind
+
+  std::vector<std::tuple<label_t, vid_t>> inserted_vertices;
+  std::vector<std::tuple<label_t, vid_t, label_t, vid_t, label_t, int32_t>>
+      inserted_edges;
+
+  // Helper lambda: rollback all inserted elements.
+  // Returns true if rollback was fully successful, false if any step failed.
+  auto rollback = [&]() -> bool {
+    bool fully_rolled_back = true;
+    // Rollback edges first (edges depend on vertices)
+    for (auto& [src_label, src_lid, dst_label, dst_lid, edge_label, oe_offset] :
+         inserted_edges) {
+      try {
+        auto ie_offset = search_other_offset_with_cur_offset(
+            graph.GetGenericOutgoingGraphView(src_label, dst_label, edge_label),
+            graph.GetGenericIncomingGraphView(dst_label, src_label, edge_label),
+            src_lid, dst_lid, oe_offset,
+            graph.schema()
+                .get_edge_schema(src_label, dst_label, edge_label)
+                ->properties);
+        auto status =
+            graph.DeleteEdge(src_label, src_lid, dst_label, dst_lid, edge_label,
+                             oe_offset, ie_offset, timestamp);
+        if (!status.ok()) {
+          LOG(ERROR) << "Rollback failed to delete edge (src_label="
+                     << src_label << ", src_lid=" << src_lid
+                     << ", dst_label=" << dst_label << ", dst_lid=" << dst_lid
+                     << ", edge_label=" << edge_label
+                     << ", oe_offset=" << oe_offset
+                     << "): " << status.ToString();
+          fully_rolled_back = false;
+        }
+      } catch (const std::exception& e) {
+        LOG(ERROR) << "Rollback failed to delete edge (src_label=" << src_label
+                   << ", src_lid=" << src_lid << ", dst_label=" << dst_label
+                   << ", dst_lid=" << dst_lid << ", edge_label=" << edge_label
+                   << ", oe_offset=" << oe_offset << "): " << e.what();
+        fully_rolled_back = false;
+      } catch (...) {
+        LOG(ERROR) << "Rollback failed to delete edge (src_label=" << src_label
+                   << ", src_lid=" << src_lid << ", dst_label=" << dst_label
+                   << ", dst_lid=" << dst_lid << ", edge_label=" << edge_label
+                   << ", oe_offset=" << oe_offset << "): unknown exception";
+        fully_rolled_back = false;
+      }
+    }
+    for (auto& [label, vid] : inserted_vertices) {
+      try {
+        auto status = graph.DeleteVertex(label, vid, timestamp);
+        if (!status.ok()) {
+          LOG(ERROR) << "Rollback failed to delete vertex (label=" << label
+                     << ", vid=" << vid << "): " << status.ToString();
+          fully_rolled_back = false;
+        }
+      } catch (const std::exception& e) {
+        LOG(ERROR) << "Rollback failed to delete vertex (label=" << label
+                   << ", vid=" << vid << "): " << e.what();
+        fully_rolled_back = false;
+      } catch (...) {
+        LOG(ERROR) << "Rollback failed to delete vertex (label=" << label
+                   << ", vid=" << vid << "): unknown exception";
+        fully_rolled_back = false;
+      }
+    }
+    if (!fully_rolled_back) {
+      LOG(ERROR) << "Insert transaction rollback was partial at timestamp "
+                 << timestamp << "; graph may be in an inconsistent state";
+    }
+    return fully_rolled_back;
+  };
+
+  try {
+    while (!arc.Empty()) {
+      OpType op_type;
+      arc >> op_type;
+      if (op_type == OpType::kTxEnd)
+        break;
+
+      if (op_type == OpType::kInsertVertex) {
+        InsertVertexRedo redo;
+        arc >> redo;
+        vid_t vid;
+        auto ret =
+            graph.AddVertex(redo.label, redo.oid, redo.props, vid, timestamp);
+        if (!ret.ok()) {
+          rollback();
+          THROW_STORAGE_EXCEPTION("Failed to add vertex: " + ret.ToString());
+        }
+        inserted_vertices.emplace_back(redo.label, vid);
+      } else if (op_type == OpType::kInsertEdge) {
+        InsertEdgeRedo redo;
+        arc >> redo;
+        vid_t src_lid, dst_lid;
+        CHECK(get_vertex_with_retries(graph, redo.src_label, redo.src, src_lid,
+                                      timestamp));
+        CHECK(get_vertex_with_retries(graph, redo.dst_label, redo.dst, dst_lid,
+                                      timestamp));
+        // TODO(zhanglei): Call rollback if oe_offset is not valid
+        auto oe_offset =
+            graph.AddEdge(redo.src_label, src_lid, redo.dst_label, dst_lid,
+                          redo.edge_label, redo.properties, timestamp, alloc);
+        inserted_edges.emplace_back(redo.src_label, src_lid, redo.dst_label,
+                                    dst_lid, redo.edge_label, oe_offset);
+      } else {
+        LOG(FATAL) << "Unexpected op-" << static_cast<int>(op_type);
+      }
+    }
+  } catch (...) {
+    rollback();
+    throw;
   }
 }
 

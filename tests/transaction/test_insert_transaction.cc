@@ -108,11 +108,21 @@ TEST_F(InsertTransactionTest, AddVertex) {
   config.memory_level = neug::MemoryLevel::kInMemory;
   db.Open(config);
   auto svc = std::make_shared<neug::NeugDBService>(db);
+
+  neug::label_t person_label;
+  size_t baseline_count;
+  {
+    auto sess = svc->AcquireSession();
+    auto txn = sess->GetReadTransaction();
+    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    person_label = gi.schema().get_vertex_label_id("person");
+    baseline_count = count_vertices(gi, person_label);
+  }
+
   {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetInsertTransaction();
     neug::StorageTPInsertInterface interface(txn);
-    auto person_label = interface.schema().get_vertex_label_id("person");
     neug::vid_t vid;
     EXPECT_TRUE(interface.AddVertex(person_label, neug::Property::from_int64(3),
                                     {neug::Property::from_string_view("Eve"),
@@ -124,8 +134,7 @@ TEST_F(InsertTransactionTest, AddVertex) {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetReadTransaction();
     neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
-    auto person_label = gi.schema().get_vertex_label_id("person");
-    EXPECT_EQ(count_vertices(gi, person_label), 3);
+    EXPECT_EQ(count_vertices(gi, person_label), baseline_count + 1);
   }
   db.Close();
 }
@@ -199,4 +208,253 @@ TEST_F(InsertTransactionTest, TestUnsupportedInterface) {
     EXPECT_EQ(interface.BatchAddEdges(0, 0, 0, nullptr).error_code(),
               neug::StatusCode::ERR_NOT_SUPPORTED);
   }
+}
+
+TEST_F(InsertTransactionTest, RollbackOnPartialFailure) {
+  neug::NeugDB db;
+  neug::NeugDBConfig config(db_dir);
+  config.memory_level = neug::MemoryLevel::kInMemory;
+  config.thread_num = 2;  // Enable 2 sessions for concurrent transactions
+  db.Open(config);
+  auto svc = std::make_shared<neug::NeugDBService>(db);
+
+  neug::label_t person_label;
+  size_t baseline_count;
+  {
+    auto sess = svc->AcquireSession();
+    auto txn = sess->GetReadTransaction();
+    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    person_label = gi.schema().get_vertex_label_id("person");
+    baseline_count = count_vertices(gi, person_label);
+  }
+
+  // Simulate race condition:
+  // Transaction A adds vertex 100
+  // Transaction B adds vertices 200 and 100 (100 will be duplicate at commit time)
+  // Transaction A commits first, creating vertex 100
+  // Transaction B commits later - IngestWal fails for vertex 100, rolls back vertex 200
+
+  // Use nested scopes to properly manage session lifecycle
+  {
+    auto sess_a = svc->AcquireSession();
+    auto sess_b = svc->AcquireSession();
+
+    // Setup Txn A with vertex 100
+    auto txn_a = sess_a->GetInsertTransaction();
+    neug::StorageTPInsertInterface interface_a(txn_a);
+    neug::vid_t vid_a;
+    EXPECT_TRUE(interface_a.AddVertex(person_label, neug::Property::from_int64(100),
+                                      {neug::Property::from_string_view("FromTxnA"),
+                                       neug::Property::from_int64(50)},
+                                      vid_a));
+
+    // Setup Txn B with vertices 200 and 100
+    auto txn_b = sess_b->GetInsertTransaction();
+    neug::StorageTPInsertInterface interface_b(txn_b);
+    neug::vid_t vid_b1, vid_b2;
+
+    // At this point, vertex 100 doesn't exist in graph yet (Txn A not committed)
+    // So GetVertexIndex returns false, and vertex 100 gets serialized to WAL
+    EXPECT_TRUE(interface_b.AddVertex(person_label, neug::Property::from_int64(200),
+                                      {neug::Property::from_string_view("FromTxnB1"),
+                                       neug::Property::from_int64(20)},
+                                      vid_b1));
+    EXPECT_TRUE(interface_b.AddVertex(person_label, neug::Property::from_int64(100),
+                                      {neug::Property::from_string_view("FromTxnB2"),
+                                       neug::Property::from_int64(30)},
+                                      vid_b2));
+
+    // Commit A first - vertex 100 now exists in graph
+    EXPECT_TRUE(txn_a.Commit());
+
+    // Commit B - IngestWal will fail for vertex 100 (duplicate),
+    // should rollback vertex 200
+    EXPECT_FALSE(txn_b.Commit());
+    // sess_a and sess_b released when this scope ends
+  }
+
+  // Verify rollback: vertex 200 should NOT exist (rolled back)
+  // vertex 100 should exist (from Txn A)
+  {
+    auto sess = svc->AcquireSession();
+    auto txn = sess->GetReadTransaction();
+    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::vid_t vid;
+
+    // Vertex 100 exists (from Txn A)
+    EXPECT_TRUE(gi.GetVertexIndex(person_label, neug::Property::from_int64(100), vid));
+
+    // Vertex 200 does NOT exist (rolled back from Txn B)
+    EXPECT_FALSE(gi.GetVertexIndex(person_label, neug::Property::from_int64(200), vid));
+
+    // Only Txn A's vertex 100 was successfully added
+    EXPECT_EQ(count_vertices(gi, person_label), baseline_count + 1);
+  }
+
+  db.Close();
+}
+
+TEST_F(InsertTransactionTest, ConcurrentInsertDuplicate) {
+  neug::NeugDB db;
+  neug::NeugDBConfig config(db_dir);
+  config.memory_level = neug::MemoryLevel::kInMemory;
+  config.thread_num = 2;  // Enable 2 sessions for concurrent transactions
+  db.Open(config);
+  auto svc = std::make_shared<neug::NeugDBService>(db);
+
+  neug::label_t person_label;
+  size_t baseline_count;
+  {
+    auto sess = svc->AcquireSession();
+    auto txn = sess->GetReadTransaction();
+    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    person_label = gi.schema().get_vertex_label_id("person");
+    baseline_count = count_vertices(gi, person_label);
+  }
+
+  // Simulate concurrent transaction conflict scenario
+  // Txn A: adds vertices 300 and 400
+  // Txn B: adds vertices 500 and 400 (400 will conflict)
+  // Both check existence before commit - but race at commit time
+
+  // Use nested scopes to properly manage session lifecycle
+  {
+    auto sess_a = svc->AcquireSession();
+    auto sess_b = svc->AcquireSession();
+
+    // Setup Txn A with vertices 300 and 400
+    auto txn_a = sess_a->GetInsertTransaction();
+    neug::StorageTPInsertInterface interface_a(txn_a);
+    neug::vid_t vid_a1, vid_a2;
+    EXPECT_TRUE(interface_a.AddVertex(person_label, neug::Property::from_int64(300),
+                                      {neug::Property::from_string_view("Alice"),
+                                       neug::Property::from_int64(25)},
+                                      vid_a1));
+    EXPECT_TRUE(interface_a.AddVertex(person_label, neug::Property::from_int64(400),
+                                      {neug::Property::from_string_view("Lisa"),
+                                       neug::Property::from_int64(30)},
+                                      vid_a2));
+
+    // Setup Txn B with vertices 500 and 400
+    auto txn_b = sess_b->GetInsertTransaction();
+    neug::StorageTPInsertInterface interface_b(txn_b);
+    neug::vid_t vid_b1, vid_b2;
+
+    // At this point, vertex 400 doesn't exist yet (Txn A not committed)
+    // So both vertices are serialized to WAL
+    EXPECT_TRUE(interface_b.AddVertex(person_label, neug::Property::from_int64(500),
+                                      {neug::Property::from_string_view("Bob"),
+                                       neug::Property::from_int64(28)},
+                                      vid_b1));
+    EXPECT_TRUE(interface_b.AddVertex(person_label, neug::Property::from_int64(400),
+                                      {neug::Property::from_string_view("Lisa2"),
+                                       neug::Property::from_int64(31)},
+                                      vid_b2));
+
+    // Commit Txn A first - vertices 300 and 400 now exist
+    EXPECT_TRUE(txn_a.Commit());
+
+    // Commit Txn B - IngestWal fails for vertex 400 (duplicate)
+    // Should rollback vertex 500
+    EXPECT_FALSE(txn_b.Commit());
+    // sess_a and sess_b released when this scope ends
+  }
+
+  // Verify: Alice(300) and Lisa(400) exist, Bob(500) was rolled back
+  {
+    auto sess = svc->AcquireSession();
+    auto txn = sess->GetReadTransaction();
+    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::vid_t vid;
+
+    // Vertex 300 exists (from Txn A)
+    EXPECT_TRUE(gi.GetVertexIndex(person_label, neug::Property::from_int64(300), vid));
+
+    // Vertex 400 exists (from Txn A)
+    EXPECT_TRUE(gi.GetVertexIndex(person_label, neug::Property::from_int64(400), vid));
+
+    // Vertex 500 does NOT exist (rolled back from Txn B)
+    EXPECT_FALSE(gi.GetVertexIndex(person_label, neug::Property::from_int64(500), vid));
+
+    // Only Txn A's 2 vertices (300, 400) were successfully added
+    EXPECT_EQ(count_vertices(gi, person_label), baseline_count + 2);
+  }
+
+  db.Close();
+}
+
+TEST_F(InsertTransactionTest, ReInsertAfterSoftDelete) {
+  neug::NeugDB db;
+  neug::NeugDBConfig config(db_dir);
+  config.memory_level = neug::MemoryLevel::kInMemory;
+  db.Open(config);
+  auto svc = std::make_shared<neug::NeugDBService>(db);
+
+  auto person_label = svc->AcquireSession()
+                          ->GetReadTransaction()
+                          .graph()
+                          .schema()
+                          .get_vertex_label_id("person");
+
+  // Insert vertex with pk=600
+  {
+    auto sess = svc->AcquireSession();
+    auto txn = sess->GetInsertTransaction();
+    neug::StorageTPInsertInterface interface(txn);
+    neug::vid_t vid;
+    EXPECT_TRUE(interface.AddVertex(person_label, neug::Property::from_int64(600),
+                                    {neug::Property::from_string_view("Alice"),
+                                     neug::Property::from_int64(20)},
+                                    vid));
+    EXPECT_TRUE(txn.Commit());
+  }
+
+  // Soft delete vertex via UpdateTransaction
+  {
+    auto sess = svc->AcquireSession();
+    auto txn = sess->GetUpdateTransaction();
+    neug::vid_t vid;
+    EXPECT_TRUE(txn.GetVertexIndex(person_label, neug::Property::from_int64(600), vid));
+    EXPECT_TRUE(txn.DeleteVertex(person_label, vid));
+    EXPECT_TRUE(txn.Commit());
+  }
+
+  // Verify vertex is soft-deleted (not visible)
+  {
+    auto sess = svc->AcquireSession();
+    auto txn = sess->GetReadTransaction();
+    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::vid_t vid;
+    EXPECT_FALSE(gi.GetVertexIndex(person_label, neug::Property::from_int64(600), vid));
+  }
+
+  // Re-insert same vertex with different properties
+  // InsertTransaction re-inserts using the same pk. Since the vertex was
+  // soft-deleted, get_lid returns false (not valid), so AddVertex is
+  // serialized to WAL. During IngestWal, graph.AddVertex will detect the
+  // existing pk in the indexer and reuse the soft-deleted vertex slot.
+  {
+    auto sess = svc->AcquireSession();
+    auto txn = sess->GetInsertTransaction();
+    neug::StorageTPInsertInterface interface(txn);
+    neug::vid_t vid;
+    EXPECT_TRUE(interface.AddVertex(person_label, neug::Property::from_int64(600),
+                                    {neug::Property::from_string_view("AliceNew"),
+                                     neug::Property::from_int64(25)},
+                                    vid));
+    EXPECT_TRUE(txn.Commit());
+  }
+
+  // Verify vertex exists again after re-insert
+  {
+    auto sess = svc->AcquireSession();
+    auto txn = sess->GetReadTransaction();
+    neug::StorageReadInterface gi(txn.graph(), txn.timestamp());
+    neug::vid_t vid;
+    EXPECT_TRUE(gi.GetVertexIndex(person_label, neug::Property::from_int64(600), vid));
+    auto oid = gi.GetVertexId(person_label, vid);
+    EXPECT_EQ(oid.as_int64(), 600);
+  }
+
+  db.Close();
 }
