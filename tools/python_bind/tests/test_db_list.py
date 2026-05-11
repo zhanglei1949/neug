@@ -146,3 +146,22 @@ def test_nested_list_default_value(tmp_path):
 
     conn.close()
     db.close()
+
+
+def test_list_as_primary_key_rejected(tmp_path):
+    """Test that LIST type cannot be used as primary key."""
+    db_dir = tmp_path / "list_pk_rejection"
+    shutil.rmtree(db_dir, ignore_errors=True)
+    db_dir.mkdir()
+    db = Database(db_path=str(db_dir), mode="w")
+    conn = db.connect()
+
+    with pytest.raises(Exception) as excinfo:
+        conn.execute(
+            "CREATE NODE TABLE BadTable(id INT64[] PRIMARY KEY);"
+        )
+    # Verify error message mentions invalid primary key type
+    assert "primary key" in str(excinfo.value).lower()
+
+    conn.close()
+    db.close()

@@ -15,9 +15,11 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <filesystem>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "neug/common/types.h"
@@ -432,4 +434,101 @@ TEST(PropertyListTest, SetListData) {
   p.set_list_data(blob);
   EXPECT_EQ(p.type(), DataTypeId::kList);
   EXPECT_EQ(p.as_list_data(), blob);
+}
+
+// ---------------------------------------------------------------------------
+// Empty nested lists: [[[]], []]
+// ---------------------------------------------------------------------------
+TEST(ListViewBuilderTest, EmptyNestedLists) {
+  DataType inner_type = DataType::List(DataType(DataTypeId::kInt32));
+  DataType outer_type = DataType::List(inner_type);
+
+  // Create empty inner blobs
+  std::string empty_inner1 = BuildPodBlob<int32_t>({});
+  std::string empty_inner2 = BuildPodBlob<int32_t>({});
+
+  ListViewBuilder outer_b;
+  outer_b.append_blob(empty_inner1);
+  outer_b.append_blob(empty_inner2);
+  std::string outer_blob = outer_b.finish_varlen();
+
+  ListView outer(outer_type, outer_blob);
+  ASSERT_EQ(outer.size(), 2u);
+  EXPECT_EQ(outer.GetChildListView(0).size(), 0u);
+  EXPECT_EQ(outer.GetChildListView(1).size(), 0u);
+}
+
+// ---------------------------------------------------------------------------
+// Concurrent writes to ListColumn
+// ---------------------------------------------------------------------------
+TEST_F(ListColumnFixture, ConcurrentWrites) {
+  SetUpDir("concurrent");
+  DataType list_type = DataType::List(DataType(DataTypeId::kInt32));
+  ListColumn col(list_type);
+  col.open("col", dir_, dir_);
+  col.resize(100);  // Pre-resize to avoid insert_safe resizing
+
+  std::atomic<size_t> counter(0);
+  std::vector<std::thread> threads;
+  const int thread_num = 8;
+
+  for (int i = 0; i < thread_num; ++i) {
+    threads.emplace_back([&]() {
+      while (true) {
+        size_t idx = counter.fetch_add(1);
+        if (idx >= 100) break;
+        std::string blob = BuildPodBlob<int32_t>({static_cast<int32_t>(idx)});
+        col.set_value(idx, blob);
+      }
+    });
+  }
+  for (auto& th : threads) th.join();
+
+  // Verify all writes
+  for (size_t i = 0; i < 100; ++i) {
+    ExpectPodListEq<int32_t>(col.get_view(i), {static_cast<int32_t>(i)});
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Mixed POD and non-POD concurrent writes
+// ---------------------------------------------------------------------------
+TEST_F(ListColumnFixture, MixedPodNonPodConcurrent) {
+  SetUpDir("mixed_concurrent");
+  // Create two columns: INT64[] (POD) and STRING[] (non-POD)
+  DataType pod_type = DataType::List(DataType(DataTypeId::kInt64));
+  DataType nonpod_type = DataType::List(DataType::Varchar(256));
+
+  ListColumn pod_col(pod_type);
+  ListColumn nonpod_col(nonpod_type);
+  pod_col.open("pod", dir_, dir_);
+  nonpod_col.open("nonpod", dir_, dir_);
+  pod_col.resize(50);
+  nonpod_col.resize(50);
+
+  std::atomic<size_t> counter(0);
+  std::vector<std::thread> threads;
+  const int thread_num = 8;
+
+  for (int i = 0; i < thread_num; ++i) {
+    threads.emplace_back([&]() {
+      while (true) {
+        size_t idx = counter.fetch_add(1);
+        if (idx >= 50) break;
+        // POD: [idx, idx*2]
+        pod_col.set_value(idx, BuildPodBlob<int64_t>(
+            {static_cast<int64_t>(idx), static_cast<int64_t>(idx * 2)}));
+        // non-POD: ["str_idx"]
+        nonpod_col.set_value(idx, BuildVarcharBlob({"str_" + std::to_string(idx)}));
+      }
+    });
+  }
+  for (auto& th : threads) th.join();
+
+  // Verify
+  for (size_t i = 0; i < 50; ++i) {
+    ExpectPodListEq<int64_t>(pod_col.get_view(i),
+                             {static_cast<int64_t>(i), static_cast<int64_t>(i * 2)});
+    ExpectVarcharListEq(nonpod_col.get_view(i), {"str_" + std::to_string(i)});
+  }
 }

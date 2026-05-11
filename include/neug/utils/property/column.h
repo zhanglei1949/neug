@@ -233,6 +233,13 @@ struct var_len_item {
  * - data_buffer_:  stores the actual variable-length byte blobs.
  * - pos_:          atomic write frontier in data_buffer_.
  *
+ * Thread Safety:
+ * - Concurrent writes to different indices are safe: pos_ uses atomic fetch_add
+ *   for offset allocation, ensuring no two threads write to overlapping regions.
+ * - resize() operations require external synchronization (not atomic).
+ * - set_any() with insert_safe=true may resize buffer; caller must handle
+ *   synchronization or ensure pre-resize is sufficient.
+ *
  * Subclasses (TypedColumn<std::string_view>, TypedColumn<ListView>) must
  * implement: type(), default_avg_size(), resize(size, default_value),
  * set_any(), get_prop(), and set_prop().
@@ -507,8 +514,9 @@ class TypedColumn<std::string_view> : public VarLenColumn {
     }
   }
 
-  // When insert_safe is set to true, concurrency control should be guaranteed
-  // by caller.
+  // Thread-safe for concurrent writes to different indices when insert_safe=false
+  // (throws on insufficient space). When insert_safe=true, buffer may resize;
+  // caller must provide external synchronization.
   void set_any(size_t idx, const Property& value, bool insert_safe) override {
     if (idx >= size_) {
       THROW_RUNTIME_ERROR("Index out of range");
@@ -617,8 +625,10 @@ class TypedColumn<ListView> : public VarLenColumn {
     }
   }
 
-  // When insert_safe is set to true, concurrency control should be guaranteed
-  // by caller.
+  // Thread-safe for concurrent writes to different indices when insert_safe=false
+  // (throws on insufficient space). When insert_safe=true, buffer may resize;
+  // caller must provide external synchronization. Atomic pos_ ensures safe offset
+  // allocation, but resize operations are not atomic.
   void set_any(size_t idx, const Property& value, bool insert_safe) override {
     if (idx >= size_) {
       THROW_RUNTIME_ERROR("Index out of range");
