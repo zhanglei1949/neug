@@ -587,6 +587,20 @@ struct convert<neug::DataType> {
       }
     } else if (config["date"]) {
       property_type = neug::DataTypeId::kDate;
+    } else if (config["array"]) {
+      auto array_node = config["array"];
+      if (array_node["component_type"]) {
+        neug::DataType child_type;
+        if (!convert<neug::DataType>::decode(array_node["component_type"],
+                                             child_type)) {
+          LOG(ERROR) << "Failed to decode array component_type";
+          return false;
+        }
+        property_type = neug::DataType::List(child_type);
+      } else {
+        LOG(ERROR) << "array type requires component_type";
+        return false;
+      }
     } else {
       LOG(ERROR) << "Unrecognized property type: " << config;
       return false;
@@ -612,6 +626,19 @@ struct convert<neug::DataType> {
                            : neug::STRING_DEFAULT_MAX_LENGTH;
     } else if (type == neug::DataTypeId::kDate) {
       node["temporal"]["datetime"] = "";
+    } else if (type == neug::DataTypeId::kTimestampMs) {
+      node["temporal"]["timestamp"] = "";
+    } else if (type == neug::DataTypeId::kInterval) {
+      node["temporal"]["interval"] = "";
+    } else if (type == neug::DataTypeId::kList) {
+      const auto* extra_type_info = type.RawExtraTypeInfo();
+      const auto* list_type_info =
+          dynamic_cast<const neug::ListTypeInfo*>(extra_type_info);
+      if (list_type_info) {
+        node["array"]["component_type"] = encode(list_type_info->child_type);
+      } else {
+        LOG(ERROR) << "List type missing ListTypeInfo";
+      }
     } else {
       LOG(ERROR) << "Unrecognized property type: " << type.ToString();
     }
