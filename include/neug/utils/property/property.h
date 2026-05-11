@@ -275,7 +275,7 @@ class Property {
     } else if (type == DataTypeId::kEmpty) {
       return "EMPTY";
     } else if (type == DataTypeId::kList) {
-      return "LIST[" + std::to_string(as_list_data().size()) + "B]";
+      return "LIST(size=" + std::to_string(as_list_data().size()) + ")";
     } else {
       return "UNKNOWN";
     }

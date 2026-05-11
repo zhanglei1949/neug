@@ -309,53 +309,6 @@ bool common_value_to_value(const DataType& type, const common::Value& value,
   case common::Value::kDate:
     out_value = execution::Value::DATE(Date(value.date().item()));
     break;
-  case common::Value::kI32Array: {
-    DataType child_type = ListType::GetChildType(type);
-    std::vector<execution::Value> items;
-    for (auto v : value.i32_array().item()) {
-      items.emplace_back(execution::Value::INT32(v));
-    }
-    out_value = execution::Value::LIST(child_type, std::move(items));
-    break;
-  }
-  case common::Value::kI64Array: {
-    DataType child_type = ListType::GetChildType(type);
-    std::vector<execution::Value> items;
-    for (auto v : value.i64_array().item()) {
-      items.emplace_back(execution::Value::INT64(v));
-    }
-    out_value = execution::Value::LIST(child_type, std::move(items));
-    break;
-  }
-  case common::Value::kF64Array: {
-    DataType child_type = ListType::GetChildType(type);
-    std::vector<execution::Value> items;
-    if (child_type.id() == DataTypeId::kFloat) {
-      for (auto v : value.f64_array().item()) {
-        items.emplace_back(execution::Value::FLOAT(static_cast<float>(v)));
-      }
-    } else {
-      for (auto v : value.f64_array().item()) {
-        items.emplace_back(execution::Value::DOUBLE(v));
-      }
-    }
-    out_value = execution::Value::LIST(child_type, std::move(items));
-    break;
-  }
-  case common::Value::kStrArray: {
-    DataType child_type = ListType::GetChildType(type);
-    std::vector<execution::Value> items;
-    uint16_t max_len = STRING_DEFAULT_MAX_LENGTH;
-    if (child_type.RawExtraTypeInfo()) {
-      max_len =
-          child_type.RawExtraTypeInfo()->Cast<StringTypeInfo>().max_length;
-    }
-    for (const auto& s : value.str_array().item()) {
-      items.emplace_back(execution::Value::VARCHAR(s, max_len));
-    }
-    out_value = execution::Value::LIST(child_type, std::move(items));
-    break;
-  }
   default:
     LOG(ERROR) << "Unknown value type: " << value.DebugString();
     return false;
