@@ -157,9 +157,7 @@ def test_list_as_primary_key_rejected(tmp_path):
     conn = db.connect()
 
     with pytest.raises(Exception) as excinfo:
-        conn.execute(
-            "CREATE NODE TABLE BadTable(id INT64[] PRIMARY KEY);"
-        )
+        conn.execute("CREATE NODE TABLE BadTable(id INT64[] PRIMARY KEY);")
     # Verify error message mentions invalid primary key type
     assert "primary key" in str(excinfo.value).lower()
 
