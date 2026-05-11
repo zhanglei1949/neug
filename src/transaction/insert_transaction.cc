@@ -194,8 +194,8 @@ void InsertTransaction::IngestWal(PropertyGraph& graph, uint32_t timestamp,
         auto ret =
             graph.AddVertex(redo.label, redo.oid, redo.props, vid, timestamp);
         if (!ret.ok()) {
-          THROW_RUNTIME_ERROR("Failed to add vertex during WAL ingestion: " +
-                              ret.ToString());
+          THROW_STORAGE_EXCEPTION(
+              "Failed to add vertex during WAL ingestion: " + ret.ToString());
         }
         undo_logs.push(std::make_unique<InsertVertexUndo>(redo.label, vid));
       } else if (op_type == OpType::kInsertEdge) {
@@ -204,21 +204,29 @@ void InsertTransaction::IngestWal(PropertyGraph& graph, uint32_t timestamp,
         vid_t src_lid, dst_lid;
         if (!get_vertex_with_retries(graph, redo.src_label, redo.src, src_lid,
                                      timestamp)) {
-          THROW_RUNTIME_ERROR(
+          THROW_STORAGE_EXCEPTION(
               "Failed to find source vertex during WAL ingestion: " +
               redo.src.to_string());
         }
         if (!get_vertex_with_retries(graph, redo.dst_label, redo.dst, dst_lid,
                                      timestamp)) {
-          THROW_RUNTIME_ERROR(
+          THROW_STORAGE_EXCEPTION(
               "Failed to find destination vertex during WAL ingestion: " +
               redo.dst.to_string());
         }
-        // TODO(zhanglei): Deal with addEdge failure.
         auto oe_offset =
             graph.AddEdge(redo.src_label, src_lid, redo.dst_label, dst_lid,
                           redo.edge_label, redo.properties, timestamp, alloc);
-        auto ie_offset = search_other_offset_with_cur_offset(
+        // Record undo immediately after AddEdge succeeds, so any exception
+        // in search_other_offset_with_cur_offset still rolls back this edge.
+        auto edge_undo = std::make_unique<InsertEdgeUndo>(
+            redo.src_label, redo.dst_label, redo.edge_label, src_lid, dst_lid,
+            oe_offset, /*ie_offset=*/-1);
+        auto* edge_undo_ptr = edge_undo.get();
+        undo_logs.push(std::move(edge_undo));
+        // Now resolve ie_offset; if this throws, the undo entry above
+        // will still attempt rollback with ie_offset=-1.
+        edge_undo_ptr->ie_offset = search_other_offset_with_cur_offset(
             graph.GetGenericOutgoingGraphView(redo.src_label, redo.dst_label,
                                               redo.edge_label),
             graph.GetGenericIncomingGraphView(redo.dst_label, redo.src_label,
@@ -228,9 +236,6 @@ void InsertTransaction::IngestWal(PropertyGraph& graph, uint32_t timestamp,
                 .get_edge_schema(redo.src_label, redo.dst_label,
                                  redo.edge_label)
                 ->properties);
-        undo_logs.push(std::make_unique<InsertEdgeUndo>(
-            redo.src_label, redo.dst_label, redo.edge_label, src_lid, dst_lid,
-            oe_offset, ie_offset));
       } else {
         LOG(FATAL) << "Unexpected op-" << static_cast<int>(op_type);
       }
@@ -239,8 +244,12 @@ void InsertTransaction::IngestWal(PropertyGraph& graph, uint32_t timestamp,
     LOG(ERROR) << "Error during WAL ingestion, rolling back "
                << undo_logs.size() << " operations";
     while (!undo_logs.empty()) {
-      auto& log = undo_logs.top();
-      log->Undo(graph, timestamp);
+      try {
+        undo_logs.top()->Undo(graph, timestamp);
+      } catch (const std::exception& undo_err) {
+        LOG(ERROR) << "Failed to undo operation during rollback: "
+                   << undo_err.what();
+      }
       undo_logs.pop();
     }
     throw;

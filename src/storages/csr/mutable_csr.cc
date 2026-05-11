@@ -399,7 +399,7 @@ void MutableCsr<EDATA_T>::delete_edge(vid_t src, int32_t offset,
                                       timestamp_t ts) {
   vid_t vnum = static_cast<vid_t>(vertex_capacity());
   const auto* sz_arr = reinterpret_cast<const int*>(degree_list_->GetData());
-  if (src >= vnum || offset >= sz_arr[src]) {
+  if (src >= vnum || offset >= sz_arr[src] || offset < 0) {
     THROW_INVALID_ARGUMENT_EXCEPTION("src out of bound or offset out of bound");
   }
   nbr_t* nbrs = reinterpret_cast<nbr_t**>(adj_list_buffer_->GetData())[src];
@@ -423,7 +423,7 @@ void MutableCsr<EDATA_T>::revert_delete_edge(vid_t src, vid_t nbr,
                                              int32_t offset, timestamp_t ts) {
   vid_t vnum = static_cast<vid_t>(vertex_capacity());
   const auto* sz_arr = reinterpret_cast<const int*>(degree_list_->GetData());
-  if (src >= vnum || offset >= sz_arr[src]) {
+  if (src >= vnum || offset >= sz_arr[src] || offset < 0) {
     THROW_INVALID_ARGUMENT_EXCEPTION("src out of bound or offset out of bound");
   }
   nbr_t* nbrs = reinterpret_cast<nbr_t**>(adj_list_buffer_->GetData())[src];

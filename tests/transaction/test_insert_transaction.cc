@@ -311,7 +311,8 @@ TEST_F(InsertTransactionTest, RollbackVertexOnPartialFailure) {
         {neug::Property::from_string_view("Duplicate"),
          neug::Property::from_int64(99)});
 
-    neug::Allocator alloc(neug::MemoryLevel::kInMemory, "/tmp/test_alloc_");
+    auto alloc_prefix = db_dir + "/test_alloc_";
+    neug::Allocator alloc(neug::MemoryLevel::kInMemory, alloc_prefix);
     // IngestWal should throw due to duplicate PK, and roll back the first
     // vertex
     EXPECT_THROW(neug::InsertTransaction::IngestWal(
@@ -385,7 +386,8 @@ TEST_F(InsertTransactionTest, RollbackVertexAndEdgeOnFailure) {
         {neug::Property::from_string_view("Duplicate"),
          neug::Property::from_int64(99)});
 
-    neug::Allocator alloc(neug::MemoryLevel::kInMemory, "/tmp/test_alloc_");
+    auto alloc_prefix = db_dir + "/test_alloc_";
+    neug::Allocator alloc(neug::MemoryLevel::kInMemory, alloc_prefix);
     // IngestWal should throw and roll back all operations
     EXPECT_THROW(neug::InsertTransaction::IngestWal(
                      db.graph(), 100, arc.GetBuffer(), arc.GetSize(), alloc),
