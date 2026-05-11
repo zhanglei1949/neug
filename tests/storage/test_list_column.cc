@@ -476,13 +476,15 @@ TEST_F(ListColumnFixture, ConcurrentWrites) {
     threads.emplace_back([&]() {
       while (true) {
         size_t idx = counter.fetch_add(1);
-        if (idx >= 100) break;
+        if (idx >= 100)
+          break;
         std::string blob = BuildPodBlob<int32_t>({static_cast<int32_t>(idx)});
         col.set_value(idx, blob);
       }
     });
   }
-  for (auto& th : threads) th.join();
+  for (auto& th : threads)
+    th.join();
 
   // Verify all writes
   for (size_t i = 0; i < 100; ++i) {
@@ -514,21 +516,26 @@ TEST_F(ListColumnFixture, MixedPodNonPodConcurrent) {
     threads.emplace_back([&]() {
       while (true) {
         size_t idx = counter.fetch_add(1);
-        if (idx >= 50) break;
+        if (idx >= 50)
+          break;
         // POD: [idx, idx*2]
-        pod_col.set_value(idx, BuildPodBlob<int64_t>(
-            {static_cast<int64_t>(idx), static_cast<int64_t>(idx * 2)}));
+        pod_col.set_value(
+            idx, BuildPodBlob<int64_t>({static_cast<int64_t>(idx),
+                                        static_cast<int64_t>(idx * 2)}));
         // non-POD: ["str_idx"]
-        nonpod_col.set_value(idx, BuildVarcharBlob({"str_" + std::to_string(idx)}));
+        nonpod_col.set_value(idx,
+                             BuildVarcharBlob({"str_" + std::to_string(idx)}));
       }
     });
   }
-  for (auto& th : threads) th.join();
+  for (auto& th : threads)
+    th.join();
 
   // Verify
   for (size_t i = 0; i < 50; ++i) {
-    ExpectPodListEq<int64_t>(pod_col.get_view(i),
-                             {static_cast<int64_t>(i), static_cast<int64_t>(i * 2)});
+    ExpectPodListEq<int64_t>(
+        pod_col.get_view(i),
+        {static_cast<int64_t>(i), static_cast<int64_t>(i * 2)});
     ExpectVarcharListEq(nonpod_col.get_view(i), {"str_" + std::to_string(i)});
   }
 }

@@ -150,9 +150,8 @@ class BindedPathEdgesPropsExpr : public RecordExprBase {
             edge.label.src_label, edge.label.dst_label, edge.label.edge_label,
             prop_id);
 
-        prop_values.emplace_back(
-            property_to_value(accessor.get_data_from_ptr(edge.prop),
-                              elem_type_));
+        prop_values.emplace_back(property_to_value(
+            accessor.get_data_from_ptr(edge.prop), elem_type_));
       }
     }
     return Value::LIST(elem_type_, std::move(prop_values));

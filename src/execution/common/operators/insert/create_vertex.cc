@@ -81,7 +81,8 @@ neug::result<Context> CreateVertex::insert_vertex(
           }
         }
       }
-      // Extract Property views for storage layer (owned_props keeps memory alive)
+      // Extract Property views for storage layer (owned_props keeps memory
+      // alive)
       std::vector<Property> property_values(owned_props.size());
       for (size_t k = 0; k < owned_props.size(); ++k) {
         property_values[k] = owned_props[k].prop();
@@ -91,11 +92,10 @@ neug::result<Context> CreateVertex::insert_vertex(
         LOG(ERROR) << "Vertex with label " << (int32_t) label
                    << " and primary key " << owned_pk.prop().to_string()
                    << " already exists.";
-        RETURN_STATUS_ERROR(neug::StatusCode::ERR_INVALID_ARGUMENT,
-                            "Vertex with label " + std::to_string(label) +
-                                " and primary key " +
-                                owned_pk.prop().to_string() +
-                                " already exists.");
+        RETURN_STATUS_ERROR(
+            neug::StatusCode::ERR_INVALID_ARGUMENT,
+            "Vertex with label " + std::to_string(label) + " and primary key " +
+                owned_pk.prop().to_string() + " already exists.");
       }
       vid_t vid;
       if (!graph.AddVertex(label, owned_pk.prop(), property_values, vid)) {

@@ -89,7 +89,8 @@ neug::result<Context> CreateEdge::insert_edge(
           }
         }
       }
-      // Extract Property views for storage layer (owned_props keeps memory alive)
+      // Extract Property views for storage layer (owned_props keeps memory
+      // alive)
       std::vector<Property> property_values(owned_props.size());
       for (size_t k = 0; k < owned_props.size(); ++k) {
         property_values[k] = owned_props[k].prop();

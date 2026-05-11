@@ -274,6 +274,6 @@ TEST(StorageDDLTest, CreateAndAlterTables) {
 // ---------------------------------------------------------------------------
 TEST_F(DDLTestDBFixture, ListAsPrimaryKeyRejected) {
   // Attempt to create table with LIST as primary key - should fail
-  EXPECT_FALSE(conn->Query(
-      "CREATE NODE TABLE BadTable(id INT64[] PRIMARY KEY);"));
+  EXPECT_FALSE(
+      conn->Query("CREATE NODE TABLE BadTable(id INT64[] PRIMARY KEY);"));
 }
