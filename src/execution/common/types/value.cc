@@ -806,8 +806,11 @@ OwnedProperty value_to_property(const Value& value) {
     return OwnedProperty(Property::from_float(value.GetValue<float>()));
   case DataTypeId::kDouble:
     return OwnedProperty(Property::from_double(value.GetValue<double>()));
-  case DataTypeId::kVarchar:
-    return OwnedProperty(Property::from_string_view(StringValue::Get(value)));
+  case DataTypeId::kVarchar: {
+    auto sv = StringValue::Get(value);
+    std::string str(sv);
+    return OwnedProperty(Property::from_string_view(str), std::move(str));
+  }
   case DataTypeId::kDate:
     return OwnedProperty(Property::from_date(value.GetValue<date_t>()));
   case DataTypeId::kTimestampMs:

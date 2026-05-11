@@ -374,8 +374,14 @@ property_defs_to_value(
                           "Invalid property type: " + property.DebugString()));
     }
 
-    if (property.has_default_expr() &&
-        common_expr_to_value(type, property.default_expr(), default_value)) {
+    if (property.has_default_expr()) {
+      if (!common_expr_to_value(type, property.default_expr(),
+                                default_value)) {
+        RETURN_ERROR(
+            Status(StatusCode::ERR_INVALID_ARGUMENT,
+                   "Failed to convert default_expr for property: " +
+                       property.DebugString()));
+      }
       VLOG(10) << "Default expr convert to value success:"
                << property.default_expr().DebugString();
     } else if (property.has_default_value()) {
