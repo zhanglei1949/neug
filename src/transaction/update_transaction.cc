@@ -1017,7 +1017,7 @@ void UpdateTransaction::IngestWal(PropertyGraph& graph, uint32_t timestamp,
       graph.CreateEdgeType(redo);
     } else if (op_type == OpType::kInsertVertex) {
       InsertVertexRedo redo;
-      InsertVertexRedo::Deserialize(arc, redo);
+      arc >> redo;
       vid_t vid;
       auto& v_table = graph.get_vertex_table(redo.label);
       if (!graph.get_lid(redo.label, redo.oid, vid, timestamp) ||
@@ -1037,7 +1037,7 @@ void UpdateTransaction::IngestWal(PropertyGraph& graph, uint32_t timestamp,
       }
     } else if (op_type == OpType::kInsertEdge) {
       InsertEdgeRedo redo;
-      InsertEdgeRedo::Deserialize(arc, redo);
+      arc >> redo;
       vid_t src_vid, dst_vid;
       CHECK(graph.get_lid(redo.src_label, redo.src, src_vid, timestamp));
       CHECK(graph.get_lid(redo.dst_label, redo.dst, dst_vid, timestamp));
@@ -1045,14 +1045,14 @@ void UpdateTransaction::IngestWal(PropertyGraph& graph, uint32_t timestamp,
                     redo.edge_label, redo.properties, timestamp, alloc, true);
     } else if (op_type == OpType::kUpdateVertexProp) {
       UpdateVertexPropRedo redo;
-      UpdateVertexPropRedo::Deserialize(arc, redo);
+      arc >> redo;
       vid_t vid;
       CHECK(graph.get_lid(redo.label, redo.oid, vid, timestamp));
       graph.get_vertex_table(redo.label)
           .UpdateProperty(vid, redo.prop_id, redo.value, timestamp);
     } else if (op_type == OpType::kUpdateEdgeProp) {
       UpdateEdgePropRedo redo;
-      UpdateEdgePropRedo::Deserialize(arc, redo);
+      arc >> redo;
       vid_t src_vid, dst_vid;
       CHECK(graph.get_lid(redo.src_label, redo.src, src_vid, timestamp));
       CHECK(graph.get_lid(redo.dst_label, redo.dst, dst_vid, timestamp));
@@ -1061,13 +1061,13 @@ void UpdateTransaction::IngestWal(PropertyGraph& graph, uint32_t timestamp,
                                redo.prop_id, redo.value, timestamp);
     } else if (op_type == OpType::kRemoveVertex) {
       RemoveVertexRedo redo;
-      RemoveVertexRedo::Deserialize(arc, redo);
+      arc >> redo;
       vid_t vid;
       CHECK(graph.get_lid(redo.label, redo.oid, vid, timestamp));
       graph.DeleteVertex(redo.label, vid, timestamp);
     } else if (op_type == OpType::kRemoveEdge) {
       RemoveEdgeRedo redo;
-      RemoveEdgeRedo::Deserialize(arc, redo);
+      arc >> redo;
       vid_t src_vid, dst_vid;
       CHECK(graph.get_lid(redo.src_label, redo.src, src_vid, timestamp));
       CHECK(graph.get_lid(redo.dst_label, redo.dst, dst_vid, timestamp));
@@ -1094,11 +1094,11 @@ void UpdateTransaction::IngestWal(PropertyGraph& graph, uint32_t timestamp,
       graph.DeleteEdgeProperties(config);
     } else if (op_type == OpType::kDeleteVertexType) {
       DeleteVertexTypeRedo redo;
-      DeleteVertexTypeRedo::Deserialize(arc, redo);
+      arc >> redo;
       graph.DeleteVertexType(redo.vertex_type);
     } else if (op_type == OpType::kDeleteEdgeType) {
       DeleteEdgeTypeRedo redo;
-      DeleteEdgeTypeRedo::Deserialize(arc, redo);
+      arc >> redo;
       graph.DeleteEdgeType(redo.src_type, redo.dst_type, redo.edge_type);
     } else {
       THROW_NOT_SUPPORTED_EXCEPTION("Unexpected op_type: " +
