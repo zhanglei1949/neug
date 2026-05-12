@@ -15,6 +15,7 @@
 
 #include <gtest/gtest.h>
 
+#include "neug/execution/common/types/value.h"
 #include "neug/storages/graph/property_graph.h"
 
 namespace neug {
@@ -48,13 +49,13 @@ class PropertyGraphTest : public ::testing::Test {
         graph_
             ->CreateVertexType(person_builder.VertexLabel("person")
                                    .AddProperty(DataTypeId::kInt64, "id",
-                                                Property::from_int64(0))
+                                                execution::property_to_value(Property::from_int64(0)))
                                    .AddProperty(DataTypeId::kVarchar, "name",
-                                                Property::from_string_view(""))
+                                                execution::property_to_value(Property::from_string_view("")))
                                    .AddProperty(DataTypeId::kInt32, "age",
-                                                Property::from_int32(0))
+                                                execution::property_to_value(Property::from_int32(0)))
                                    .AddProperty(DataTypeId::kDouble, "score",
-                                                Property::from_double(0.0))
+                                                execution::property_to_value(Property::from_double(0.0)))
                                    .AddPrimaryKeyName("id")
                                    .Build())
             .ok());
@@ -63,9 +64,9 @@ class PropertyGraphTest : public ::testing::Test {
         graph_
             ->CreateVertexType(company_builder.VertexLabel("company")
                                    .AddProperty(DataTypeId::kInt64, "id",
-                                                Property::from_int64(0))
+                                                execution::property_to_value(Property::from_int64(0)))
                                    .AddProperty(DataTypeId::kVarchar, "name",
-                                                Property::from_string_view(""))
+                                                execution::property_to_value(Property::from_string_view("")))
                                    .AddPrimaryKeyName("id")
                                    .Build())
             .ok());
@@ -76,7 +77,7 @@ class PropertyGraphTest : public ::testing::Test {
                                  .DstLabel("person")
                                  .EdgeLabel("knows")
                                  .AddProperty(DataTypeId::kDouble, "weight",
-                                              Property::from_double(0.0))
+                                              execution::property_to_value(Property::from_double(0.0)))
                                  .Build())
             .ok());
   }

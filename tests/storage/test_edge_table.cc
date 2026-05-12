@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <string_view>
 
+#include "neug/execution/common/types/value.h"
 #include "neug/execution/execute/ops/batch/batch_update_utils.h"
 #include "neug/storages/allocators.h"
 #include "neug/storages/csr/generic_view_utils.h"
@@ -1175,7 +1176,7 @@ TEST_F(EdgeTableTest, TestAddPropertiesTransitionFromEmptyToBundledUnbundled) {
 
   schema_.AddEdgeProperties("person", "comment", "create0", {"weight"},
                             {neug::DataTypeId::kInt32},
-                            {neug::Property::from_int32(7)});
+                            {neug::execution::property_to_value(neug::Property::from_int32(7))});
   this->edge_table->SetEdgeSchema(
       schema_.get_edge_schema(src_label_, dst_label_, edge_label_empty_));
   this->edge_table->AddProperties({"weight"}, {neug::DataTypeId::kInt32},
@@ -1194,7 +1195,7 @@ TEST_F(EdgeTableTest, TestAddPropertiesTransitionFromEmptyToBundledUnbundled) {
 
   schema_.AddEdgeProperties("person", "comment", "create0", {"tag"},
                             {neug::DataTypeId::kVarchar},
-                            {neug::Property::from_string_view("new-tag")});
+                            {neug::execution::property_to_value(neug::Property::from_string_view("new-tag"))});
   this->edge_table->SetEdgeSchema(
       schema_.get_edge_schema(src_label_, dst_label_, edge_label_empty_));
   this->edge_table->AddProperties(
@@ -1233,12 +1234,12 @@ TEST_F(EdgeTableTest, TestAddStringPropertyTransitionFromEmptyToUnbundled) {
       schema_.get_edge_schema(src_label_, dst_label_, edge_label_empty_));
   schema_.get_edge_schema(src_label_, dst_label_, edge_label_empty_)
       ->add_properties({"tag"}, {neug::DataTypeId::kVarchar},
-                       {neug::Property::from_string_view("seed")});
+                       {neug::execution::property_to_value(neug::Property::from_string_view("seed"))});
   this->edge_table->AddProperties({"tag"}, {neug::DataTypeId::kVarchar},
                                   {neug::Property::from_string_view("seed")});
   schema_.get_edge_schema(src_label_, dst_label_, edge_label_empty_)
       ->add_properties({"desc"}, {neug::DataTypeId::kVarchar},
-                       {neug::Property::from_string_view("unknown")});
+                       {neug::execution::property_to_value(neug::Property::from_string_view("unknown"))});
   this->edge_table->AddProperties(
       {"desc"}, {neug::DataTypeId::kVarchar},
       {neug::Property::from_string_view("unknown")});
@@ -1407,7 +1408,7 @@ TEST_F(EdgeTableTest, TestAddAndDeletePropertiesStayUnbundled) {
 
   schema_.AddEdgeProperties("person", "comment", "create3", {"score"},
                             {neug::DataTypeId::kInt32},
-                            {neug::Property::from_int32(99)});
+                            {neug::execution::property_to_value(neug::Property::from_int32(99))});
   this->edge_table->SetEdgeSchema(
       schema_.get_edge_schema(src_label_, dst_label_, edge_label_str_int_));
   this->edge_table->AddProperties({"score"}, {neug::DataTypeId::kInt32},

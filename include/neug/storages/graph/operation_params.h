@@ -18,6 +18,7 @@
 #include <string>
 #include <tuple>
 #include <vector>
+#include "neug/execution/common/types/value.h"
 #include "neug/utils/property/property.h"
 #include "neug/utils/property/types.h"
 
@@ -28,14 +29,14 @@ class OutArchive;
 class CreateVertexTypeParam {
  private:
   std::string vertex_label_name;
-  std::vector<std::tuple<DataType, std::string, Property>> properties;
+  std::vector<std::tuple<DataType, std::string, execution::Value>> properties;
   std::vector<std::string> primary_key_names;
   CreateVertexTypeParam() = default;
   friend class CreateVertexTypeParamBuilder;
 
  public:
   const std::string& GetVertexLabel() const { return vertex_label_name; }
-  const std::vector<std::tuple<DataType, std::string, Property>>&
+  const std::vector<std::tuple<DataType, std::string, execution::Value>>&
   GetProperties() const {
     return properties;
   }
@@ -58,7 +59,7 @@ class CreateVertexTypeParamBuilder {
   }
 
   CreateVertexTypeParamBuilder& Properties(
-      const std::vector<std::tuple<DataType, std::string, Property>>&
+      const std::vector<std::tuple<DataType, std::string, execution::Value>>&
           properties) {
     config.properties = properties;
     return *this;
@@ -66,7 +67,7 @@ class CreateVertexTypeParamBuilder {
 
   CreateVertexTypeParamBuilder& AddProperty(const DataType& type,
                                             const std::string& name,
-                                            const Property& value) {
+                                            const execution::Value& value) {
     config.properties.emplace_back(type, name, value);
     return *this;
   }
@@ -101,7 +102,7 @@ class CreateEdgeTypeParam {
   std::string src_label_name;
   std::string dst_label_name;
   std::string edge_label_name;
-  std::vector<std::tuple<DataType, std::string, Property>> properties;
+  std::vector<std::tuple<DataType, std::string, execution::Value>> properties;
   EdgeStrategy oe_edge_strategy;
   EdgeStrategy ie_edge_strategy;
   std::optional<std::string> sort_key_for_nbr;
@@ -112,7 +113,7 @@ class CreateEdgeTypeParam {
   const std::string& GetSrcLabel() const { return src_label_name; }
   const std::string& GetDstLabel() const { return dst_label_name; }
   const std::string& GetEdgeLabel() const { return edge_label_name; }
-  const std::vector<std::tuple<DataType, std::string, Property>>&
+  const std::vector<std::tuple<DataType, std::string, execution::Value>>&
   GetProperties() const {
     return properties;
   }
@@ -150,7 +151,7 @@ class CreateEdgeTypeParamBuilder {
   }
 
   CreateEdgeTypeParamBuilder& Properties(
-      const std::vector<std::tuple<DataType, std::string, Property>>&
+      const std::vector<std::tuple<DataType, std::string, execution::Value>>&
           properties) {
     config.properties = properties;
     return *this;
@@ -158,7 +159,7 @@ class CreateEdgeTypeParamBuilder {
 
   CreateEdgeTypeParamBuilder& AddProperty(const DataType& type,
                                           const std::string& name,
-                                          const Property& value) {
+                                          const execution::Value& value) {
     config.properties.emplace_back(type, name, value);
     return *this;
   }
@@ -199,13 +200,13 @@ class CreateEdgeTypeParamBuilder {
 class AddVertexPropertiesParam {
  private:
   std::string vertex_label_name;
-  std::vector<std::tuple<DataType, std::string, Property>> properties;
+  std::vector<std::tuple<DataType, std::string, execution::Value>> properties;
   AddVertexPropertiesParam() = default;
   friend class AddVertexPropertiesParamBuilder;
 
  public:
   const std::string& GetVertexLabel() const { return vertex_label_name; }
-  const std::vector<std::tuple<DataType, std::string, Property>>&
+  const std::vector<std::tuple<DataType, std::string, execution::Value>>&
   GetProperties() const {
     return properties;
   }
@@ -225,7 +226,7 @@ class AddVertexPropertiesParamBuilder {
   }
 
   AddVertexPropertiesParamBuilder& Properties(
-      const std::vector<std::tuple<DataType, std::string, Property>>&
+      const std::vector<std::tuple<DataType, std::string, execution::Value>>&
           properties) {
     config.properties = properties;
     return *this;
@@ -233,7 +234,7 @@ class AddVertexPropertiesParamBuilder {
 
   AddVertexPropertiesParamBuilder& AddProperty(const DataType& type,
                                                const std::string& name,
-                                               const Property& value) {
+                                               const execution::Value& value) {
     config.properties.emplace_back(type, name, value);
     return *this;
   }
@@ -252,7 +253,7 @@ class AddEdgePropertiesParam {
   std::string src_label_name;
   std::string dst_label_name;
   std::string edge_label_name;
-  std::vector<std::tuple<DataType, std::string, Property>> properties;
+  std::vector<std::tuple<DataType, std::string, execution::Value>> properties;
   AddEdgePropertiesParam() = default;
   friend class AddEdgePropertiesParamBuilder;
 
@@ -260,7 +261,7 @@ class AddEdgePropertiesParam {
   const std::string& GetSrcLabel() const { return src_label_name; }
   const std::string& GetDstLabel() const { return dst_label_name; }
   const std::string& GetEdgeLabel() const { return edge_label_name; }
-  const std::vector<std::tuple<DataType, std::string, Property>>&
+  const std::vector<std::tuple<DataType, std::string, execution::Value>>&
   GetProperties() const {
     return properties;
   }
@@ -290,7 +291,7 @@ class AddEdgePropertiesParamBuilder {
   }
 
   AddEdgePropertiesParamBuilder& Properties(
-      const std::vector<std::tuple<DataType, std::string, Property>>&
+      const std::vector<std::tuple<DataType, std::string, execution::Value>>&
           properties) {
     config.properties = properties;
     return *this;
@@ -298,7 +299,7 @@ class AddEdgePropertiesParamBuilder {
 
   AddEdgePropertiesParamBuilder& AddProperty(const DataType& type,
                                              const std::string& name,
-                                             const Property& value) {
+                                             const execution::Value& value) {
     config.properties.emplace_back(type, name, value);
     return *this;
   }

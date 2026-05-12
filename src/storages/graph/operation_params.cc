@@ -15,6 +15,7 @@
 
 #include "neug/storages/graph/operation_params.h"
 #include "neug/common/extra_type_info.h"
+#include "neug/execution/common/types/value.h"
 #include "neug/storages/graph/schema.h"
 #include "neug/utils/serialization/in_archive.h"
 #include "neug/utils/serialization/out_archive.h"
@@ -25,7 +26,7 @@ void CreateVertexTypeParam::Serialize(InArchive& arc) const {
   arc << vertex_label_name;
   arc << static_cast<uint32_t>(properties.size());
   for (const auto& [type, name, default_value] : properties) {
-    arc << type << name << default_value;
+    arc << type << name << execution::value_to_property(default_value);
   }
   arc << static_cast<uint32_t>(primary_key_names.size());
   for (const auto& key : primary_key_names) {
@@ -45,7 +46,8 @@ CreateVertexTypeParam CreateVertexTypeParam::Deserialize(OutArchive& arc) {
     std::string name;
     Property default_value;
     arc >> type >> name >> default_value;
-    builder.AddProperty(type, name, default_value);
+    builder.AddProperty(type, name,
+                        execution::property_to_value(default_value));
   }
   uint32_t key_size;
   arc >> key_size;
@@ -61,7 +63,7 @@ void CreateEdgeTypeParam::Serialize(InArchive& arc) const {
   arc << src_label_name << dst_label_name << edge_label_name;
   arc << static_cast<uint32_t>(properties.size());
   for (const auto& [type, name, default_value] : properties) {
-    arc << type << name << default_value;
+    arc << type << name << execution::value_to_property(default_value);
   }
   arc << oe_edge_strategy << ie_edge_strategy;
   if (sort_key_for_nbr.has_value()) {
@@ -85,7 +87,8 @@ CreateEdgeTypeParam CreateEdgeTypeParam::Deserialize(OutArchive& arc) {
     std::string name;
     Property default_value;
     arc >> type >> name >> default_value;
-    builder.AddProperty(type, name, default_value);
+    builder.AddProperty(type, name,
+                        execution::property_to_value(default_value));
   }
   EdgeStrategy oe_edge_strategy, ie_edge_strategy;
   arc >> oe_edge_strategy >> ie_edge_strategy;
@@ -104,7 +107,7 @@ void AddVertexPropertiesParam::Serialize(InArchive& arc) const {
   arc << vertex_label_name;
   arc << static_cast<uint32_t>(properties.size());
   for (const auto& [type, name, default_value] : properties) {
-    arc << type << name << default_value;
+    arc << type << name << execution::value_to_property(default_value);
   }
 }
 
@@ -121,7 +124,8 @@ AddVertexPropertiesParam AddVertexPropertiesParam::Deserialize(
     std::string name;
     Property default_value;
     arc >> type >> name >> default_value;
-    builder.AddProperty(type, name, default_value);
+    builder.AddProperty(type, name,
+                        execution::property_to_value(default_value));
   }
   return builder.Build();
 }
@@ -130,7 +134,7 @@ void AddEdgePropertiesParam::Serialize(InArchive& arc) const {
   arc << src_label_name << dst_label_name << edge_label_name;
   arc << static_cast<uint32_t>(properties.size());
   for (const auto& [type, name, default_value] : properties) {
-    arc << type << name << default_value;
+    arc << type << name << execution::value_to_property(default_value);
   }
 }
 
@@ -148,7 +152,8 @@ AddEdgePropertiesParam AddEdgePropertiesParam::Deserialize(OutArchive& arc) {
     std::string name;
     Property default_value;
     arc >> type >> name >> default_value;
-    builder.AddProperty(type, name, default_value);
+    builder.AddProperty(type, name,
+                        execution::property_to_value(default_value));
   }
   return builder.Build();
 }
