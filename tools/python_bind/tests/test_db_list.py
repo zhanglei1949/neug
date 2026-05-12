@@ -127,13 +127,13 @@ def test_nested_list_default_value(tmp_path):
     conn.execute(
         "CREATE NODE TABLE PERSON("
         "id INT64 PRIMARY KEY, "
-        "string_prop STRING[][] DEFAULT [['x'], ['y', 'z']]);"
+        "list_prop STRING[][] DEFAULT [['x'], ['y', 'z']]);"
     )
 
     conn.execute("CREATE (p: PERSON {id: 0});")
-    conn.execute("CREATE (p: PERSON {id: 1, string_prop: [['a', 'b'], ['c']]} );")
+    conn.execute("CREATE (p: PERSON {id: 1, list_prop: [['a', 'b'], ['c']]} );")
 
-    result = conn.execute("MATCH (p: PERSON) RETURN p.id, p.string_prop ORDER BY p.id;")
+    result = conn.execute("MATCH (p: PERSON) RETURN p.id, p.list_prop ORDER BY p.id;")
     rows = list(result)
     assert rows[0] == [
         0,
