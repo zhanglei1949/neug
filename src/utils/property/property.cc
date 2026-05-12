@@ -23,50 +23,38 @@ namespace neug {
 execution::Value get_default_value(const DataType& type) {
   switch (type.id()) {
   case DataTypeId::kEmpty:
-    break;
+    return execution::Value(type);
   case DataTypeId::kBoolean:
     return execution::Value::BOOLEAN(false);
-    break;
   case DataTypeId::kInt32:
     return execution::Value::INT32(0);
-    break;
   case DataTypeId::kUInt32:
     return execution::Value::UINT32(0);
-    break;
   case DataTypeId::kInt64:
     return execution::Value::INT64(0);
-    break;
   case DataTypeId::kUInt64:
     return execution::Value::UINT64(0);
-    break;
   case DataTypeId::kFloat:
     return execution::Value::FLOAT(0.0);
-    break;
   case DataTypeId::kDouble:
     return execution::Value::DOUBLE(0.0);
-    break;
   case DataTypeId::kVarchar: {
     int32_t width =
         type.RawExtraTypeInfo()
             ? type.RawExtraTypeInfo()->Cast<StringTypeInfo>().max_length
             : STRING_DEFAULT_MAX_LENGTH;
     return execution::Value::VARCHAR("", width);
-    break;
   }
   case DataTypeId::kDate:
     return execution::Value::DATE(Date(0));
-    break;
   case DataTypeId::kTimestampMs:
     return execution::Value::TIMESTAMPMS(DateTime(0));
-    break;
   case DataTypeId::kInterval:
     return execution::Value::INTERVAL(Interval());
-    break;
   default:
     THROW_NOT_SUPPORTED_EXCEPTION(
         "Unsupported property type for default value: " + type.ToString());
   }
-  return execution::Value(type);
 }
 
 InArchive& operator<<(InArchive& in_archive, const Property& value) {

@@ -47,7 +47,7 @@ CreateVertexTypeParam CreateVertexTypeParam::Deserialize(OutArchive& arc) {
     Property default_value;
     arc >> type >> name >> default_value;
     builder.AddProperty(type, name,
-                        execution::property_to_value(default_value));
+                        execution::property_to_value(default_value, type));
   }
   uint32_t key_size;
   arc >> key_size;
@@ -88,7 +88,7 @@ CreateEdgeTypeParam CreateEdgeTypeParam::Deserialize(OutArchive& arc) {
     Property default_value;
     arc >> type >> name >> default_value;
     builder.AddProperty(type, name,
-                        execution::property_to_value(default_value));
+                        execution::property_to_value(default_value, type));
   }
   EdgeStrategy oe_edge_strategy, ie_edge_strategy;
   arc >> oe_edge_strategy >> ie_edge_strategy;
@@ -125,7 +125,7 @@ AddVertexPropertiesParam AddVertexPropertiesParam::Deserialize(
     Property default_value;
     arc >> type >> name >> default_value;
     builder.AddProperty(type, name,
-                        execution::property_to_value(default_value));
+                        execution::property_to_value(default_value, type));
   }
   return builder.Build();
 }
@@ -153,7 +153,7 @@ AddEdgePropertiesParam AddEdgePropertiesParam::Deserialize(OutArchive& arc) {
     Property default_value;
     arc >> type >> name >> default_value;
     builder.AddProperty(type, name,
-                        execution::property_to_value(default_value));
+                        execution::property_to_value(default_value, type));
   }
   return builder.Build();
 }
