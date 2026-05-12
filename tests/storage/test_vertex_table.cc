@@ -53,7 +53,8 @@ class VertexTableTest : public ::testing::Test {
                         neug::Property::from_int32(30),
                         neug::Property::from_double(88.5)};
     default_prop_values_ = {
-        neug::execution::property_to_value(neug::Property::from_string_view("")),
+        neug::execution::property_to_value(
+            neug::Property::from_string_view("")),
         neug::execution::property_to_value(neug::Property::from_int32(0)),
         neug::execution::property_to_value(neug::Property::from_double(0.0))};
     vertex_count_ = 1000000;

@@ -1031,12 +1031,12 @@ void EdgeTable::dropAndCreateNewBundledCSR(
   if (remaining_col == nullptr) {
     auto edges = out_csr_->batch_export(nullptr);
     auto default_props = meta_->get_default_properties();
-    batch_put_edges_with_default_edata(
-        std::get<0>(edges), std::get<1>(edges), property_type,
-        default_props[0], new_out_csr.get());
-    batch_put_edges_with_default_edata(
-        std::get<1>(edges), std::get<0>(edges), property_type,
-        default_props[0], new_in_csr.get());
+    batch_put_edges_with_default_edata(std::get<0>(edges), std::get<1>(edges),
+                                       property_type, default_props[0],
+                                       new_out_csr.get());
+    batch_put_edges_with_default_edata(std::get<1>(edges), std::get<0>(edges),
+                                       property_type, default_props[0],
+                                       new_in_csr.get());
   } else {
     auto row_id_col = std::make_shared<ULongColumn>();
     row_id_col->open_in_memory("");

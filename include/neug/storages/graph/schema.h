@@ -41,7 +41,6 @@ namespace neug {
 class PropertyGraph;
 class Schema;
 
-
 /**
  * @brief Schema definition for a vertex type (label).
  *
@@ -86,14 +85,15 @@ struct VertexSchema {
    *
    * @since v0.1.0
    */
-  VertexSchema(const std::string& label_name_,
-               const std::vector<DataType>& property_types_,
-               const std::vector<std::string>& property_names_,
-               const std::vector<std::tuple<DataType, std::string, size_t>>&
-                   primary_keys_,
-               const std::vector<execution::Value>& default_property_values_ = {},
-               const std::string& description_ = "",
-               size_t max_num_ = static_cast<size_t>(1) << 32)
+  VertexSchema(
+      const std::string& label_name_,
+      const std::vector<DataType>& property_types_,
+      const std::vector<std::string>& property_names_,
+      const std::vector<std::tuple<DataType, std::string, size_t>>&
+          primary_keys_,
+      const std::vector<execution::Value>& default_property_values_ = {},
+      const std::string& description_ = "",
+      size_t max_num_ = static_cast<size_t>(1) << 32)
       : label_name(label_name_),
         property_types(property_types_),
         property_names(property_names_),
@@ -460,16 +460,16 @@ class Schema {
       const std::string& description = "",
       const std::vector<execution::Value>& default_property_values = {});
 
-  void AddEdgeLabel(const std::string& src_label, const std::string& dst_label,
-                    const std::string& edge_label,
-                    const std::vector<DataType>& properties,
-                    const std::vector<std::string>& prop_names,
-                    EdgeStrategy oe = EdgeStrategy::kMultiple,
-                    EdgeStrategy ie = EdgeStrategy::kMultiple,
-                    bool oe_mutable = true, bool ie_mutable = true,
-                    std::optional<std::string> sort_key_for_nbr = std::nullopt,
-                    const std::string& description = "",
-                    const std::vector<execution::Value>& default_property_values = {});
+  void AddEdgeLabel(
+      const std::string& src_label, const std::string& dst_label,
+      const std::string& edge_label, const std::vector<DataType>& properties,
+      const std::vector<std::string>& prop_names,
+      EdgeStrategy oe = EdgeStrategy::kMultiple,
+      EdgeStrategy ie = EdgeStrategy::kMultiple, bool oe_mutable = true,
+      bool ie_mutable = true,
+      std::optional<std::string> sort_key_for_nbr = std::nullopt,
+      const std::string& description = "",
+      const std::vector<execution::Value>& default_property_values = {});
 
   void DeleteVertexLabel(const std::string& label, bool is_soft = false);
 
@@ -490,17 +490,18 @@ class Schema {
   void RevertDeleteEdgeLabel(const std::string& src, const std::string& dst,
                              const std::string& edge);
 
-  void AddVertexProperties(const std::string& label,
-                           const std::vector<std::string>& properties_names,
-                           const std::vector<DataType>& properties_types,
-                           const std::vector<execution::Value>& properties_default_values);
+  void AddVertexProperties(
+      const std::string& label,
+      const std::vector<std::string>& properties_names,
+      const std::vector<DataType>& properties_types,
+      const std::vector<execution::Value>& properties_default_values);
 
-  void AddEdgeProperties(const std::string& src_label,
-                         const std::string& dst_label,
-                         const std::string& edge_label,
-                         const std::vector<std::string>& properties_names,
-                         const std::vector<DataType>& properties_types,
-                         const std::vector<execution::Value>& properties_default_values);
+  void AddEdgeProperties(
+      const std::string& src_label, const std::string& dst_label,
+      const std::string& edge_label,
+      const std::vector<std::string>& properties_names,
+      const std::vector<DataType>& properties_types,
+      const std::vector<execution::Value>& properties_default_values);
 
   void RenameVertexProperties(
       const std::string& label,
