@@ -4,6 +4,10 @@ on:
   schedule:
     # Run at 08:00 UTC every Saturday
     - cron: '0 8 * * 6'
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/neug-extension-test.yml'
   workflow_dispatch:  # Manual trigger (must exist on default branch to see "Run workflow")
     inputs:
       branch:
@@ -11,11 +15,6 @@ on:
         required: true
         default: 'main'
         type: string
-      rebuild_neug:
-        description: 'Rebuild NeuG wheel package before testing extension'
-        required: false
-        default: false
-        type: boolean
 
 concurrency:
   group: ${{ github.repository }}-${{ github.event.number || github.head_ref || github.sha }}-${{ github.workflow }}
@@ -141,11 +140,6 @@ jobs:
         with:
           python-version: '3.13'
 
-      - name: Setup Python Env
-        run: |
-          USER_SITE=$(python3 -c "import site; print(site.getusersitepackages())")
-          echo "USER_SITE=$USER_SITE" >> $GITHUB_ENV
-
       - name: Install cibuildwheel
         run: python3 -m pip install cibuildwheel==3.4.0
 
@@ -159,7 +153,6 @@ jobs:
           echo "CIBW_BUILD=cp313-manylinux_x86_64" >> $GITHUB_ENV
 
       - name: Build NeuG wheel
-        if: inputs.rebuild_neug == true
         run: |
           export CMAKE_BUILD_PARALLEL_LEVEL=$(nproc)
           export BUILD_TYPE=RELEASE
@@ -182,19 +175,17 @@ jobs:
           python3 -m pip install --upgrade pip
           python3 -m pip uninstall -y neug || echo "Uninstalled neug if it was installed"
           # install NeuG wheel
-          if [ "${{ inputs.rebuild_neug }}" = "true" ]; then
-            for i in wheelhouse/*.whl; do
-              [ -f "$i" ] && python3 -m pip install "$i" || echo "Failed to install $i"
-            done
-          else
-            python3 -m pip install neug
-          fi
+          for i in wheelhouse/*.whl; do
+            [ -f "$i" ] && python3 -m pip install "$i" || echo "Failed to install $i"
+          done
           # install Extension Package (extract first .whl when multiple exist)
           EXT_WHL=$(echo extension_packages/*.whl | awk '{print $1}')
           python3 -m zipfile -e "$EXT_WHL" extension_packages
-          # get neug install directory (site-packages) and install extension there
-          rm -rf $USER_SITE/extension
-          cp -r extension_packages/extension $USER_SITE
+          # copy extension to the same site-packages where neug is installed
+          NEUG_SITE=$(python3 -c "import neug, os; print(os.path.dirname(os.path.dirname(neug.__file__)))")
+          mkdir -p $NEUG_SITE/extension
+          rm -rf $NEUG_SITE/extension
+          cp -r extension_packages/extension $NEUG_SITE/
 
       - name: Run simple and complex tests
         env:
@@ -219,12 +210,6 @@ jobs:
         with:
           python-version: '3.13'
   
-      - name: Setup Python Env
-        run: |
-          USER_SITE=$(python3 -c "import site; print(site.getusersitepackages())")
-          echo "USER_SITE=$USER_SITE" >> $GITHUB_ENV
-          echo "PYTHONPATH=$USER_SITE${PYTHONPATH:+:$PYTHONPATH}" >> $GITHUB_ENV
-
       - name: Install cibuildwheel
         run: python3 -m pip install cibuildwheel==3.4.0
 
@@ -238,7 +223,6 @@ jobs:
           echo "CIBW_BUILD=cp313-manylinux_aarch64" >> $GITHUB_ENV
 
       - name: Build NeuG wheel
-        if: inputs.rebuild_neug == true
         run: |
           export CMAKE_BUILD_PARALLEL_LEVEL=$(nproc)
           export BUILD_TYPE=RELEASE
@@ -261,19 +245,17 @@ jobs:
           python3 -m pip install --upgrade pip
           python3 -m pip uninstall -y neug || echo "Uninstalled neug if it was installed"
           # install NeuG wheel
-          if [ "${{ inputs.rebuild_neug }}" = "true" ]; then
-            for i in wheelhouse/*.whl; do
-              [ -f "$i" ] && python3 -m pip install "$i" || echo "Failed to install $i"
-            done
-          else
-            python3 -m pip install neug
-          fi
+          for i in wheelhouse/*.whl; do
+            [ -f "$i" ] && python3 -m pip install "$i" || echo "Failed to install $i"
+          done
           # install Extension Package (extract first .whl when multiple exist)
           EXT_WHL=$(echo extension_packages/*.whl | awk '{print $1}')
           python3 -m zipfile -e "$EXT_WHL" extension_packages
-          # get neug install directory (site-packages) and install extension there
-          rm -rf $USER_SITE/extension
-          cp -r extension_packages/extension $USER_SITE
+          # copy extension to the same site-packages where neug is installed
+          NEUG_SITE=$(python3 -c "import neug, os; print(os.path.dirname(os.path.dirname(neug.__file__)))")
+          mkdir -p $NEUG_SITE/extension
+          rm -rf $NEUG_SITE/extension
+          cp -r extension_packages/extension $NEUG_SITE/
 
       - name: Run simple and complex tests
         env:
