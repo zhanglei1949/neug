@@ -798,6 +798,9 @@ class Schema {
    */
   Schema Compact() const;
 
+  /// COW Clone: 全量深拷贝，用于 UpdateTransaction Fork
+  Schema Clone() const;
+
  private:
   // Internal methods that do not check tombstone
   label_t get_vertex_label_id_internal(const std::string& label) const;

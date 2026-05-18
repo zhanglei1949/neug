@@ -278,7 +278,7 @@ int main(int argc, char** argv) {
 
   auto sess = svc->AcquireSession();
   auto txn = sess->GetReadTransaction();
-  neug::StorageReadInterface graph(txn.graph(), txn.timestamp());
+  neug::StorageReadInterface graph(txn.view());
 
   for (const auto& unit : benchmark_config.benchmarks()) {
     int query_num = unit.repeat;
@@ -309,7 +309,7 @@ int main(int argc, char** argv) {
       params_map.emplace_back(deserialize_string_kv_map(param_meta, param));
     }
     auto pipeline = neug::execution::PlanParser::get().parse_execute_pipeline(
-        txn.graph().schema(), neug::execution::ContextMeta(), plan);
+        txn.view().schema(), neug::execution::ContextMeta(), plan);
 
     std::unique_ptr<neug::execution::OprTimer> best_timer =
         std::make_unique<neug::execution::OprTimer>();

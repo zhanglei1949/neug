@@ -500,7 +500,9 @@ EdgeTable::EdgeTable(std::shared_ptr<const EdgeSchema> meta) : meta_(meta) {
 }
 
 EdgeTable::EdgeTable(EdgeTable&& edge_table)
-    : meta_(edge_table.meta_), memory_level_(edge_table.memory_level_) {
+    : ckp_(edge_table.ckp_),
+      meta_(edge_table.meta_),
+      memory_level_(edge_table.memory_level_) {
   out_csr_ = std::move(edge_table.out_csr_);
   in_csr_ = std::move(edge_table.in_csr_);
   table_ = std::move(edge_table.table_);
@@ -509,6 +511,7 @@ EdgeTable::EdgeTable(EdgeTable&& edge_table)
 }
 
 void EdgeTable::Swap(EdgeTable& edge_table) {
+  std::swap(ckp_, edge_table.ckp_);
   std::swap(meta_, edge_table.meta_);
   std::swap(memory_level_, edge_table.memory_level_);
   out_csr_.swap(edge_table.out_csr_);
@@ -522,6 +525,71 @@ void EdgeTable::Swap(EdgeTable& edge_table) {
   edge_table.capacity_.store(cap);
 }
 
+EdgeTable EdgeTable::Fork() const {
+  EdgeTable forked;
+  forked.ckp_ = ckp_;
+  forked.meta_ = meta_;
+  forked.memory_level_ = memory_level_;
+  forked.out_csr_ = out_csr_;
+  forked.in_csr_ = in_csr_;
+
+  if (table_) {
+    forked.table_ = table_->Fork();
+  }
+
+  forked.table_idx_ = table_idx_.load();
+  forked.capacity_ = capacity_.load();
+  return forked;
+}
+
+void EdgeTable::ensureCSRForked() {
+  if (ckp_ == nullptr) {
+    THROW_INTERNAL_EXCEPTION("Checkpoint is null, cannot fork CSR");
+  }
+  if (out_csr_.use_count() > 1) {
+    auto forked_module = out_csr_->Fork(*ckp_, memory_level_);
+    out_csr_ = std::shared_ptr<CsrBase>(
+        dynamic_cast<CsrBase*>(forked_module.release()));
+  }
+  if (in_csr_.use_count() > 1) {
+    auto forked_module = in_csr_->Fork(*ckp_, memory_level_);
+    in_csr_ = std::shared_ptr<CsrBase>(
+        dynamic_cast<CsrBase*>(forked_module.release()));
+  }
+}
+
+void EdgeTable::ensureInsertReady(vid_t src_lid, vid_t dst_lid,
+                                  Allocator& alloc) {
+  ensureCSRForked();
+  if (table_ && ckp_) {
+    table_->ensure_all_columns_mutable(*ckp_, memory_level_);
+  }
+  out_csr_->ensure_adjlist_mutable(src_lid, alloc);
+  in_csr_->ensure_adjlist_mutable(dst_lid, alloc);
+}
+
+void EdgeTable::ensureDeleteReady(vid_t src_lid, vid_t dst_lid,
+                                  Allocator& alloc) {
+  ensureCSRForked();
+  // No need to fork property table — delete only mutates adjacency tombstones.
+  out_csr_->ensure_adjlist_mutable(src_lid, alloc);
+  in_csr_->ensure_adjlist_mutable(dst_lid, alloc);
+}
+
+void EdgeTable::ensurePropertyUpdateReady(vid_t src_lid, vid_t dst_lid,
+                                          Allocator& alloc, int32_t col_id) {
+  // Both bundled and unbundled writes go through CsrBaseView::set_data, which
+  // always stamps the per-edge timestamp into the CSR adjlist. So the per-
+  // vertex adjlist must be exclusive to this PG before the write, regardless
+  // of bundling. For unbundled, also fork the property column.
+  ensureCSRForked();
+  out_csr_->ensure_adjlist_mutable(src_lid, alloc);
+  in_csr_->ensure_adjlist_mutable(dst_lid, alloc);
+  if (!meta_->is_bundled() && ckp_) {
+    table_->ensure_column_mutable(col_id, *ckp_, memory_level_);
+  }
+}
+
 void EdgeTable::SetEdgeSchema(std::shared_ptr<const EdgeSchema> meta) {
   meta_ = meta;
 }
@@ -529,6 +597,7 @@ void EdgeTable::SetEdgeSchema(std::shared_ptr<const EdgeSchema> meta) {
 void EdgeTable::Open(Checkpoint& ckp, const ModuleDescriptor& desc,
                      MemoryLevel level) {
   memory_level_ = level;
+  ckp_ = &ckp;
   assert(desc.module_type.empty() || desc.module_type == "edge_table");
   in_csr_->Open(ckp, desc.get_sub_module_or_default("in_csr"), level);
   out_csr_->Open(ckp, desc.get_sub_module_or_default("out_csr"), level);
@@ -599,12 +668,15 @@ void EdgeTable::BatchDeleteEdges(
 }
 
 void EdgeTable::DeleteEdge(vid_t src_lid, vid_t dst_lid, int32_t oe_offset,
-                           int32_t ie_offset, timestamp_t ts) {
+                           int32_t ie_offset, timestamp_t ts,
+                           Allocator& alloc) {
+  ensureDeleteReady(src_lid, dst_lid, alloc);
   out_csr_->delete_edge(src_lid, oe_offset, ts);
   in_csr_->delete_edge(dst_lid, ie_offset, ts);
 }
 
-void EdgeTable::DeleteVertex(bool is_src, vid_t vid, timestamp_t ts) {
+void EdgeTable::DeleteVertex(bool is_src, vid_t vid, timestamp_t ts,
+                             Allocator& alloc) {
   auto oe_view = get_outgoing_view(ts);
   auto ie_view = get_incoming_view(ts);
   if (is_src) {
@@ -622,7 +694,7 @@ void EdgeTable::DeleteVertex(bool is_src, vid_t vid, timestamp_t ts) {
       auto ie_offset = search_other_offset_with_cur_offset(
           oe_view, ie_view, vid, iter.get_vertex(), oe_offset,
           meta_->properties);
-      DeleteEdge(vid, iter.get_vertex(), oe_offset, ie_offset, ts);
+      DeleteEdge(vid, iter.get_vertex(), oe_offset, ie_offset, ts, alloc);
     }
   } else {
     auto ie_edges = ie_view.get_edges(vid);
@@ -639,22 +711,16 @@ void EdgeTable::DeleteVertex(bool is_src, vid_t vid, timestamp_t ts) {
       auto oe_offset = search_other_offset_with_cur_offset(
           ie_view, oe_view, vid, iter.get_vertex(), ie_offset,
           meta_->properties);
-      DeleteEdge(iter.get_vertex(), vid, oe_offset, ie_offset, ts);
+      DeleteEdge(iter.get_vertex(), vid, oe_offset, ie_offset, ts, alloc);
     }
   }
-}
-
-void EdgeTable::RevertDeleteEdge(vid_t src_lid, vid_t dst_lid,
-                                 int32_t oe_offset, int32_t ie_offset,
-                                 timestamp_t ts) {
-  out_csr_->revert_delete_edge(src_lid, dst_lid, oe_offset, ts);
-  in_csr_->revert_delete_edge(dst_lid, src_lid, ie_offset, ts);
 }
 
 void EdgeTable::UpdateEdgeProperty(vid_t src_lid, vid_t dst_lid,
                                    int32_t oe_offset, int32_t ie_offset,
                                    int32_t col_id, const Property& prop,
-                                   timestamp_t ts) {
+                                   timestamp_t ts, Allocator& alloc) {
+  ensurePropertyUpdateReady(src_lid, dst_lid, alloc, col_id);
   auto accessor = get_edge_data_accessor(col_id);
   auto oe_edges = out_csr_->get_generic_view(ts).get_edges(src_lid);
   auto oe_iter = oe_edges.begin();
@@ -680,6 +746,9 @@ void EdgeTable::EnsureCapacity(size_t capacity) {
       return;
     }
     capacity = std::max(capacity, 4096UL);
+    if (table_ && ckp_) {
+      table_->ensure_all_columns_mutable(*ckp_, memory_level_);
+    }
     table_->resize(capacity, meta_->get_default_properties());
     capacity_.store(capacity);
   }
@@ -687,6 +756,11 @@ void EdgeTable::EnsureCapacity(size_t capacity) {
 
 void EdgeTable::EnsureCapacity(vid_t src_v_cap, vid_t dst_v_cap,
                                size_t capacity) {
+  // CSR resize is a mutating op on the shared CsrBase; ensure CSRs are
+  // exclusive to this PG before resizing.
+  if ((src_v_cap > out_csr_->size()) || (dst_v_cap > in_csr_->size())) {
+    ensureCSRForked();
+  }
   if (src_v_cap > out_csr_->size()) {
     out_csr_->resize(src_v_cap);
   }
@@ -708,15 +782,21 @@ size_t EdgeTable::EdgeNum() const {
 
 size_t EdgeTable::PropertyNum() const { return table_->col_num(); }
 
-GenericView EdgeTable::get_outgoing_view(timestamp_t ts) const {
+CsrBaseView EdgeTable::get_outgoing_view(timestamp_t ts) const {
   return out_csr_->get_generic_view(ts);
 }
 
-GenericView EdgeTable::get_incoming_view(timestamp_t ts) const {
+CsrBaseView EdgeTable::get_incoming_view(timestamp_t ts) const {
   return in_csr_->get_generic_view(ts);
 }
 
 EdgeDataAccessor EdgeTable::get_edge_data_accessor(int col_id) const {
+  if (col_id < 0 || static_cast<size_t>(col_id) >= meta_->properties.size()) {
+    THROW_INVALID_ARGUMENT_EXCEPTION(
+        "Edge property column id out of range: " + std::to_string(col_id) +
+        " (edge has " + std::to_string(meta_->properties.size()) +
+        " properties)");
+  }
   if (!meta_->is_bundled()) {
     return EdgeDataAccessor(meta_->properties[col_id].id(),
                             table_->get_column_by_id(col_id).get());
@@ -808,6 +888,7 @@ void EdgeTable::DeleteProperties(Checkpoint& ckp,
 int32_t EdgeTable::AddEdge(vid_t src_lid, vid_t dst_lid,
                            const std::vector<Property>& edge_data,
                            timestamp_t ts, Allocator& alloc, bool insert_safe) {
+  ensureInsertReady(src_lid, dst_lid, alloc);
   int32_t oe_offset;
   if (meta_->is_bundled()) {
     assert(edge_data.size() == 1 ||
@@ -1007,12 +1088,17 @@ void EdgeTable::dropAndCreateNewBundledCSR(
                                    new_in_csr.get());
   }
 
-  table_->drop();
+  // Going from unbundled (or bundled) to bundled: the surviving property
+  // is now stored INLINE in the new CSR, so the per-shell property table
+  // must be reset. Without this, a later DeleteEdgeProperties would see a
+  // stale column in table_ and mis-route through dropAndCreateNew*CSR
+  // assuming the OLD csr is unbundled (TypedColumn<uint64_t>) when it is in
+  // fact bundled (TypedColumn<EDATA_T>) — causing the batch_export cast in
+  // mutable_csr.h:168 to fail. NOTE: do NOT call ->Close() on the old csrs
+  // here — they may be shared with other PG generations under COW.
   table_ = std::make_unique<Table>();
   table_idx_.store(0);
   capacity_.store(0);
-  out_csr_->Close();
-  in_csr_->Close();
   out_csr_ = std::move(new_out_csr);
   in_csr_ = std::move(new_in_csr);
 }
@@ -1097,8 +1183,6 @@ void EdgeTable::dropAndCreateNewUnbundledCSR(Checkpoint& ckp,
     dynamic_cast<TypedCsrBase<uint64_t>*>(new_in_csr.get())
         ->batch_put_edges(std::get<1>(edges), std::get<0>(edges), row_ids);
   }
-  out_csr_->Close();
-  in_csr_->Close();
   out_csr_ = std::move(new_out_csr);
   in_csr_ = std::move(new_in_csr);
 }

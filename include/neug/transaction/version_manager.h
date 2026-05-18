@@ -34,18 +34,34 @@ class IVersionManager {
   virtual void release_insert_timestamp(uint32_t ts) = 0;
   virtual uint32_t acquire_update_timestamp() = 0;
   virtual void release_update_timestamp(uint32_t ts) = 0;
-  virtual bool revert_update_timestamp(uint32_t ts) = 0;
+  virtual uint32_t acquire_compact_timestamp() = 0;
+  virtual void release_compact_timestamp(uint32_t ts) = 0;
   virtual void clear() = 0;
   virtual ~IVersionManager() {}
 };
 
 /**
- * @brief TPVersionManager implements the version manager for Transactional
- * Processing (TP) workloads. It supports multiple concurrent read and insert
- * transactions, each receiving the same initial timestamp. Update transactions
- * are exclusive and will wait for all ongoing read and insert transactions to
- * complete before proceeding. The version manager uses a ring buffer to track
- * released timestamps, allowing efficient reuse of timestamps.
+ * @brief TPVersionManager — concurrency control for the COW design.
+ *
+ * Concurrency matrix (post-COW refactor):
+ *
+ *   |          | Read   | Insert | Update | Compact |
+ *   | Read     |  yes   |  yes   |  yes   |   no    |
+ *   | Insert   |  yes   |  yes   |  no    |   no    |
+ *   | Update   |  yes   |  no    |  no    |   no    |
+ *   | Compact  |  no    |  no    |  no    |   no    |
+ *
+ * Implementation:
+ *  - `rw_mutex_` (std::shared_mutex):
+ *      Insert holds shared, Update holds exclusive. This serializes Update vs
+ *      all Insert/Update, while letting Insert run concurrently among
+ *      themselves.
+ *  - Read takes neither side of `rw_mutex_`. Snapshot isolation is enforced
+ *    by SnapshotStore + per-slot timestamps; Read does NOT block Update or
+ *    Insert and is not blocked by them.
+ *  - `pending_reqs_` continues to track in-flight reads/inserts for use by
+ *    timestamp reclamation only — it is NOT used to fence Update against
+ *    concurrent reads anymore.
  */
 class TPVersionManager : public IVersionManager {
  public:
@@ -61,18 +77,26 @@ class TPVersionManager : public IVersionManager {
   void release_insert_timestamp(uint32_t ts) override;
   uint32_t acquire_update_timestamp() override;
   void release_update_timestamp(uint32_t ts) override;
-  bool revert_update_timestamp(uint32_t ts) override;
+  uint32_t acquire_compact_timestamp() override;
+  void release_compact_timestamp(uint32_t ts) override;
 
  private:
   int thread_num_;
   std::atomic<uint32_t> write_ts_{1};
   std::atomic<uint32_t> read_ts_{0};
 
+  // In-flight read/insert tracker.
+  // Positive: number of active reads/inserts.
+  // Negative: compact has subtracted thread_num_ to block new readers.
   std::atomic<int> pending_reqs_{0};
-  std::atomic<int> pending_update_reqs_{0};
+  static constexpr int kCompactBias = 1 << 20;
 
   Bitset buf_;
   SpinLock lock_;
+
+  // Insert/Update mutual exclusion. Insert acquires shared lock; Update
+  // acquires exclusive. Read does not touch this mutex.
+  std::shared_mutex rw_mutex_;
 };
 
 }  // namespace neug

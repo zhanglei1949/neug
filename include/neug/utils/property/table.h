@@ -41,6 +41,12 @@ class Table {
 
   ModuleDescriptor Dump(Checkpoint& ckp);
 
+  std::unique_ptr<Table> Fork() const;
+
+  void ensure_column_mutable(size_t col_id, Checkpoint& ckp, MemoryLevel level);
+
+  void ensure_all_columns_mutable(Checkpoint& ckp, MemoryLevel level);
+
   void reset_header(const std::vector<std::string>& col_name);
 
   void add_columns(Checkpoint& ckp, const std::vector<std::string>& col_names,

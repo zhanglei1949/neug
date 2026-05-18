@@ -18,30 +18,27 @@
 #include "neug/utils/exception/exception.h"
 
 #include <glog/logging.h>
-#include <chrono>
 
-#include <limits>
 #include <ostream>
-#include <thread>
+#include <unordered_map>
 
 #include "neug/storages/allocators.h"
-#include "neug/storages/graph/property_graph.h"
 #include "neug/storages/graph/schema.h"
 #include "neug/transaction/transaction_utils.h"
 #include "neug/transaction/version_manager.h"
 #include "neug/transaction/wal/wal.h"
-#include "neug/utils/likely.h"
-#include "neug/utils/property/table.h"
 #include "neug/utils/property/types.h"
 #include "neug/utils/serialization/out_archive.h"
 
 namespace neug {
 
-InsertTransaction::InsertTransaction(PropertyGraph& graph, Allocator& alloc,
-                                     IWalWriter& logger, IVersionManager& vm,
+InsertTransaction::InsertTransaction(SnapshotStore::StorageSlot& slot,
+                                     SnapshotStore& snapshot_store,
+                                     Allocator& alloc, IWalWriter& logger,
+                                     IVersionManager& vm,
                                      timestamp_t timestamp)
-
-    : graph_(graph),
+    : slot_(&slot),
+      snapshot_store_(snapshot_store),
       alloc_(alloc),
       logger_(logger),
       vm_(vm),
@@ -53,7 +50,8 @@ InsertTransaction::~InsertTransaction() { Abort(); }
 
 bool InsertTransaction::GetVertexIndex(label_t label, const Property& id,
                                        vid_t& index) const {
-  if (graph_.get_lid(label, id, index, timestamp_)) {
+  const auto& vertex_view = slot_->view().get_vertex_view(label);
+  if (vertex_view.get_index(id, index, timestamp_)) {
     return true;
   }
   if (added_vertices_.size() > label && added_vertices_[label] != nullptr &&
@@ -66,7 +64,8 @@ bool InsertTransaction::GetVertexIndex(label_t label, const Property& id,
 
 Property InsertTransaction::GetVertexId(label_t label, vid_t lid) const {
   if (added_vertices_.size() <= label || added_vertices_[label] == nullptr) {
-    return graph_.GetOid(label, lid, timestamp_);
+    const auto& vertex_view = slot_->view().get_vertex_view(label);
+    return vertex_view.GetOid(lid);
   }
   vid_t base = added_vertices_base_[label];
   if (lid >= base) {
@@ -74,16 +73,17 @@ Property InsertTransaction::GetVertexId(label_t label, vid_t lid) const {
     CHECK(added_vertices_[label]->get_key(lid - base, ret));
     return ret;
   } else {
-    return graph_.GetOid(label, lid, timestamp_);
+    const auto& vertex_view = slot_->view().get_vertex_view(label);
+    return vertex_view.GetOid(lid);
   }
 }
 
 bool InsertTransaction::AddVertex(label_t label, const Property& id,
                                   const std::vector<Property>& props,
                                   vid_t& vid) {
-  std::vector<DataType> types = graph_.schema().get_vertex_properties(label);
+  std::vector<DataType> types = slot_->view().schema().get_vertex_properties(label);
   if (types.size() != props.size()) {
-    std::string label_name = graph_.schema().get_vertex_label_name(label);
+    std::string label_name = slot_->view().schema().get_vertex_label_name(label);
     LOG(ERROR) << "Vertex [" << label_name
                << "] properties size not match, expected " << types.size()
                << ", but got " << props.size();
@@ -93,7 +93,7 @@ bool InsertTransaction::AddVertex(label_t label, const Property& id,
   for (int col_i = 0; col_i != col_num; ++col_i) {
     auto& prop = props[col_i];
     if (prop.type() != types[col_i].id()) {
-      std::string label_name = graph_.schema().get_vertex_label_name(label);
+      std::string label_name = slot_->view().schema().get_vertex_label_name(label);
       LOG(ERROR) << "Vertex [" << label_name << "][" << col_i
                  << "] property type not match, expected "
                  << types[col_i].ToString() << ", but got "
@@ -118,9 +118,9 @@ bool InsertTransaction::AddEdge(label_t src_label, vid_t src_vid,
   const auto& src = GetVertexId(src_label, src_vid);
   const auto& dst = GetVertexId(dst_label, dst_vid);
   const auto& types =
-      graph_.schema().get_edge_properties(src_label, dst_label, edge_label);
+      slot_->view().schema().get_edge_properties(src_label, dst_label, edge_label);
   if (properties.size() != types.size()) {
-    std::string label_name = graph_.schema().get_edge_label_name(edge_label);
+    std::string label_name = slot_->view().schema().get_edge_label_name(edge_label);
     LOG(ERROR) << "Edge property size not match for edge " << label_name
                << ", expected " << types.size() << ", got "
                << properties.size();
@@ -128,7 +128,7 @@ bool InsertTransaction::AddEdge(label_t src_label, vid_t src_vid,
   }
   for (size_t i = 0; i < properties.size(); ++i) {
     if (properties[i].type() != types[i].id()) {
-      std::string label_name = graph_.schema().get_edge_label_name(edge_label);
+      std::string label_name = slot_->view().schema().get_edge_label_name(edge_label);
       LOG(ERROR) << "Edge property " << label_name
                  << " type not match, expected " << types[i].ToString()
                  << ", got " << std::to_string(properties[i].type());
@@ -159,10 +159,14 @@ bool InsertTransaction::Commit() {
     Abort();
     return false;
   }
-  IngestWal(graph_, timestamp_, arc_.GetBuffer() + sizeof(WalHeader),
-            header->length, alloc_);
+  // Apply WAL operations through the writable view. Capacity is assumed
+  // to be sufficient; the strict insert path will throw if exhausted.
+  IngestWal(slot_->mutable_view(), timestamp_,
+            arc_.GetBuffer() + sizeof(WalHeader), header->length, alloc_);
 
   vm_.release_insert_timestamp(timestamp_);
+  snapshot_store_.releaseSnapshot(*slot_);
+  slot_ = nullptr;
   clear();
   return true;
 }
@@ -171,13 +175,15 @@ void InsertTransaction::Abort() {
   if (timestamp_ != INVALID_TIMESTAMP) {
     LOG(ERROR) << "aborting " << timestamp_ << "-th transaction (insert)";
     vm_.release_insert_timestamp(timestamp_);
+    snapshot_store_.releaseSnapshot(*slot_);
+    slot_ = nullptr;
     clear();
   }
 }
 
 timestamp_t InsertTransaction::timestamp() const { return timestamp_; }
 
-void InsertTransaction::IngestWal(PropertyGraph& graph, uint32_t timestamp,
+void InsertTransaction::IngestWal(GraphView& view, uint32_t timestamp,
                                   char* data, size_t length, Allocator& alloc) {
   OutArchive arc;
   arc.SetSlice(data, length);
@@ -188,22 +194,24 @@ void InsertTransaction::IngestWal(PropertyGraph& graph, uint32_t timestamp,
       InsertVertexRedo redo;
       arc >> redo;
       vid_t vid;
-      auto ret =
-          graph.AddVertex(redo.label, redo.oid, redo.props, vid, timestamp);
-      if (!ret.ok()) {
-        THROW_STORAGE_EXCEPTION("Failed to add vertex during WAL ingestion: " +
-                                ret.ToString());
+      if (!view.AddVertex(redo.label, redo.oid, redo.props, vid, timestamp)) {
+        THROW_STORAGE_EXCEPTION("Failed to add vertex during WAL ingestion");
       }
     } else if (op_type == OpType::kInsertEdge) {
       InsertEdgeRedo redo;
       arc >> redo;
-      vid_t src_lid, dst_lid;
-      CHECK(get_vertex_with_retries(graph, redo.src_label, redo.src, src_lid,
-                                    timestamp));
-      CHECK(get_vertex_with_retries(graph, redo.dst_label, redo.dst, dst_lid,
-                                    timestamp));
-      graph.AddEdge(redo.src_label, src_lid, redo.dst_label, dst_lid,
-                    redo.edge_label, redo.properties, timestamp, alloc);
+      vid_t src_lid = 0;
+      vid_t dst_lid = 0;
+      // Resolve src/dst lid via the view. The view's read_ts == timestamp
+      // here — for the commit path that's the txn's own timestamp; for the
+      // recovery path, the caller bumps timestamp per-WAL-unit which still
+      // satisfies "vertices inserted earlier in this unit are visible".
+      const auto& src_view = view.get_vertex_view(redo.src_label);
+      const auto& dst_view = view.get_vertex_view(redo.dst_label);
+      CHECK(src_view.get_index(redo.src, src_lid, timestamp));
+      CHECK(dst_view.get_index(redo.dst, dst_lid, timestamp));
+      view.AddEdge(redo.src_label, src_lid, redo.dst_label, dst_lid,
+                   redo.edge_label, redo.properties, timestamp, alloc);
     } else {
       THROW_INTERNAL_EXCEPTION("Unexpected op-" +
                                std::to_string(static_cast<int>(op_type)));
@@ -221,25 +229,7 @@ void InsertTransaction::clear() {
   timestamp_ = INVALID_TIMESTAMP;
 }
 
-const Schema& InsertTransaction::schema() const { return graph_.schema(); }
-
-bool InsertTransaction::get_vertex_with_retries(PropertyGraph& graph,
-                                                label_t label,
-                                                const Property& oid, vid_t& lid,
-                                                timestamp_t timestamp) {
-  if (NEUG_LIKELY(graph.get_lid(label, oid, lid, timestamp))) {
-    return true;
-  }
-  for (int i = 0; i < 10; ++i) {
-    std::this_thread::sleep_for(std::chrono::microseconds(1000000));
-    if (NEUG_LIKELY(graph.get_lid(label, oid, lid, timestamp))) {
-      return true;
-    }
-  }
-
-  LOG(ERROR) << "get_vertex [" << oid.to_string() << "] failed";
-  return false;
-}
+const Schema& InsertTransaction::schema() const { return slot_->view().schema(); }
 
 void InsertTransaction::create_id_indexer_if_not_exists(label_t label) {
   if (label >= added_vertices_.size()) {
@@ -248,7 +238,7 @@ void InsertTransaction::create_id_indexer_if_not_exists(label_t label) {
     added_vertices_.resize(label + 1);
   }
   if (added_vertices_[label] == nullptr) {
-    const auto& pks = graph_.schema().get_vertex_primary_key(label);
+    const auto& pks = slot_->view().schema().get_vertex_primary_key(label);
     DataTypeId type = std::get<0>(pks[0]).id();
     if (type == DataTypeId::kInt64) {
       added_vertices_[label] = std::make_unique<IdIndexer<int64_t, vid_t>>();
@@ -267,7 +257,7 @@ void InsertTransaction::create_id_indexer_if_not_exists(label_t label) {
           "got: " +
           std::to_string(type));
     }
-    added_vertices_base_[label] = graph_.LidNum(label);
+    added_vertices_base_[label] = slot_->view().get_vertex_view(label).LidNum();
   }
 }
 

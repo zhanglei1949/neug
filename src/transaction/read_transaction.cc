@@ -18,15 +18,21 @@
 #include <utility>
 
 #include "neug/storages/csr/csr_base.h"
+#include "neug/storages/graph/graph_view.h"
 #include "neug/storages/graph/property_graph.h"
 #include "neug/transaction/version_manager.h"
 #include "neug/utils/likely.h"
 
 namespace neug {
 
-ReadTransaction::ReadTransaction(const PropertyGraph& graph,
+ReadTransaction::ReadTransaction(SnapshotStore::StorageSlot& slot,
+                                 SnapshotStore& snapshot_store,
                                  IVersionManager& vm, timestamp_t timestamp)
-    : graph_(graph), vm_(vm), timestamp_(timestamp) {}
+    : slot_(&slot),
+      snapshot_store_(snapshot_store),
+      vm_(vm),
+      timestamp_(timestamp) {}
+
 ReadTransaction::~ReadTransaction() { release(); }
 
 timestamp_t ReadTransaction::timestamp() const { return timestamp_; }
@@ -38,11 +44,11 @@ bool ReadTransaction::Commit() {
 
 void ReadTransaction::Abort() { release(); }
 
-const PropertyGraph& ReadTransaction::graph() const { return graph_; }
-
 void ReadTransaction::release() {
   if (timestamp_ != INVALID_TIMESTAMP) {
     vm_.release_read_timestamp();
+    snapshot_store_.releaseSnapshot(*slot_);
+    slot_ = nullptr;
     timestamp_ = INVALID_TIMESTAMP;
   }
 }

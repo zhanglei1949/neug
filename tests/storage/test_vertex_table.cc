@@ -301,8 +301,9 @@ TEST_F(VertexTableTest, AddVertexBasic) {
 TEST_F(VertexTableTest, AddVertex) {
   neug::VertexTable table(schema_.get_vertex_schema(v_label_id_));
   neug::vid_t tmp_vid;
-  EXPECT_FALSE(table.AddVertex(neug::Property::from_int64(1), property_values_,
-                               tmp_vid, 0, false));
+  EXPECT_THROW(table.AddVertex(neug::Property::from_int64(1), property_values_,
+                               tmp_vid, 0, false),
+               neug::exception::Exception);
 
   std::vector<neug::Property> oids;
   std::vector<neug::vid_t> lids;

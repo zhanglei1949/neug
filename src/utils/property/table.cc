@@ -31,6 +31,33 @@ namespace neug {
 Table::Table() {}
 Table::~Table() { close(); }
 
+std::unique_ptr<Table> Table::Fork() const {
+  auto forked = std::make_unique<Table>();
+  forked->col_names_ = col_names_;
+  forked->col_id_map_ = col_id_map_;
+  forked->columns_ = columns_;
+  forked->buildColumnPtrs();
+  return forked;
+}
+
+void Table::ensure_column_mutable(size_t col_id, Checkpoint& ckp,
+                                  MemoryLevel level) {
+  if (col_id >= columns_.size())
+    return;
+  if (columns_[col_id].use_count() > 1) {
+    std::unique_ptr<Module> forked_module = columns_[col_id]->Fork(ckp, level);
+    columns_[col_id] = std::shared_ptr<ColumnBase>(
+        dynamic_cast<ColumnBase*>(forked_module.release()));
+    column_ptrs_[col_id] = columns_[col_id].get();
+  }
+}
+
+void Table::ensure_all_columns_mutable(Checkpoint& ckp, MemoryLevel level) {
+  for (size_t i = 0; i < columns_.size(); ++i) {
+    ensure_column_mutable(i, ckp, level);
+  }
+}
+
 void Table::initColumns(const std::vector<std::string>& col_name,
                         const std::vector<DataType>& property_types) {
   size_t col_num = col_name.size();
@@ -130,8 +157,10 @@ void Table::delete_column(const std::string& col_name) {
   if (it != col_id_map_.end()) {
     int col_id = it->second;
     col_id_map_.erase(it);
-    columns_[col_id]->Close();
-    columns_[col_id].reset();
+    // COW: do NOT call Close() on the shared column. Sibling tables (other PG
+    // slots) may still hold this shared_ptr; Close() resets buffer_ on the
+    // shared object, breaking their reads. Just drop our reference; if it
+    // was the last one, ~TypedColumn() runs Close() naturally.
     columns_.erase(columns_.begin() + col_id);
     col_names_.erase(col_names_.begin() + col_id);
     for (auto& pair : col_id_map_) {

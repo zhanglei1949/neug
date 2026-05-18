@@ -20,25 +20,43 @@
 #include <ostream>
 
 #include "neug/storages/graph/property_graph.h"
+#include "neug/storages/snapshot_store.h"
 #include "neug/transaction/version_manager.h"
 #include "neug/transaction/wal/wal.h"
 
 namespace neug {
 
-CompactTransaction::CompactTransaction(PropertyGraph& graph, IWalWriter& logger,
-                                       IVersionManager& vm, bool compact_csr,
-                                       float reserve_ratio,
+CompactTransaction::CompactTransaction(SnapshotStore& snapshot_store,
+                                       IWalWriter& logger, IVersionManager& vm,
+                                       bool compact_csr, float reserve_ratio,
                                        timestamp_t timestamp)
-    : graph_(graph),
+    : snapshot_store_(&snapshot_store),
+      graph_(nullptr),
+      pinned_slot_(nullptr),
       logger_(logger),
       vm_(vm),
       compact_csr_(compact_csr),
       reserve_ratio_(reserve_ratio),
       timestamp_(timestamp) {
+  auto& slot = snapshot_store.acquireSnapshot();
+  pinned_slot_ = &slot;
+  graph_ = slot.pg();
   arc_.Resize(sizeof(WalHeader));
 }
 
-CompactTransaction::~CompactTransaction() { Abort(); }
+CompactTransaction::~CompactTransaction() {
+  Abort();
+  release_pin();
+}
+
+void CompactTransaction::release_pin() {
+  if (snapshot_store_ && pinned_slot_) {
+    snapshot_store_->releaseSnapshot(*pinned_slot_);
+    snapshot_store_ = nullptr;
+    pinned_slot_ = nullptr;
+    graph_ = nullptr;
+  }
+}
 
 timestamp_t CompactTransaction::timestamp() const { return timestamp_; }
 
@@ -57,21 +75,23 @@ bool CompactTransaction::Commit() {
     arc_.Clear();
 
     LOG(INFO) << "before compact - " << timestamp_;
-    graph_.Compact(compact_csr_, reserve_ratio_, timestamp_);
+    graph_->Compact(compact_csr_, reserve_ratio_, timestamp_);
     LOG(INFO) << "after compact - " << timestamp_;
 
-    vm_.release_update_timestamp(timestamp_);
+    vm_.release_compact_timestamp(timestamp_);
     vm_.clear();
     timestamp_ = INVALID_TIMESTAMP;
   }
+  release_pin();
   return true;
 }
 
 void CompactTransaction::Abort() {
   if (timestamp_ != INVALID_TIMESTAMP) {
     arc_.Clear();
-    vm_.revert_update_timestamp(timestamp_);
+    vm_.release_compact_timestamp(timestamp_);
     timestamp_ = INVALID_TIMESTAMP;
+    release_pin();
   }
 }
 

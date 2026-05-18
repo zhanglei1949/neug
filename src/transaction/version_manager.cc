@@ -16,7 +16,6 @@
 #include "neug/transaction/version_manager.h"
 
 #include <glog/logging.h>
-#include <chrono>
 #include <ostream>
 #include <thread>
 
@@ -58,7 +57,7 @@ uint32_t TPVersionManager::acquire_read_timestamp() {
     --pending_reqs_;
     while (true) {
       std::this_thread::sleep_for(std::chrono::microseconds(100));
-      if (pending_reqs_.load() >= 0) {
+      if (pending_reqs_.load(std::memory_order_acquire) >= 0) {
         pr = pending_reqs_.fetch_add(1);
         if (pr >= 0) {
           return read_ts_.load();
@@ -73,23 +72,9 @@ uint32_t TPVersionManager::acquire_read_timestamp() {
 void TPVersionManager::release_read_timestamp() { pending_reqs_.fetch_sub(1); }
 
 uint32_t TPVersionManager::acquire_insert_timestamp() {
-  int pr = pending_reqs_.fetch_add(1);
-  if (NEUG_LIKELY(pr >= 0)) {
-    return write_ts_.fetch_add(1);
-  } else {
-    --pending_reqs_;
-    while (true) {
-      std::this_thread::sleep_for(std::chrono::microseconds(100));
-      if (pending_reqs_.load() >= 0) {
-        pr = pending_reqs_.fetch_add(1);
-        if (pr >= 0) {
-          return write_ts_.fetch_add(1);
-        } else {
-          --pending_reqs_;
-        }
-      }
-    }
-  }
+  rw_mutex_.lock_shared();
+  pending_reqs_.fetch_add(1);
+  return write_ts_.fetch_add(1);
 }
 
 void TPVersionManager::release_insert_timestamp(uint32_t ts) {
@@ -105,25 +90,14 @@ void TPVersionManager::release_insert_timestamp(uint32_t ts) {
   lock_.unlock();
 
   pending_reqs_.fetch_sub(1);
+  rw_mutex_.unlock_shared();
 }
 
 uint32_t TPVersionManager::acquire_update_timestamp() {
-  int expected_update_reqs = 0;
-  while (
-      !pending_update_reqs_.compare_exchange_strong(expected_update_reqs, 1)) {
-    expected_update_reqs = 0;
-    std::this_thread::sleep_for(std::chrono::microseconds(100));
-  }
-
-  int pr = pending_reqs_.fetch_sub(thread_num_);
-  if (pr != 0) {
-    while (pending_reqs_.load() != -thread_num_) {
-      std::this_thread::sleep_for(std::chrono::microseconds(100));
-    }
-  }
-
+  rw_mutex_.lock();
   return write_ts_.fetch_add(1);
 }
+
 void TPVersionManager::release_update_timestamp(uint32_t ts) {
   lock_.lock();
   if (ts == read_ts_.load() + 1) {
@@ -135,18 +109,31 @@ void TPVersionManager::release_update_timestamp(uint32_t ts) {
   }
   lock_.unlock();
 
-  pending_reqs_ += thread_num_;
-  pending_update_reqs_.store(0);
+  rw_mutex_.unlock();
 }
 
-bool TPVersionManager::revert_update_timestamp(uint32_t ts) {
-  uint32_t expected_ts = ts + 1;
-  if (write_ts_.compare_exchange_strong(expected_ts, ts)) {
-    pending_reqs_ += thread_num_;
-    pending_update_reqs_.store(0);
-    return true;
+uint32_t TPVersionManager::acquire_compact_timestamp() {
+  rw_mutex_.lock();
+  pending_reqs_.fetch_sub(thread_num_);
+  while (pending_reqs_.load(std::memory_order_acquire) != -thread_num_) {
+    std::this_thread::sleep_for(std::chrono::microseconds(100));
   }
-  return false;
+  return write_ts_.fetch_add(1);
+}
+
+void TPVersionManager::release_compact_timestamp(uint32_t ts) {
+  lock_.lock();
+  if (ts == read_ts_.load() + 1) {
+    read_ts_.store(ts);
+  } else {
+    LOG(ERROR) << "read ts is expected to be " << ts - 1 << ", while it is "
+               << read_ts_.load();
+    buf_.atomic_set(ts & ring_index_mask);
+  }
+  lock_.unlock();
+
+  pending_reqs_.fetch_add(thread_num_);
+  rw_mutex_.unlock();
 }
 
 }  // namespace neug

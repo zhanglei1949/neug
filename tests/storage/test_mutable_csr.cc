@@ -120,17 +120,17 @@ std::tuple<vid_t, vid_t, int32_t> find_first_edge(const CSR_T& csr) {
 
 template <typename CSR_T>
 void apply_fork_mutations(CSR_T& csr, Allocator& alloc) {
-  csr.fork_vertex(0, alloc);
+  csr.ensure_adjlist_mutable(0, alloc);
   // csr.batch_put_edges({0}, {1}, {111}, 0);
   csr.put_edge(0, 0, 111, 0, alloc);
 
   auto [src, dst, offset] = find_first_edge(csr);
   ASSERT_NE(offset, -1);
-  csr.fork_vertex(src, alloc);
+  csr.ensure_adjlist_mutable(src, alloc);
   csr.delete_edge(src, offset, 0);
   csr.revert_delete_edge(src, dst, offset, 0);
 
-  csr.fork_vertex(2, alloc);
+  csr.ensure_adjlist_mutable(2, alloc);
   // csr.batch_put_edges({2}, {3}, {222}, 0);
   csr.put_edge(2, 3, 222, 0, alloc);
 }
@@ -337,7 +337,7 @@ class MutableCsrTest : public ::testing::Test {
     return ckp;
   }
 
-  bool check_edge_data_ordered(GenericView& generic_view) {
+  bool check_edge_data_ordered(CsrBaseView& generic_view) {
     for (vid_t v = 0; v < src_v_num; v++) {
       if constexpr (std::is_same_v<EDATA_T, int32_t>) {
         NbrList nbr_list = generic_view.get_edges(0);
@@ -608,7 +608,7 @@ TYPED_TEST(MutableCsrTest, TestSortByEdgeData) {
   MutableCsr<TypeParam> mutable_csr;
   this->load_csr_data(mutable_csr, MemoryLevel::kInMemory);
   mutable_csr.batch_sort_by_edge_data(sort_ts);
-  GenericView mutable_view = mutable_csr.get_generic_view(sort_ts);
+  CsrBaseView mutable_view = mutable_csr.get_generic_view(sort_ts);
   EXPECT_EQ(mutable_view.type(), CsrViewType::kMultipleMutable);
   EXPECT_TRUE(this->check_edge_data_ordered(mutable_view));
   mutable_csr.Close();
@@ -616,7 +616,7 @@ TYPED_TEST(MutableCsrTest, TestSortByEdgeData) {
   SingleMutableCsr<TypeParam> single_mutable_csr;
   this->load_single_csr_data(single_mutable_csr, MemoryLevel::kInMemory);
   single_mutable_csr.batch_sort_by_edge_data(sort_ts);
-  GenericView single_mutable_view =
+  CsrBaseView single_mutable_view =
       single_mutable_csr.get_generic_view(sort_ts);
   EXPECT_EQ(single_mutable_view.type(), CsrViewType::kSingleMutable);
   single_mutable_csr.Close();

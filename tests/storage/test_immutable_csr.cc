@@ -87,7 +87,7 @@ class IMMutableCsrTest : public ::testing::Test {
     return ckp;
   }
 
-  bool check_edge_data_ordered(GenericView& generic_view) {
+  bool check_edge_data_ordered(CsrBaseView& generic_view) {
     for (vid_t v = 0; v < 500; v++) {
       if constexpr (std::is_same_v<EDATA_T, int32_t>) {
         NbrList nbr_list = generic_view.get_edges(0);
@@ -329,7 +329,7 @@ TYPED_TEST(IMMutableCsrTest, TestSortByEdgeData) {
   ImmutableCsr<TypeParam> immutable_csr;
   this->load_csr_data(immutable_csr);
   immutable_csr.batch_sort_by_edge_data(sort_ts);
-  GenericView immutable_view = immutable_csr.get_generic_view(sort_ts);
+  CsrBaseView immutable_view = immutable_csr.get_generic_view(sort_ts);
   EXPECT_EQ(immutable_view.type(), CsrViewType::kMultipleImmutable);
   EXPECT_TRUE(this->check_edge_data_ordered(immutable_view));
   immutable_csr.Close();
@@ -337,7 +337,7 @@ TYPED_TEST(IMMutableCsrTest, TestSortByEdgeData) {
   SingleImmutableCsr<TypeParam> single_immutable_csr;
   this->load_single_csr_data(single_immutable_csr);
   single_immutable_csr.batch_sort_by_edge_data(sort_ts);
-  GenericView single_immutable_view =
+  CsrBaseView single_immutable_view =
       single_immutable_csr.get_generic_view(sort_ts);
   EXPECT_EQ(single_immutable_view.type(), CsrViewType::kSingleImmutable);
   single_immutable_csr.Close();

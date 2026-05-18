@@ -2262,6 +2262,31 @@ Schema Schema::Compact() const {
   return new_schema;
 }
 
+Schema Schema::Clone() const {
+  Schema cloned;
+
+  cloned.v_schemas_.reserve(v_schemas_.size());
+  for (const auto& vs : v_schemas_) {
+    cloned.v_schemas_.push_back(std::make_shared<VertexSchema>(*vs));
+  }
+
+  for (const auto& [key, es] : e_schemas_) {
+    cloned.e_schemas_[key] = std::make_shared<EdgeSchema>(*es);
+  }
+
+  cloned.vlabel_indexer_ = vlabel_indexer_;
+  cloned.elabel_indexer_ = elabel_indexer_;
+
+  cloned.name_ = name_;
+  cloned.id_ = id_;
+  cloned.description_ = description_;
+  cloned.vlabel_tomb_ = vlabel_tomb_;
+  cloned.elabel_tomb_ = elabel_tomb_;
+  cloned.elabel_triplet_tomb_ = elabel_triplet_tomb_;
+
+  return cloned;
+}
+
 InArchive& operator<<(InArchive& in_archive, const DataType& type) {
   auto id = type.id();
   in_archive << id;

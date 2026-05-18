@@ -24,7 +24,7 @@
 
 #include "neug/storages/allocators.h"
 #include "neug/storages/csr/csr_base.h"
-#include "neug/storages/csr/generic_view.h"
+#include "neug/storages/csr/csr_base_view.h"
 #include "neug/storages/graph/schema.h"
 #include "neug/storages/module/module.h"
 #include "neug/storages/workspace.h"
@@ -49,6 +49,11 @@ class EdgeTable {
   ~EdgeTable() = default;
 
   void Swap(EdgeTable& other);
+
+  /// COW Fork: 创建新壳，CSR shared_ptr 共享，table fork（columns 共享）
+  /// CSR 内部邻接表通过 MutableCSR::ensure_adjlist_mutable() 按顶点级别 lazy
+  /// fork
+  EdgeTable Fork() const;
 
   void SetEdgeSchema(std::shared_ptr<const EdgeSchema> meta);
 
@@ -79,8 +84,8 @@ class EdgeTable {
 
   size_t PropertyNum() const;
 
-  GenericView get_outgoing_view(timestamp_t ts) const;
-  GenericView get_incoming_view(timestamp_t ts) const;
+  CsrBaseView get_outgoing_view(timestamp_t ts) const;
+  CsrBaseView get_incoming_view(timestamp_t ts) const;
 
   EdgeDataAccessor get_edge_data_accessor(int col_id) const;
 
@@ -112,22 +117,21 @@ class EdgeTable {
                         const std::vector<std::string>& col_names);
 
   void DeleteEdge(vid_t src_lid, vid_t dst_lid, int32_t oe_offset,
-                  int32_t ie_offset, timestamp_t ts);
+                  int32_t ie_offset, timestamp_t ts, Allocator& alloc);
 
   /**
    * @brief Delete edges associated with a vertex.
    * @param is_src Whether the vertex is the source vertex.
    * @param lid The local id of the vertex.
    * @param ts The timestamp.
+   * @param alloc Allocator for per-vertex COW.
    */
-  void DeleteVertex(bool is_src, vid_t lid, timestamp_t ts);
-
-  void RevertDeleteEdge(vid_t src_lid, vid_t dst_lid, int32_t oe_offset,
-                        int32_t ie_offset, timestamp_t ts);
+  void DeleteVertex(bool is_src, vid_t lid, timestamp_t ts, Allocator& alloc);
 
   void UpdateEdgeProperty(vid_t src_lid, vid_t dst_lid, int32_t oe_offset,
                           int32_t ie_offset, int32_t col_id,
-                          const Property& new_prop, timestamp_t ts);
+                          const Property& new_prop, timestamp_t ts,
+                          Allocator& alloc);
 
   void Compact(bool compact_csr,
                const std::optional<std::string>& sort_key_for_nbr,
@@ -137,19 +141,30 @@ class EdgeTable {
 
   size_t Capacity() const;
 
+  std::shared_ptr<const EdgeSchema> meta() const { return meta_; }
+
  private:
+  void ensureInsertReady(vid_t src, vid_t dst, Allocator& alloc);
+  void ensureDeleteReady(vid_t src, vid_t dst, Allocator& alloc);
+  void ensurePropertyUpdateReady(vid_t src, vid_t dst, Allocator& alloc,
+                                 int32_t col_id);
+
+  void ensureCSRForked();
+
   void dropAndCreateNewBundledCSR(Checkpoint& ckp,
                                   std::shared_ptr<ColumnBase> prev_data_col);
   void dropAndCreateNewUnbundledCSR(Checkpoint& ckp, bool delete_property);
 
+  Checkpoint* ckp_{nullptr};  // Checkpoint 引用（用于 lazy fork）
   std::shared_ptr<const EdgeSchema> meta_;
   MemoryLevel memory_level_{MemoryLevel::kSyncToFile};
-  std::unique_ptr<CsrBase> out_csr_;
-  std::unique_ptr<CsrBase> in_csr_;
+  std::shared_ptr<CsrBase> out_csr_;  // 改为 shared_ptr，支持 lazy fork
+  std::shared_ptr<CsrBase> in_csr_;   // 改为 shared_ptr，支持 lazy fork
   std::unique_ptr<Table> table_;
   std::atomic<uint64_t> table_idx_{0};
   std::atomic<uint64_t> capacity_{0};
 
   friend class PropertyGraph;
+  friend class EdgeTableView;
 };
 }  // namespace neug

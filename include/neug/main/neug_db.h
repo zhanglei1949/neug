@@ -30,6 +30,7 @@
 #include "neug/main/connection.h"
 #include "neug/storages/allocators.h"
 #include "neug/storages/graph/property_graph.h"
+#include "neug/storages/snapshot_store.h"
 #include "neug/storages/workspace.h"
 #include "neug/transaction/compact_transaction.h"
 #include "neug/transaction/insert_transaction.h"
@@ -278,10 +279,18 @@ class NeugDB {
    */
   void CloseAllConnection();
 
-  inline const PropertyGraph& graph() const { return graph_; }
-  inline PropertyGraph& graph() { return graph_; }
+  inline const PropertyGraph& graph() const {
+    return snapshot_store_->currentSnapshot();
+  }
 
-  inline const Schema& schema() const { return graph_.schema(); }
+  inline const Schema& schema() const {
+    return snapshot_store_->currentSnapshot().schema();
+  }
+
+  inline SnapshotStore& snapshot_store() { return *snapshot_store_; }
+  inline const SnapshotStore& snapshot_store() const {
+    return *snapshot_store_;
+  }
 
   std::string work_dir() const { return ws_.db_dir(); }
 
@@ -299,8 +308,9 @@ class NeugDB {
   void preprocessConfig();
   void initAllocators(const std::string& allocator_dir);
   void openGraphAndIngestWals();
-  void ingestWals(IWalParser& parser);
+  void ingestWals(IWalParser& parser, PropertyGraph& graph);
   void initPlannerAndQueryProcessor();
+
   /**
    * @brief Create a checkpoint of the current graph.
    * @param force_compaction Whether to force compaction before creating the
@@ -326,8 +336,9 @@ class NeugDB {
   std::string work_dir_;
   std::unique_ptr<FileLock> file_lock_;
 
-  // The property graph and transaction controls
-  PropertyGraph graph_;
+  // SnapshotStore - manages multiple versions of PropertyGraph for MVCC
+  std::unique_ptr<SnapshotStore> snapshot_store_;
+
   std::shared_ptr<IGraphPlanner> planner_;
   std::shared_ptr<QueryProcessor> query_processor_;
   std::unique_ptr<ConnectionManager> connection_manager_;

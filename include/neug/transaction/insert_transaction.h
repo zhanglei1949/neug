@@ -25,6 +25,8 @@
 
 #include "neug/storages/allocators.h"
 #include "neug/storages/graph/graph_interface.h"
+#include "neug/storages/graph/graph_view.h"
+#include "neug/storages/snapshot_store.h"
 #include "neug/utils/property/property.h"
 #include "neug/utils/property/types.h"
 #include "neug/utils/serialization/in_archive.h"
@@ -62,22 +64,21 @@ class Schema;
 class InsertTransaction {
  public:
   /**
-   * @brief Construct an InsertTransaction.
+   * @brief Construct an InsertTransaction with a pinned StorageSlot.
    *
-   * @param session Reference to the database session
-   * @param graph Reference to the property graph (mutable for insertions)
+   * @param slot Reference to the pinned StorageSlot from acquireSnapshot()
+   * @param snapshot_store Reference to SnapshotStore for releasing slot
    * @param alloc Reference to memory allocator
    * @param logger Reference to WAL writer
    * @param vm Reference to version manager
    * @param timestamp Transaction timestamp
    *
-   * Implementation: Stores references and initializes WAL archive with
-   * WalHeader.
-   *
    * @since v0.1.0
    */
-  InsertTransaction(PropertyGraph& graph, Allocator& alloc, IWalWriter& logger,
-                    IVersionManager& vm, timestamp_t timestamp);
+  InsertTransaction(SnapshotStore::StorageSlot& slot,
+                    SnapshotStore& snapshot_store, Allocator& alloc,
+                    IWalWriter& logger, IVersionManager& vm,
+                    timestamp_t timestamp);
 
   /**
    * @brief Destructor that calls Abort().
@@ -150,7 +151,29 @@ class InsertTransaction {
 
   timestamp_t timestamp() const;
 
-  static void IngestWal(PropertyGraph& graph, uint32_t timestamp, char* data,
+  /**
+   * @brief Apply an insert-WAL byte stream to a writable GraphView.
+   *
+   * Used both:
+   *  - by InsertTransaction::Commit() — passing its own writable view_, with
+   *    the transaction timestamp; and
+   *  - by NeugDB recovery — the caller constructs a writable GraphView over
+   *    the initial PropertyGraph (with a per-thread allocator and
+   *    `read_ts = MAX_TIMESTAMP` so just-inserted vertices are visible while
+   *    resolving edge endpoints), and replays each WAL unit at its own
+   *    timestamp.
+   *
+   * Replays the WAL ops via the writable @p view. Capacity is assumed to be
+   * sufficient (no auto-grow / EnsureCapacity at this level); the strict
+   * insert path will throw if a buffer is exhausted.
+   *
+   * @param view Writable GraphView.
+   * @param timestamp Insert timestamp for each AddVertex/AddEdge in the WAL.
+   * @param data Serialized op buffer.
+   * @param length Byte length of @p data.
+   * @param alloc Per-thread allocator for adjacency-list growth in CSR.
+   */
+  static void IngestWal(GraphView& view, uint32_t timestamp, char* data,
                         size_t length, Allocator& alloc);
 
   const Schema& schema() const;
@@ -159,23 +182,19 @@ class InsertTransaction {
 
   Property GetVertexId(label_t label, vid_t lid) const;
 
-  PropertyGraph& graph() { return graph_; }
-
  private:
   void create_id_indexer_if_not_exists(label_t label);
 
   void clear();
 
-  static bool get_vertex_with_retries(PropertyGraph& graph, label_t label,
-                                      const Property& oid, vid_t& lid,
-                                      timestamp_t timestamp);
   InArchive arc_;
 
   std::vector<std::unique_ptr<neug::IdIndexerBase<vid_t>>> added_vertices_;
   std::vector<vid_t> added_vertices_base_;
   std::vector<vid_t> vertex_nums_;
 
-  PropertyGraph& graph_;
+  SnapshotStore::StorageSlot* slot_;
+  SnapshotStore& snapshot_store_;
 
   Allocator& alloc_;
   IWalWriter& logger_;

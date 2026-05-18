@@ -14,7 +14,13 @@
  */
 
 #include "neug/storages/csr/generic_view_utils.h"
+
+#include <cstring>
+
+#include "neug/common/types.h"
 #include "neug/execution/common/types/graph_types.h"
+#include "neug/storages/csr/nbr.h"
+#include "neug/utils/exception/exception.h"
 #include "neug/utils/property/property.h"
 #include "neug/utils/property/types.h"
 
@@ -135,7 +141,7 @@ size_t get_offset_for_edge_record(const NbrList& nbr_list, vid_t expected_nbr,
 }
 
 std::pair<int32_t, int32_t> record_to_csr_offset_pair(
-    const GenericView& oe, const GenericView& ie,
+    const CsrBaseView& oe, const CsrBaseView& ie,
     const neug::execution::EdgeRecord& record,
     const std::vector<DataType>& props) {
   NbrList cur_nbr_list, another_nbr_list;
@@ -169,7 +175,7 @@ std::pair<int32_t, int32_t> record_to_csr_offset_pair(
 }
 
 int32_t search_other_offset_with_cur_offset(
-    const GenericView& cur_view, const GenericView& other_view, vid_t src_lid,
+    const CsrBaseView& cur_view, const CsrBaseView& other_view, vid_t src_lid,
     vid_t other_lid, int32_t cur_offset, const std::vector<DataType>& props) {
   NbrList other_nbr_list = other_view.get_edges(other_lid);
   auto cur_edges = cur_view.get_edges(src_lid);

@@ -23,7 +23,6 @@
 
 #include "neug/storages/container/i_container.h"
 #include "neug/storages/csr/csr_base.h"
-#include "neug/storages/csr/generic_view.h"
 #include "neug/storages/csr/nbr.h"
 #include "neug/storages/module/type_name.h"
 #include "neug/utils/property/types.h"
@@ -41,15 +40,17 @@ class ImmutableCsr : public TypedCsrBase<EDATA_T> {
 
   CsrType csr_type() const override { return CsrType::kImmutable; }
 
-  GenericView get_generic_view(timestamp_t ts) const override {
+  CsrBaseView get_generic_view(timestamp_t ts) const override {
     NbrIterConfig cfg;
     cfg.stride = sizeof(nbr_t);
     cfg.ts_offset = 0;
     cfg.data_offset = offsetof(nbr_t, data);
-    return GenericView(
+    return CsrBaseView(
+        CsrType::kImmutable,
         reinterpret_cast<const char*>(adj_list_buffer_->GetData()),
         reinterpret_cast<const int*>(degree_list_buffer_->GetData()), cfg,
-        std::numeric_limits<timestamp_t>::max() - 1, unsorted_since_);
+        std::numeric_limits<timestamp_t>::max() - 1, unsorted_since_, nullptr,
+        nullptr, nullptr, PropUtils<EDATA_T>::prop_type());
   }
 
   timestamp_t unsorted_since() const override { return unsorted_since_; }
@@ -104,9 +105,9 @@ class ImmutableCsr : public TypedCsrBase<EDATA_T> {
     return {};
   }
 
-  void fork_vertex(vid_t vid, Allocator& alloc) override {
+  void ensure_adjlist_mutable(vid_t vid, Allocator& alloc) override {
     THROW_NOT_SUPPORTED_EXCEPTION(
-        "fork_vertex is not supported for immutable csr");
+        "ensure_adjlist_mutable is not supported for immutable csr");
   }
 
   std::unique_ptr<Module> Fork(Checkpoint& ckp, MemoryLevel level) override {
@@ -138,15 +139,17 @@ class SingleImmutableCsr : public TypedCsrBase<EDATA_T> {
 
   CsrType csr_type() const override { return CsrType::kSingleImmutable; }
 
-  GenericView get_generic_view(timestamp_t ts) const override {
+  CsrBaseView get_generic_view(timestamp_t ts) const override {
     NbrIterConfig cfg;
     cfg.stride = sizeof(nbr_t);
     cfg.ts_offset = 0;
     cfg.data_offset = offsetof(nbr_t, data);
-    return GenericView(
+    return CsrBaseView(
+        CsrType::kSingleImmutable,
         reinterpret_cast<const char*>(nbr_list_buffer_->GetData()), cfg,
         std::numeric_limits<timestamp_t>::max() - 1,
-        std::numeric_limits<timestamp_t>::max());
+        std::numeric_limits<timestamp_t>::max(), nullptr,
+        PropUtils<EDATA_T>::prop_type());
   }
 
   timestamp_t unsorted_since() const override {
@@ -202,9 +205,9 @@ class SingleImmutableCsr : public TypedCsrBase<EDATA_T> {
     return {};
   }
 
-  void fork_vertex(vid_t vid, Allocator& alloc) override {
+  void ensure_adjlist_mutable(vid_t vid, Allocator& alloc) override {
     THROW_NOT_SUPPORTED_EXCEPTION(
-        "fork_vertex is not supported for single immutable csr");
+        "ensure_adjlist_mutable is not supported for single immutable csr");
   }
 
   std::unique_ptr<Module> Fork(Checkpoint& ckp, MemoryLevel level) override {

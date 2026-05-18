@@ -14,6 +14,7 @@
  */
 #pragma once
 
+#include "neug/storages/snapshot_store.h"
 #include "neug/utils/property/types.h"
 #include "neug/utils/serialization/in_archive.h"
 
@@ -25,7 +26,10 @@ class IVersionManager;
 
 class CompactTransaction {
  public:
-  CompactTransaction(PropertyGraph& graph, IWalWriter& logger,
+  /// Pins the current slot at construction; releases on Commit/Abort/dtor.
+  /// Compact still mutates the pinned PG inplace — caller is responsible for
+  /// serialization (typically via VersionManager::acquire_update_timestamp).
+  CompactTransaction(SnapshotStore& snapshot_store, IWalWriter& logger,
                      IVersionManager& vm, bool compact_csr, float reserve_ratio,
                      timestamp_t timestamp);
   ~CompactTransaction();
@@ -37,7 +41,11 @@ class CompactTransaction {
   void Abort();
 
  private:
-  PropertyGraph& graph_;
+  void release_pin();
+
+  SnapshotStore* snapshot_store_;
+  PropertyGraph* graph_;
+  SnapshotStore::StorageSlot* pinned_slot_;
   IWalWriter& logger_;
   IVersionManager& vm_;
   bool compact_csr_;

@@ -564,6 +564,7 @@ TEST_F(EdgeTableTest, TestCountEdgeNum) {
 }
 
 TEST_F(EdgeTableTest, TestDeleteEdge) {
+  neug::Allocator delete_alloc(neug::MemoryLevel::kInMemory, allocator_dir_);
   auto& ws = workspace();
   auto ckp_id = ws.CreateCheckpoint();
   auto& ckp = ws.GetCheckpoint(ckp_id);
@@ -613,7 +614,8 @@ TEST_F(EdgeTableTest, TestDeleteEdge) {
                             reinterpret_cast<const char*>(es.start_ptr)) /
                            es.cfg.stride;
           this->edge_table->DeleteEdge(src_lid, dst_lid, oe_offset,
-                                       another_offset, neug::MAX_TIMESTAMP);
+                                       another_offset, neug::MAX_TIMESTAMP,
+                                       delete_alloc);
           delete_count++;
         }
       }
@@ -642,7 +644,7 @@ TEST_F(EdgeTableTest, TestDeleteEdge) {
                         reinterpret_cast<const char*>(es.start_ptr)) /
                        es.cfg.stride;
       this->edge_table->DeleteEdge(src_lid, dst_lid, oe_offset, another_offset,
-                                   neug::MAX_TIMESTAMP);
+                                   neug::MAX_TIMESTAMP, delete_alloc);
       soft_deleted_edges.emplace_back(src_lid, dst_lid, oe_offset,
                                       another_offset);
       break;
@@ -658,19 +660,6 @@ TEST_F(EdgeTableTest, TestDeleteEdge) {
               edge_num - delete_count - soft_deleted_edges.size());
     this->ExpectBundledStats(edge_num - delete_count -
                              soft_deleted_edges.size());
-  }
-  // Revert soft deleted edges
-  for (const auto& edge_record : soft_deleted_edges) {
-    this->edge_table->RevertDeleteEdge(
-        std::get<0>(edge_record), std::get<1>(edge_record),
-        std::get<2>(edge_record), std::get<3>(edge_record), 0);
-  }
-  {
-    std::vector<int64_t> tmp_srcs, tmp_dsts;
-    this->OutputOutgoingEndpoints(tmp_srcs, tmp_dsts, neug::MAX_TIMESTAMP);
-    ASSERT_EQ(tmp_srcs.size(), edge_num - delete_count);
-    ASSERT_EQ(tmp_dsts.size(), edge_num - delete_count);
-    this->ExpectBundledStats(edge_num - delete_count);
   }
 }
 
@@ -840,7 +829,8 @@ TEST_F(EdgeTableTest, TestAddEdgeAndDelete) {
         EXPECT_NE(oe_offset, std::numeric_limits<int32_t>::max());
         EXPECT_NE(another_offset, std::numeric_limits<int32_t>::max());
         this->edge_table->DeleteEdge(vid, it.get_vertex(), oe_offset,
-                                     another_offset, neug::MAX_TIMESTAMP);
+                                     another_offset, neug::MAX_TIMESTAMP,
+                                     allocator);
       }
     }
   }
@@ -856,24 +846,6 @@ TEST_F(EdgeTableTest, TestAddEdgeAndDelete) {
   this->OutputIncomingEndpoints(srcs, dsts, neug::MAX_TIMESTAMP);
   ASSERT_EQ(srcs.size(), edge_num - edges_to_delete.size());
   ASSERT_EQ(dsts.size(), edge_num - edges_to_delete.size());
-
-  // Revert deleted edges
-  for (const auto& edge_record : edges_to_delete) {
-    this->edge_table->RevertDeleteEdge(
-        std::get<0>(edge_record), std::get<1>(edge_record),
-        std::get<2>(edge_record), std::get<3>(edge_record), 0);
-  }
-  srcs.clear();
-  dsts.clear();
-  this->OutputOutgoingEndpoints(srcs, dsts, neug::MAX_TIMESTAMP);
-  ASSERT_EQ(srcs.size(), edge_num);
-  ASSERT_EQ(dsts.size(), edge_num);
-  this->ExpectBundledStats(edge_num);
-  srcs.clear();
-  dsts.clear();
-  this->OutputIncomingEndpoints(srcs, dsts, neug::MAX_TIMESTAMP);
-  ASSERT_EQ(srcs.size(), edge_num);
-  ASSERT_EQ(dsts.size(), edge_num);
 
   // Test Delete multiple same edges with different timestamp.
   for (timestamp_t ts = 1; ts < 10; ++ts) {
@@ -899,7 +871,7 @@ TEST_F(EdgeTableTest, TestAddEdgeAndDelete) {
       multi_edges_to_delete.emplace_back(
           std::make_tuple(0, 1, oe_offset, ie_offset), it.get_timestamp());
       this->edge_table->DeleteEdge(0, 1, oe_offset, ie_offset,
-                                   it.get_timestamp());
+                                   it.get_timestamp(), allocator);
     }
   }
   auto view_after_delete =
@@ -909,23 +881,6 @@ TEST_F(EdgeTableTest, TestAddEdgeAndDelete) {
     EXPECT_FALSE(it.get_vertex() == 0 && it.get_timestamp() % 2 == 1);
   }
   this->ExpectBundledStats(edge_num + 9 - multi_edges_to_delete.size());
-  for (const auto& pair : multi_edges_to_delete) {
-    const auto& edge_record = pair.first;
-    this->edge_table->RevertDeleteEdge(
-        std::get<0>(edge_record), std::get<1>(edge_record),
-        std::get<2>(edge_record), std::get<3>(edge_record), pair.second);
-  }
-  auto view_after_revert =
-      this->edge_table->get_incoming_view(neug::MAX_TIMESTAMP);
-  auto es_after_revert = view_after_revert.get_edges(1);
-  size_t revert_count = 0;
-  for (auto it = es_after_revert.begin(); it != es_after_revert.end(); ++it) {
-    if (it.get_vertex() == 0 && it.get_timestamp() % 2 == 1) {
-      revert_count++;
-    }
-  }
-  EXPECT_EQ(revert_count, multi_edges_to_delete.size());
-  this->ExpectBundledStats(edge_num + 9);
 }
 
 TEST_F(EdgeTableTest, TestAddEdgeDeleteUnbundled) {
@@ -995,7 +950,8 @@ TEST_F(EdgeTableTest, TestAddEdgeDeleteUnbundled) {
         auto another_offset = neug::fuzzy_search_offset_from_nbr_list(
             is, src_lids[i], it.get_data_ptr(), DataTypeId::kUInt64);
         this->edge_table->DeleteEdge(src_lids[i], dst_lids[i], oe_offset,
-                                     another_offset, neug::MAX_TIMESTAMP);
+                                     another_offset, neug::MAX_TIMESTAMP,
+                                     allocator);
         deleted_edge_indices.push_back(cur_index);
       }
       cur_index++;
@@ -1076,7 +1032,7 @@ TEST_F(EdgeTableTest, TestEdgeTableCompaction) {
       edges_to_delete.emplace_back(
           std::make_tuple(src_lids[i], dst_lids[i], oe_offset, ie_offset));
       this->edge_table->DeleteEdge(src_lids[i], dst_lids[i], oe_offset,
-                                   ie_offset, 0);
+                                   ie_offset, 0, allocator);
       delete_count++;
     }
   }

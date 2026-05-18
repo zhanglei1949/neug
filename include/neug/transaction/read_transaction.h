@@ -32,8 +32,10 @@
 #include "neug/storages/csr/immutable_csr.h"
 #include "neug/storages/csr/mutable_csr.h"
 #include "neug/storages/csr/nbr.h"
+#include "neug/storages/graph/graph_view.h"
 #include "neug/storages/graph/property_graph.h"
 #include "neug/storages/graph/schema.h"
+#include "neug/storages/snapshot_store.h"
 #include "neug/transaction/transaction_utils.h"
 #include "neug/utils/property/column.h"
 #include "neug/utils/property/property.h"
@@ -67,18 +69,17 @@ class TypedMutableCsrBase;
 class ReadTransaction {
  public:
   /**
-   * @brief Construct a ReadTransaction.
+   * @brief Construct a ReadTransaction with a pinned StorageSlot.
    *
-   * @param session Reference to the database session
-   * @param graph Const reference to the property graph
-   * @param vm Reference to version manager
-   * @param timestamp Snapshot timestamp for this transaction
-   *
-   * Implementation: Stores all parameters as member references/values.
+   * @param slot Reference to the pinned StorageSlot from acquireSnapshot().
+   * @param snapshot_store Reference to SnapshotStore for releasing slot.
+   * @param vm Reference to version manager.
+   * @param timestamp Snapshot timestamp for this transaction.
    *
    * @since v0.1.0
    */
-  ReadTransaction(const PropertyGraph& graph, IVersionManager& vm,
+  ReadTransaction(SnapshotStore::StorageSlot& slot,
+                  SnapshotStore& snapshot_store, IVersionManager& vm,
                   timestamp_t timestamp);
 
   /**
@@ -96,11 +97,17 @@ class ReadTransaction {
 
   void Abort();
 
-  const PropertyGraph& graph() const;
+  /**
+   * @brief Get the GraphView for this transaction.
+   *
+   * @return Const reference to the GraphView cached in the pinned slot.
+   */
+  const GraphView& view() const { return slot_->view(); }
 
  private:
   void release();
-  const PropertyGraph& graph_;
+  SnapshotStore::StorageSlot* slot_;
+  SnapshotStore& snapshot_store_;
   IVersionManager& vm_;
   timestamp_t timestamp_;
 };

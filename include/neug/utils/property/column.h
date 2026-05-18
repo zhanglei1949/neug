@@ -603,7 +603,6 @@ using StringColumn = TypedColumn<std::string_view>;
 
 std::shared_ptr<ColumnBase> CreateColumn(DataType type);
 
-/// Create RefColumn for ease of usage for hqps
 class RefColumnBase {
  public:
   enum class ColType {
@@ -612,6 +611,9 @@ class RefColumnBase {
   };
   virtual ~RefColumnBase() {}
   virtual Property get(size_t index) const = 0;
+  /// Strict insert: throws if the column doesn't have enough reserved space.
+  /// View-layer insert never auto-grows; capacity must be reserved beforehand.
+  virtual void set(size_t index, const Property& value) = 0;
   virtual DataTypeId type() const = 0;
   virtual ColType col_type() const = 0;
 };
@@ -623,7 +625,8 @@ class TypedRefColumn : public RefColumnBase {
   using value_type = T;
 
   explicit TypedRefColumn(const TypedColumn<T>& column)
-      : basic_buffer(reinterpret_cast<const T*>(column.buffer().GetData())),
+      : column_(const_cast<TypedColumn<T>*>(&column)),
+        basic_buffer(reinterpret_cast<const T*>(column.buffer().GetData())),
         basic_size(column.buffer_size()) {}
   ~TypedRefColumn() {}
 
@@ -636,11 +639,18 @@ class TypedRefColumn : public RefColumnBase {
     return PropUtils<T>::to_prop(get_view(index));
   }
 
+  /// Strict set: insert_safe=false; for fixed-width T the underlying buffer
+  /// is never re-allocated, so basic_buffer remains valid.
+  void set(size_t index, const Property& value) override {
+    column_->set_any(index, value, /*insert_safe=*/false);
+  }
+
   DataTypeId type() const override { return PropUtils<T>::prop_type(); }
 
   ColType col_type() const override { return ColType::kInternal; }
 
  private:
+  TypedColumn<T>* column_;
   const T* basic_buffer;
   size_t basic_size;
 };
@@ -651,16 +661,22 @@ class TypedRefColumn<std::string_view> : public RefColumnBase {
   using value_type = std::string_view;
 
   explicit TypedRefColumn(const TypedColumn<std::string_view>& column)
-      : column_(column), basic_size(column.size()) {}
+      : column_(const_cast<TypedColumn<std::string_view>*>(&column)),
+        basic_size(column.size()) {}
   ~TypedRefColumn() {}
 
   inline std::string_view get_view(size_t index) const {
     assert(index < basic_size);
-    return column_.get_view(index);
+    return column_->get_view(index);
   }
 
   Property get(size_t index) const override {
     return PropUtils<std::string_view>::to_prop(get_view(index));
+  }
+
+  /// Strict set: insert_safe=false; throws if data buffer can't fit value.
+  void set(size_t index, const Property& value) override {
+    column_->set_any(index, value, /*insert_safe=*/false);
   }
 
   DataTypeId type() const override {
@@ -670,13 +686,13 @@ class TypedRefColumn<std::string_view> : public RefColumnBase {
   ColType col_type() const override { return ColType::kInternal; }
 
  private:
-  const TypedColumn<std::string_view>& column_;
+  TypedColumn<std::string_view>* column_;
   size_t basic_size;
 };
 
-// Create a reference column from a ColumnBase that contains a const reference
-// to the actual column storage, offering a column-based store interface for
-// vertex properties.
+// Create a reference column from a ColumnBase. The returned RefColumnBase
+// supports both read and (strict) insert; insert paths require the original
+// column to be writable.
 std::shared_ptr<RefColumnBase> CreateRefColumn(const ColumnBase& column);
 
 }  // namespace neug

@@ -27,7 +27,7 @@
 #include <vector>
 
 #include "neug/storages/allocators.h"
-#include "neug/storages/csr/generic_view.h"
+#include "neug/storages/csr/csr_base_view.h"
 #include "neug/storages/graph/edge_table.h"
 #include "neug/storages/graph/operation_params.h"
 #include "neug/storages/graph/schema.h"
@@ -317,13 +317,15 @@ class PropertyGraph {
    * @return true if deletion is successful, false otherwise.
    * @note We always delete vertex in detach mode.
    */
-  Status DeleteVertex(label_t v_label, const Property& oid, timestamp_t ts);
+  Status DeleteVertex(label_t v_label, const Property& oid, timestamp_t ts,
+                      Allocator& alloc);
 
-  Status DeleteVertex(label_t v_label, vid_t lid, timestamp_t ts);
+  Status DeleteVertex(label_t v_label, vid_t lid, timestamp_t ts,
+                      Allocator& alloc);
 
   Status DeleteEdge(label_t src_label, vid_t src_lid, label_t dst_label,
                     vid_t dst_lid, label_t edge_label, int32_t oe_offset,
-                    int32_t ie_offset, timestamp_t ts);
+                    int32_t ie_offset, timestamp_t ts, Allocator& alloc);
 
   Status BatchDeleteEdges(
       label_t src_v_label, label_t dst_v_label, label_t edge_label,
@@ -335,10 +337,12 @@ class PropertyGraph {
       const std::vector<std::pair<vid_t, int32_t>>& ie_edges);
 
   inline VertexTable& get_vertex_table(label_t vertex_label) {
+    schema_.ensure_vertex_label_valid(vertex_label);
     return vertex_tables_[vertex_label];
   }
 
   inline const VertexTable& get_vertex_table(label_t vertex_label) const {
+    schema_.ensure_vertex_label_valid(vertex_label);
     return vertex_tables_[vertex_label];
   }
 
@@ -393,12 +397,13 @@ class PropertyGraph {
   Status UpdateEdgeProperty(label_t src_label, vid_t src_lid, label_t dst_label,
                             vid_t dst_lid, label_t e_label, int32_t oe_offset,
                             int32_t ie_offset, int32_t col_id,
-                            const Property& new_prop, timestamp_t ts);
+                            const Property& new_prop, timestamp_t ts,
+                            Allocator& alloc);
 
   /**
    * @brief Get a view for traversing outgoing edges.
    *
-   * Returns a GenericView for efficiently iterating over outgoing edges
+   * Returns a CsrBaseView for efficiently iterating over outgoing edges
    * from vertices of type v_label to vertices of type neighbor_label.
    *
    * **Usage Example:**
@@ -407,7 +412,7 @@ class PropertyGraph {
    * label_t person = schema.get_vertex_label_id("Person");
    * label_t knows = schema.get_edge_label_id("KNOWS");
    *
-   * GenericView view = graph.GetGenericOutgoingGraphView(
+   * CsrBaseView view = graph.GetGenericOutgoingGraphView(
    *     person, person, knows, read_ts);
    *
    * // Traverse from vertex v
@@ -423,16 +428,16 @@ class PropertyGraph {
    * @param edge_label Edge label connecting them
    * @param ts Read timestamp for MVCC (default: latest)
    *
-   * @return GenericView for outgoing edge traversal
+   * @return CsrBaseView for outgoing edge traversal
    *
    * @throws std::invalid_argument if edge triplet doesn't exist
    *
-   * @see GenericView For traversal operations
+   * @see CsrBaseView For traversal operations
    * @see GetGenericIncomingGraphView For reverse traversal
    *
    * @since v0.1.0
    */
-  GenericView GetGenericOutgoingGraphView(
+  CsrBaseView GetGenericOutgoingGraphView(
       label_t v_label, label_t neighbor_label, label_t edge_label,
       timestamp_t ts = std::numeric_limits<timestamp_t>::max()) const {
     size_t index =
@@ -447,13 +452,13 @@ class PropertyGraph {
   /**
    * @brief Get a view for traversing incoming edges.
    *
-   * Returns a GenericView for efficiently iterating over incoming edges
+   * Returns a CsrBaseView for efficiently iterating over incoming edges
    * to vertices of type v_label from vertices of type neighbor_label.
    *
    * **Usage Example:**
    * @code{.cpp}
    * // Get view for Person <-[KNOWS]- Person edges (reverse direction)
-   * GenericView view = graph.GetGenericIncomingGraphView(
+   * CsrBaseView view = graph.GetGenericIncomingGraphView(
    *     person, person, knows, read_ts);
    *
    * // Find who follows vertex v (incoming edges)
@@ -468,16 +473,16 @@ class PropertyGraph {
    * @param edge_label Edge label connecting them
    * @param ts Read timestamp for MVCC (default: latest)
    *
-   * @return GenericView for incoming edge traversal
+   * @return CsrBaseView for incoming edge traversal
    *
    * @throws std::invalid_argument if edge triplet doesn't exist
    *
-   * @see GenericView For traversal operations
+   * @see CsrBaseView For traversal operations
    * @see GetGenericOutgoingGraphView For forward traversal
    *
    * @since v0.1.0
    */
-  GenericView GetGenericIncomingGraphView(
+  CsrBaseView GetGenericIncomingGraphView(
       label_t v_label, label_t neighbor_label, label_t edge_label,
       timestamp_t ts = std::numeric_limits<timestamp_t>::max()) const {
     size_t index =
@@ -528,7 +533,7 @@ class PropertyGraph {
    *     person, person, knows, "weight");
    *
    * // Use with edge iteration
-   * GenericView view = graph.GetGenericOutgoingGraphView(...);
+   * CsrBaseView view = graph.GetGenericOutgoingGraphView(...);
    * for (auto it = view.get_edges(v).begin(); ...; ++it) {
    *     double weight = weight_accessor.get_typed_data<double>(it);
    * }
@@ -561,22 +566,33 @@ class PropertyGraph {
   void loadSchema(const std::string& filename);
   inline std::shared_ptr<RefColumnBase> GetVertexPropertyColumn(
       uint8_t label, int32_t col_id) const {
-    return vertex_tables_[label].GetPropertyColumn(col_id);
+    schema_.ensure_vertex_label_valid(label);
+    auto props = schema_.get_vertex_properties(label);
+    if (col_id < 0 || static_cast<size_t>(col_id) >= props.size()) {
+      THROW_INVALID_ARGUMENT_EXCEPTION(
+          "Vertex property column id out of range: " + std::to_string(col_id) +
+          " (label has " + std::to_string(props.size()) + " properties)");
+    }
+    return vertex_tables_[label].get_property_column(col_id);
   }
 
   inline std::shared_ptr<RefColumnBase> GetVertexPropertyColumn(
       uint8_t label, const std::string& prop) const {
+    schema_.ensure_vertex_label_valid(label);
     return vertex_tables_[label].GetPropertyColumn(prop);
   }
 
   inline VertexSet GetVertexSet(label_t label,
                                 timestamp_t ts = MAX_TIMESTAMP) const {
+    schema_.ensure_vertex_label_valid(label);
     return vertex_tables_[label].GetVertexSet(ts);
   }
 
   std::string get_statistics_json() const;
 
   inline std::string work_dir() const { return ckp_->path(); }
+
+  std::shared_ptr<PropertyGraph> Fork() const;
 
  private:
   Status delete_vertex_properties_check(const std::string& vertex_type_name,
@@ -598,6 +614,9 @@ class PropertyGraph {
                             const std::string& edge_type_name);
 
   Status vertex_label_check(const std::string& vertex_type_name);
+  Status vertex_label_check(label_t label) const;
+  Status edge_triplet_check(label_t src_label, label_t dst_label,
+                            label_t edge_label) const;
 
   void compact_schema();
 

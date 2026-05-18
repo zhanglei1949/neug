@@ -14,26 +14,22 @@
  */
 #pragma once
 
+#include <atomic>
 #include <string>
 #include <vector>
 
 #include "neug/storages/allocators.h"
-#include "neug/storages/csr/generic_view.h"
+#include "neug/storages/csr/csr_base_view.h"
 #include "neug/storages/csr/nbr.h"
 #include "neug/storages/module/module.h"
 #include "neug/utils/property/types.h"
+#include "neug/utils/spinlock.h"
 
 #include <glog/logging.h>
 
 namespace neug {
 
-enum class CsrType {
-  kImmutable,
-  kMutable,
-  kSingleMutable,
-  kSingleImmutable,
-  kEmpty,
-};
+// CsrType is now defined in csr_base_view.h to avoid circular includes.
 
 class CsrBase : public Module {
  public:
@@ -44,7 +40,7 @@ class CsrBase : public Module {
 
   virtual CsrType csr_type() const = 0;
 
-  virtual GenericView get_generic_view(timestamp_t ts) const = 0;
+  virtual CsrBaseView get_generic_view(timestamp_t ts) const = 0;
 
   virtual timestamp_t unsorted_since() const { return 0; }
 
@@ -91,7 +87,9 @@ class CsrBase : public Module {
   virtual std::tuple<std::vector<vid_t>, std::vector<vid_t>> batch_export(
       std::shared_ptr<ColumnBase> prev_data_col) const = 0;
 
-  virtual void fork_vertex(vid_t vid, Allocator& alloc) = 0;
+  /// Ensure the adjacency list of a vertex is writable (COW: copy if still
+  /// pointing into the shared nbr_list).
+  virtual void ensure_adjlist_mutable(vid_t vid, Allocator& alloc) = 0;
 };
 
 template <typename EDATA_T>

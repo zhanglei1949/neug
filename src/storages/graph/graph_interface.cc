@@ -20,7 +20,7 @@ namespace neug {
 void StorageAPUpdateInterface::UpdateVertexProperty(label_t label, vid_t lid,
                                                     int col_id,
                                                     const Property& value) {
-  graph_.UpdateVertexProperty(label, lid, col_id, value, timestamp_);
+  graph_.UpdateVertexProperty(label, lid, col_id, value, update_ts_);
 }
 
 void StorageAPUpdateInterface::UpdateEdgeProperty(
@@ -29,7 +29,7 @@ void StorageAPUpdateInterface::UpdateEdgeProperty(
     const Property& value) {
   graph_.UpdateEdgeProperty(src_label, src, dst_label, dst, edge_label,
                             oe_offset, ie_offset, col_id, value,
-                            neug::timestamp_t(0));
+                            neug::timestamp_t(0), alloc_);
 }
 
 bool StorageAPUpdateInterface::AddVertex(label_t label, const Property& id,

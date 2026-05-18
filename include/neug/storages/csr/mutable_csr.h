@@ -33,7 +33,6 @@
 #include "neug/storages/allocators.h"
 #include "neug/storages/container/i_container.h"
 #include "neug/storages/csr/csr_base.h"
-#include "neug/storages/csr/generic_view.h"
 #include "neug/storages/csr/nbr.h"
 #include "neug/storages/module/type_name.h"
 #include "neug/utils/file_utils.h"
@@ -53,15 +52,18 @@ class MutableCsr : public TypedCsrBase<EDATA_T> {
 
   CsrType csr_type() const override { return CsrType::kMutable; }
 
-  GenericView get_generic_view(timestamp_t ts) const override {
+  CsrBaseView get_generic_view(timestamp_t ts) const override {
     NbrIterConfig cfg;
     cfg.stride = sizeof(nbr_t);
     cfg.ts_offset = offsetof(nbr_t, timestamp);
     cfg.data_offset = offsetof(nbr_t, data);
-    return GenericView(
+    return CsrBaseView(
+        CsrType::kMutable,
         reinterpret_cast<const char*>(adj_list_buffer_->GetData()),
         reinterpret_cast<const int*>(degree_list_->GetData()), cfg, ts,
-        unsorted_since_);
+        unsorted_since_, const_cast<std::atomic<uint64_t>*>(&edge_num_),
+        cap_list_ ? reinterpret_cast<int*>(cap_list_->GetData()) : nullptr,
+        locks_, PropUtils<EDATA_T>::prop_type());
   }
 
   timestamp_t unsorted_since() const override { return unsorted_since_; }
@@ -173,33 +175,62 @@ class MutableCsr : public TypedCsrBase<EDATA_T> {
     return std::make_tuple(std::move(src_list), std::move(dst_list));
   }
 
-  void fork_vertex(vid_t vid, Allocator& alloc) override {
+  void ensure_adjlist_mutable(vid_t vid, Allocator& alloc) override {
     auto v_cap = vertex_capacity();
     if (vid >= v_cap) {
       THROW_INVALID_ARGUMENT_EXCEPTION(
           "Vertex id out of range: " + std::to_string(vid) +
           " >= " + std::to_string(v_cap));
     }
+    locks_[vid].lock();
     auto* buffers = reinterpret_cast<nbr_t**>(adj_list_buffer_->GetData());
     auto* caps = reinterpret_cast<int*>(cap_list_->GetData());
-    locks_[vid].lock();
-    auto cap = caps[vid];
-    void* new_adj_list = alloc.allocate(sizeof(nbr_t) * cap);
-    memcpy(new_adj_list, buffers[vid], sizeof(nbr_t) * cap);
-    buffers[vid] = static_cast<nbr_t*>(new_adj_list);
+
+    bool needs_fork = false;
+
+    {
+      const char* shared_begin =
+          reinterpret_cast<const char*>(nbr_list_->GetData());
+      const char* shared_end = shared_begin + nbr_list_->GetDataSize();
+      const char* vp = reinterpret_cast<const char*>(buffers[vid]);
+      if (vp >= shared_begin && vp < shared_end) {
+        needs_fork = true;
+      }
+    }
+
+    if (!needs_fork && vid < source_buffers_.size() &&
+        source_buffers_[vid] != nullptr &&
+        buffers[vid] == source_buffers_[vid]) {
+      needs_fork = true;
+    }
+
+    if (needs_fork) {
+      auto cap = caps[vid];
+      void* new_adj_list = alloc.allocate(sizeof(nbr_t) * cap);
+      memcpy(new_adj_list, buffers[vid], sizeof(nbr_t) * cap);
+      buffers[vid] = static_cast<nbr_t*>(new_adj_list);
+    }
     locks_[vid].unlock();
   }
 
   std::unique_ptr<Module> Fork(Checkpoint& ckp, MemoryLevel level) override {
     auto fork = std::make_unique<MutableCsr<EDATA_T>>();
-    fork->locks_ = new SpinLock[vertex_capacity()];
+    auto v_cap = vertex_capacity();
+    fork->locks_ = new SpinLock[v_cap];
     fork->adj_list_buffer_ = adj_list_buffer_->Fork(ckp, level);
     fork->degree_list_ = degree_list_->Fork(ckp, level);
     fork->cap_list_ = cap_list_->Fork(ckp, level);
-    // NOTE: we intentionally share the nbr_list_ to forked csr. The forker csr
-    // need to call fork_vertex() to get its own copy of the neighbor list for a
-    // vertex before ANY MUTATIONs.
+    // NOTE: we intentionally share the nbr_list_ to forked csr. The forked csr
+    // must call ensure_adjlist_mutable() to get its own copy of the neighbor
+    // list for a vertex before ANY MUTATIONs.
     fork->nbr_list_ = nbr_list_;
+    // Capture source's per-vertex adjacency pointers. The new shell's
+    // ensure_adjlist_mutable compares its own buffers[vid] against this
+    // captured pointer to detect aliasing introduced by previous generations'
+    // allocator-private migrations.
+    fork->source_buffers_.resize(v_cap);
+    auto* src_buffers = reinterpret_cast<nbr_t**>(adj_list_buffer_->GetData());
+    std::copy(src_buffers, src_buffers + v_cap, fork->source_buffers_.begin());
     fork->unsorted_since_ = unsorted_since_;
     fork->edge_num_ = edge_num_.load();
     return fork;
@@ -214,6 +245,10 @@ class MutableCsr : public TypedCsrBase<EDATA_T> {
  private:
   SpinLock* locks_;
   std::unique_ptr<IDataContainer> adj_list_buffer_;
+  // Captured at Fork() time: source MutableCsr's per-vertex adjacency
+  // pointers. Used by ensure_adjlist_mutable to detect whether buffers[vid]
+  // still aliases the source's adjacency. Empty for never-Forked CSRs.
+  std::vector<nbr_t*> source_buffers_;
   std::unique_ptr<IDataContainer> degree_list_;
   std::unique_ptr<IDataContainer> cap_list_;
   std::shared_ptr<IDataContainer> nbr_list_;
@@ -239,13 +274,16 @@ class SingleMutableCsr : public TypedCsrBase<EDATA_T> {
 
   CsrType csr_type() const override { return CsrType::kSingleMutable; }
 
-  GenericView get_generic_view(timestamp_t ts) const override {
+  CsrBaseView get_generic_view(timestamp_t ts) const override {
     NbrIterConfig cfg;
     cfg.stride = sizeof(nbr_t);
     cfg.ts_offset = offsetof(nbr_t, timestamp);
     cfg.data_offset = offsetof(nbr_t, data);
-    return GenericView(reinterpret_cast<const char*>(nbr_list_->GetData()), cfg,
-                       ts, std::numeric_limits<timestamp_t>::max());
+    return CsrBaseView(CsrType::kSingleMutable,
+                       reinterpret_cast<const char*>(nbr_list_->GetData()), cfg,
+                       ts, std::numeric_limits<timestamp_t>::max(),
+                       const_cast<std::atomic<uint64_t>*>(&edge_num_),
+                       PropUtils<EDATA_T>::prop_type());
   }
 
   timestamp_t unsorted_since() const override {
@@ -336,7 +374,20 @@ class SingleMutableCsr : public TypedCsrBase<EDATA_T> {
     return std::make_tuple(std::move(src_list), std::move(dst_list));
   }
 
-  void fork_vertex(vid_t vid, Allocator& alloc) override {}
+  void ensure_adjlist_mutable(vid_t vid, Allocator& alloc) override {}
+
+  std::unique_ptr<Module> Fork(Checkpoint& ckp, MemoryLevel level) override {
+    auto fork = std::make_unique<SingleMutableCsr<EDATA_T>>();
+    fork->nbr_list_ = nbr_list_->Fork(ckp, level);
+    fork->edge_num_ = edge_num_.load();
+    return fork;
+  }
+
+  std::string ModuleTypeName() const override { return type_name(); }
+
+  static std::string type_name() {
+    return "SingleMutableCSR<" + type_name_string<EDATA_T>() + ">";
+  }
 
   std::unique_ptr<Module> Fork(Checkpoint& ckp, MemoryLevel level) override {
     auto fork = std::make_unique<SingleMutableCsr<EDATA_T>>();
@@ -371,9 +422,9 @@ class EmptyCsr : public TypedCsrBase<EDATA_T> {
 
   CsrType csr_type() const override { return CsrType::kEmpty; }
 
-  GenericView get_generic_view(timestamp_t ts) const override {
+  CsrBaseView get_generic_view(timestamp_t ts) const override {
     LOG(FATAL) << "Not implemented";
-    return GenericView();
+    return CsrBaseView();
   }
 
   timestamp_t unsorted_since() const override {
@@ -424,7 +475,7 @@ class EmptyCsr : public TypedCsrBase<EDATA_T> {
                        const std::vector<EDATA_T>& data_list,
                        timestamp_t ts = 0) override {}
 
-  void fork_vertex(vid_t vid, Allocator& alloc) override {}
+  void ensure_adjlist_mutable(vid_t vid, Allocator& alloc) override {}
 
   int32_t put_edge(vid_t src, vid_t dst, const EDATA_T& data, timestamp_t ts,
                    Allocator&) override {
