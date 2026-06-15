@@ -150,5 +150,33 @@ class LocalQueryCache {
   uint64_t version_;
   std::unordered_map<std::string, std::shared_ptr<CacheValue>> cache_;
 };
+
+/**
+ * @brief Execute a Cypher query against a caller-provided storage interface,
+ * WITHOUT creating or committing a transaction.
+ *
+ * This is the transaction-agnostic core of query execution: it compiles (via
+ * `cache`), runs the pipeline against `storage`, and optionally sinks the rows
+ * and result schema into `response`. The schema is derived from the storage
+ * interface itself, so no separate schema argument is needed.
+ *
+ * The caller owns the transaction lifecycle (it constructs `storage` from a
+ * ReadTransaction / UpdateTransaction and decides when to Commit() / Abort()),
+ * which makes this usable for interactive, multi-statement transactions.
+ *
+ * @param cache    Shared, thread-safe compiled-plan cache (e.g. from
+ *                 NeugDB::GetQueryCache()).
+ * @param storage  Storage interface wrapping the caller-held transaction.
+ * @param query    Cypher query string.
+ * @param params   Query parameters ($name -> Value); empty for none.
+ * @param response Optional output; rows + schema are sinked here when non-null.
+ * @return true on success, or an error status on failure.
+ */
+result<bool> EvalQueryOnStorage(GlobalQueryCache& cache,
+                                StorageReadInterface& storage,
+                                const std::string& query,
+                                const ParamsMap& params = {},
+                                neug::QueryResponse* response = nullptr);
+
 }  // namespace execution
 }  // namespace neug
