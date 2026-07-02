@@ -48,7 +48,9 @@ neug::result<Context> Pipeline::Execute(IStorageInterface& graph, Context&& ctx,
           }
           if (NEUG_UNLIKELY(timer != nullptr)) {
             cur_timer->set_name(operators_[i]->get_operator_name());
-            cur_timer->add_num_tuples(ret.value().row_num());
+            if (auto row_num = ret.value().row_num_if_materialized()) {
+              cur_timer->add_num_tuples(*row_num);
+            }
             cur_timer->record(tu);
             if (i + 1 < operators_.size()) {
               next_timer = std::make_unique<OprTimer>();

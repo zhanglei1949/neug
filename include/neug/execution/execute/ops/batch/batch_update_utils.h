@@ -30,6 +30,7 @@ class RepeatedPtrField;
 }  // namespace google
 
 namespace neug {
+class IDataChunkSource;
 class IDataChunkSupplier;
 class Schema;
 class StorageReadInterface;
@@ -55,6 +56,10 @@ static const std::string CSV_STREAM_READER = "STREAM_READER";
 bool check_csv_import_options(
     const std::unordered_map<std::string, std::string>& options);
 
+bool is_copy_streaming_enabled();
+
+bool is_edge_bulk_build_enabled();
+
 std::string vertex_to_json_string(label_t label, vid_t vid,
                                   const StorageReadInterface& graph);
 
@@ -64,6 +69,10 @@ std::string edge_to_json_string(const EdgeRecord& edge,
 std::string path_to_json_string(Path& path, const StorageReadInterface& graph);
 
 std::shared_ptr<IDataChunkSupplier> create_data_chunk_supplier(
+    const Context& ctx,
+    const std::vector<std::pair<int32_t, std::string>>& prop_mappings);
+
+std::shared_ptr<IDataChunkSource> create_data_chunk_source(
     const Context& ctx,
     const std::vector<std::pair<int32_t, std::string>>& prop_mappings);
 

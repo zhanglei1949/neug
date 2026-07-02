@@ -143,10 +143,17 @@ neug::result<Context> BatchInsertEdgeOpr::Eval(
   for (const auto& mapping : prop_mappings_) {
     total_mappings.emplace_back(mapping);
   }
-  auto supplier = create_data_chunk_supplier(ctx, total_mappings);
 
+  if (!is_edge_bulk_build_enabled()) {
+    auto supplier = create_data_chunk_supplier(ctx, total_mappings);
+    RETURN_STATUS_ERROR_IF_NOT_OK(graph.BatchAddEdges(
+        src_label_id, dst_label_id, edge_label_id, supplier));
+    return neug::result<Context>(std::move(ctx));
+  }
+
+  auto source = create_data_chunk_source(ctx, total_mappings);
   RETURN_STATUS_ERROR_IF_NOT_OK(
-      graph.BatchAddEdges(src_label_id, dst_label_id, edge_label_id, supplier));
+      graph.BatchBuildEdges(src_label_id, dst_label_id, edge_label_id, source));
   return neug::result<Context>(std::move(ctx));
 }
 

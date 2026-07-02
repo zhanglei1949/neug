@@ -27,6 +27,7 @@
 namespace neug {
 
 class IDataChunkSupplier;
+class IDataChunkSource;
 
 namespace execution {
 class Context;
@@ -42,6 +43,8 @@ class CsvReader {
 
   void read(std::shared_ptr<ReadLocalState> localState,
             execution::Context& ctx);
+
+  std::shared_ptr<IDataChunkSource> createChunkSource();
 
   result<std::shared_ptr<EntrySchema>> inferSchema();
 

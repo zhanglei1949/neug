@@ -494,6 +494,38 @@ CsvReader::CsvReader(std::shared_ptr<ReadSharedState> sharedState,
 
 CsvReader::~CsvReader() = default;
 
+std::shared_ptr<IDataChunkSource> CsvReader::createChunkSource() {
+  if (!sharedState_) {
+    THROW_INVALID_ARGUMENT_EXCEPTION("SharedState is null");
+  }
+  if (!optionsBuilder_) {
+    THROW_INVALID_ARGUMENT_EXCEPTION("Options builder is null");
+  }
+
+  const auto& fileSchema = sharedState_->schema.file;
+  ReadOptions readOpts;
+  const bool use_batch_read = readOpts.batch_read.get(fileSchema.options);
+  if (!use_batch_read || sharedState_->skipRows) {
+    return nullptr;
+  }
+
+  auto config = optionsBuilder_->build();
+  if (!optionsBuilder_->projectColumns(config)) {
+    LOG(WARNING) << "Failed to set column projection, using all columns";
+  }
+
+  auto read_config = read_config_for_supplier(config);
+  if (!sharedState_->projectColumns.empty()) {
+    read_config.include_columns = config.include_columns;
+  }
+
+  const auto& paths = fileSchema.paths;
+  if (paths.empty()) {
+    THROW_INVALID_ARGUMENT_EXCEPTION("No file paths provided");
+  }
+  return std::make_shared<CSVChunkSource>(paths, std::move(read_config));
+}
+
 void CsvReader::read(std::shared_ptr<ReadLocalState> /*localState*/,
                      execution::Context& ctx) {
   if (!sharedState_) {

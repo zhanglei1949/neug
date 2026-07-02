@@ -14,6 +14,8 @@
  */
 
 #pragma once
+#include <memory>
+#include <optional>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -25,10 +27,13 @@
 #include "neug/utils/result.h"
 
 namespace neug {
+class IDataChunkSource;
+class IDataChunkSupplier;
 class StorageReadInterface;
 
 namespace execution {
 class IContextColumn;
+class IContextData;
 
 /**
  * @brief Context is a multi-chunk container passed between operators.
@@ -43,10 +48,21 @@ class IContextColumn;
 class Context {
  public:
   Context();
+  Context(const Context& other);
+  Context& operator=(const Context& other);
+  Context(Context&& other) noexcept = default;
+  Context& operator=(Context&& other) noexcept = default;
 
   ~Context() = default;
 
   void clear();
+
+  bool is_streaming() const;
+  void set_streaming_source(std::shared_ptr<IDataChunkSource> source);
+  std::shared_ptr<IDataChunkSource> make_source(
+      const std::vector<int32_t>& aliases) const;
+  std::shared_ptr<IDataChunkSupplier> make_supplier(
+      const std::vector<int32_t>& aliases) const;
 
   // --- Chunk access ---
 
@@ -79,14 +95,14 @@ class Context {
   neug::result<Context> apply_chunks(F&& func) {
     Context out;
     out.tag_ids = std::move(tag_ids);
-    std::vector<ContextChunk> in = std::move(chunks_);
-    out.chunks_.reserve(in.size());
+    std::vector<ContextChunk> in = std::move(chunks_mut());
+    out.chunks_mut().reserve(in.size());
     for (auto& cc : in) {
       auto r = func(std::move(cc));
       if (!r) {
         return tl::make_unexpected(r.error());
       }
-      out.chunks_.push_back(std::move(*r));
+      out.chunks_mut().push_back(std::move(*r));
     }
     return out;
   }
@@ -106,10 +122,17 @@ class Context {
   /// Returns the total number of rows across all chunks.
   size_t row_num() const;
 
+  /// Returns row count without forcing a streaming Context to materialize.
+  std::optional<size_t> row_num_if_materialized() const;
+
   std::vector<int> tag_ids;
 
  private:
-  std::vector<ContextChunk> chunks_;
+  void ensure_materialized() const;
+  std::vector<ContextChunk>& chunks_mut();
+  const std::vector<ContextChunk>& chunks_ref() const;
+
+  mutable std::shared_ptr<IContextData> data_;
 };
 
 class ContextMeta {

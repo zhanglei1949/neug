@@ -41,6 +41,7 @@
 #include "neug/utils/result.h"
 
 namespace neug {
+class IDataChunkSource;
 
 namespace execution {
 class EdgeRecord;
@@ -309,6 +310,10 @@ class PropertyGraph {
 
   Status BatchAddEdges(label_t src_label, label_t dst_label, label_t edge_label,
                        std::shared_ptr<IDataChunkSupplier> supplier);
+
+  Status BatchBuildEdges(label_t src_label, label_t dst_label,
+                         label_t edge_label,
+                         std::shared_ptr<IDataChunkSource> source);
 
   Status BatchDeleteVertices(label_t v_label_id,
                              const std::vector<vid_t>& vids);

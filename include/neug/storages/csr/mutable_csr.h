@@ -51,6 +51,12 @@ static_assert(
     "atomic<int> must have the same size as int on supported platforms");
 
 template <typename EDATA_T>
+class MutableCsrBulkBuildAccess;
+
+template <typename EDATA_T>
+class SingleMutableCsrBulkBuildAccess;
+
+template <typename EDATA_T>
 class MutableCsr : public TypedCsrBase<EDATA_T> {
  public:
   using data_t = EDATA_T;
@@ -235,6 +241,8 @@ class MutableCsr : public TypedCsrBase<EDATA_T> {
   }
 
  private:
+  friend class MutableCsrBulkBuildAccess<EDATA_T>;
+
   std::unique_ptr<SpinLock[]> locks_;
   std::shared_ptr<IDataContainer> adj_list_buffer_;
   std::shared_ptr<IDataContainer> degree_list_;
@@ -382,6 +390,8 @@ class SingleMutableCsr : public TypedCsrBase<EDATA_T> {
   }
 
  private:
+  friend class SingleMutableCsrBulkBuildAccess<EDATA_T>;
+
   std::shared_ptr<IDataContainer> nbr_list_;
   std::atomic<uint64_t> edge_num_{0};
   CsrPrefetchPolicy prefetch_policy_;
@@ -478,6 +488,149 @@ class EmptyCsr : public TypedCsrBase<EDATA_T> {
   static std::string type_name() {
     return "empty_csr<" + type_name_string<EDATA_T>() + ">";
   }
+};
+
+template <typename EDATA_T>
+class MutableCsrBulkBuildAccess {
+ public:
+  using csr_t = MutableCsr<EDATA_T>;
+  using nbr_t = typename csr_t::nbr_t;
+
+  explicit MutableCsrBulkBuildAccess(csr_t& csr) : csr_(csr) {}
+
+  void BeginCount(vid_t vnum) {
+    csr_.resize(vnum);
+    refresh_metadata_ptrs();
+    CHECK(adj_lists_ != nullptr || vnum == 0);
+    CHECK(degrees_ != nullptr || vnum == 0);
+    CHECK(caps_ != nullptr || vnum == 0);
+    for (vid_t i = 0; i < vnum; ++i) {
+      adj_lists_[i] = nullptr;
+      degrees_[i].store(0, std::memory_order_relaxed);
+      caps_[i] = 0;
+    }
+    csr_.edge_num_.store(0, std::memory_order_relaxed);
+    csr_.unsorted_since_ = 0;
+  }
+
+  void Count(vid_t src) {
+    CHECK_LT(src, vertex_capacity_);
+    int degree = degrees_[src].load(std::memory_order_relaxed);
+    CHECK_LT(degree, std::numeric_limits<int>::max());
+    degrees_[src].store(degree + 1, std::memory_order_relaxed);
+  }
+
+  void AllocateFromCounts() {
+    refresh_metadata_ptrs();
+    size_t total_capacity = 0;
+    for (size_t i = 0; i < vertex_capacity_; ++i) {
+      int degree = degrees_[i].load(std::memory_order_relaxed);
+      caps_[i] = degree;
+      total_capacity += static_cast<size_t>(degree);
+    }
+    CHECK_LE(total_capacity,
+             std::numeric_limits<size_t>::max() / sizeof(nbr_t));
+    csr_.nbr_list_->Resize(total_capacity * sizeof(nbr_t));
+    nbrs_ = reinterpret_cast<nbr_t*>(csr_.nbr_list_->GetData());
+    CHECK(nbrs_ != nullptr || total_capacity == 0);
+
+    size_t offset = 0;
+    for (size_t i = 0; i < vertex_capacity_; ++i) {
+      adj_lists_[i] = caps_[i] == 0 ? nullptr : nbrs_ + offset;
+      offset += static_cast<size_t>(caps_[i]);
+      degrees_[i].store(0, std::memory_order_relaxed);
+    }
+  }
+
+  void Put(vid_t src, vid_t dst, const EDATA_T& data, timestamp_t ts) {
+    CHECK_LT(src, vertex_capacity_);
+    int slot = degrees_[src].fetch_add(1, std::memory_order_relaxed);
+    CHECK_LT(slot, caps_[src]);
+    auto& nbr = adj_lists_[src][slot];
+    nbr.set_neighbor(dst);
+    nbr.set_data(data, ts);
+  }
+
+  void Finish(timestamp_t ts) {
+    uint64_t edge_num = 0;
+    for (size_t i = 0; i < vertex_capacity_; ++i) {
+      edge_num +=
+          static_cast<uint64_t>(degrees_[i].load(std::memory_order_relaxed));
+    }
+    csr_.edge_num_.store(edge_num, std::memory_order_relaxed);
+    if (ts < csr_.unsorted_since_) {
+      csr_.unsorted_since_ = 0;
+    }
+    csr_.refresh_prefetch_policy();
+  }
+
+ private:
+  void refresh_metadata_ptrs() {
+    vertex_capacity_ = csr_.vertex_capacity();
+    adj_lists_ = reinterpret_cast<nbr_t**>(
+        csr_.adj_list_buffer_ == nullptr ? nullptr
+                                         : csr_.adj_list_buffer_->GetData());
+    degrees_ = reinterpret_cast<std::atomic<int>*>(
+        csr_.degree_list_ == nullptr ? nullptr : csr_.degree_list_->GetData());
+    caps_ = reinterpret_cast<int*>(
+        csr_.cap_list_ == nullptr ? nullptr : csr_.cap_list_->GetData());
+  }
+
+  csr_t& csr_;
+  size_t vertex_capacity_ = 0;
+  nbr_t** adj_lists_ = nullptr;
+  std::atomic<int>* degrees_ = nullptr;
+  int* caps_ = nullptr;
+  nbr_t* nbrs_ = nullptr;
+};
+
+template <typename EDATA_T>
+class SingleMutableCsrBulkBuildAccess {
+ public:
+  using csr_t = SingleMutableCsr<EDATA_T>;
+  using nbr_t = typename csr_t::nbr_t;
+
+  explicit SingleMutableCsrBulkBuildAccess(csr_t& csr) : csr_(csr) {}
+
+  void BeginCount(vid_t vnum) {
+    csr_.resize(vnum);
+    refresh_ptrs();
+    CHECK(nbrs_ != nullptr || vnum == 0);
+    for (vid_t i = 0; i < vnum; ++i) {
+      nbrs_[i].set_timestamp(INVALID_TIMESTAMP);
+    }
+    csr_.edge_num_.store(0, std::memory_order_relaxed);
+  }
+
+  void Count(vid_t /*src*/) {}
+
+  void AllocateFromCounts() {}
+
+  void Put(vid_t src, vid_t dst, const EDATA_T& data, timestamp_t ts) {
+    CHECK_LT(src, vertex_capacity_);
+    auto& nbr = nbrs_[src];
+    if (nbr.get_timestamp() != INVALID_TIMESTAMP) {
+      LOG(WARNING) << "duplicate source vertex in single-edge CSR bulk build: "
+                   << src << ", overwriting previous edge";
+    } else {
+      csr_.edge_num_.fetch_add(1, std::memory_order_relaxed);
+    }
+    nbr.set_neighbor(dst);
+    nbr.set_data(data, ts);
+  }
+
+  void Finish(timestamp_t /*ts*/) { csr_.refresh_prefetch_policy(); }
+
+ private:
+  void refresh_ptrs() {
+    vertex_capacity_ = csr_.vertex_capacity();
+    nbrs_ = reinterpret_cast<nbr_t*>(
+        csr_.nbr_list_ == nullptr ? nullptr : csr_.nbr_list_->GetData());
+  }
+
+  csr_t& csr_;
+  size_t vertex_capacity_ = 0;
+  nbr_t* nbrs_ = nullptr;
 };
 
 }  // namespace neug

@@ -268,7 +268,8 @@ void append_csv_field_to_builder(
 
 struct CsvSupplierRuntime {
   explicit CsvSupplierRuntime(const std::string& file_path,
-                              const CsvReadConfig& config)
+                              const CsvReadConfig& config,
+                              CsvRowCountMode row_count_mode)
       : file_path_(file_path),
         csv_format_(build_csv_format(config)),
         selected_column_names_(resolve_selected_column_names(config)),
@@ -286,7 +287,8 @@ struct CsvSupplierRuntime {
     if (selected_column_indices_.empty()) {
       THROW_SCHEMA_MISMATCH("No columns selected for CSV file: " + file_path_);
     }
-    row_num_ = count_rows();
+    row_num_ = row_count_mode == CsvRowCountMode::kCountOnOpen ? count_rows()
+                                                               : kUnknownRowNum;
     reset_reader();
   }
 
@@ -700,10 +702,11 @@ std::vector<std::string> columnMappingsToSelectedCols(
 }
 
 CSVChunkSupplier::CSVChunkSupplier(const std::string& file_path,
-                                   CsvReadConfig config)
+                                   CsvReadConfig config,
+                                   CsvRowCountMode row_count_mode)
     : file_path_(file_path) {
-  runtime_ = std::make_unique<CsvSupplierRuntime>(file_path, config);
-  row_num_ = runtime_->row_num();
+  runtime_ =
+      std::make_unique<CsvSupplierRuntime>(file_path, config, row_count_mode);
   VLOG(10) << "Finish init CSVChunkSupplier for file: " << file_path_;
 }
 
@@ -714,6 +717,56 @@ std::shared_ptr<execution::DataChunk> CSVChunkSupplier::GetNextChunk() {
     THROW_IO_EXCEPTION("CSV runtime is null for file: " + file_path_);
   }
   return runtime_->get_next_chunk();
+}
+
+int64_t CSVChunkSupplier::RowNum() const {
+  if (!runtime_) {
+    return kUnknownRowNum;
+  }
+  return runtime_->row_num();
+}
+
+namespace {
+
+class ChainedChunkSupplier final : public IDataChunkSupplier {
+ public:
+  ChainedChunkSupplier(std::vector<std::string> file_paths,
+                       CsvReadConfig config)
+      : file_paths_(std::move(file_paths)), config_(std::move(config)) {}
+
+  std::shared_ptr<execution::DataChunk> GetNextChunk() override {
+    while (index_ < file_paths_.size()) {
+      if (current_ == nullptr) {
+        current_ = std::make_shared<CSVChunkSupplier>(
+            file_paths_[index_], config_, CsvRowCountMode::kUnknown);
+      }
+      auto chunk = current_->GetNextChunk();
+      if (chunk) {
+        return chunk;
+      }
+      current_.reset();
+      ++index_;
+    }
+    return nullptr;
+  }
+
+  int64_t RowNum() const override { return kUnknownRowNum; }
+
+ private:
+  std::vector<std::string> file_paths_;
+  CsvReadConfig config_;
+  std::shared_ptr<IDataChunkSupplier> current_;
+  size_t index_ = 0;
+};
+
+}  // namespace
+
+CSVChunkSource::CSVChunkSource(std::vector<std::string> file_paths,
+                               CsvReadConfig config)
+    : file_paths_(std::move(file_paths)), config_(std::move(config)) {}
+
+std::shared_ptr<IDataChunkSupplier> CSVChunkSource::Open() const {
+  return std::make_shared<ChainedChunkSupplier>(file_paths_, config_);
 }
 
 void fillVertexReaderMeta(

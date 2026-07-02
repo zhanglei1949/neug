@@ -288,4 +288,12 @@ Status StorageTPInsertInterface::BatchAddEdges(
                 "BatchAddEdges is not supported in TP mode currently.");
 }
 
+Status StorageTPInsertInterface::BatchBuildEdges(
+    label_t src_label, label_t dst_label, label_t edge_label,
+    std::shared_ptr<IDataChunkSource> source) {
+  LOG(ERROR) << "BatchBuildEdges is not supported in TP mode currently.";
+  return Status(StatusCode::ERR_NOT_SUPPORTED,
+                "BatchBuildEdges is not supported in TP mode currently.");
+}
+
 }  // namespace neug

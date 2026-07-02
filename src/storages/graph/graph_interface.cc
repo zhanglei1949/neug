@@ -124,6 +124,13 @@ Status StorageAPUpdateInterface::BatchAddEdges(
                               std::move(supplier));
 }
 
+Status StorageAPUpdateInterface::BatchBuildEdges(
+    label_t src_label, label_t dst_label, label_t edge_label,
+    std::shared_ptr<IDataChunkSource> source) {
+  return graph_.BatchBuildEdges(src_label, dst_label, edge_label,
+                                std::move(source));
+}
+
 Status StorageAPUpdateInterface::BatchDeleteVertices(
     label_t v_label_id, const std::vector<vid_t>& vids) {
   return graph_.BatchDeleteVertices(v_label_id, vids);

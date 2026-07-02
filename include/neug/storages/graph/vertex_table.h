@@ -292,17 +292,18 @@ class VertexTable {
   template <typename PK_T>
   void insert_vertices_impl(std::shared_ptr<IDataChunkSupplier> supplier) {
     auto row_nums = supplier->RowNum();
-    if (row_nums <= 0) {
-      LOG(WARNING) << "Row number from supplier is negative, treat it as 0.";
-      row_nums = 0;
-    }
-    size_t new_size = indexer_->size() + row_nums;
-    if (new_size > indexer_->capacity()) {
-      size_t cap = indexer_->capacity();
-      while (new_size >= cap) {
-        cap = cap < 4096 ? 4096 : cap + cap / 4;
+    if (row_nums > 0) {
+      size_t new_size = indexer_->size() + static_cast<size_t>(row_nums);
+      if (new_size > indexer_->capacity()) {
+        size_t cap = indexer_->capacity();
+        while (new_size >= cap) {
+          cap = cap < 4096 ? 4096 : cap + cap / 4;
+        }
+        EnsureCapacity(cap);
       }
-      EnsureCapacity(cap);
+    } else if (row_nums != 0 && row_nums != kUnknownRowNum) {
+      LOG(WARNING) << "Unexpected negative row number from supplier: "
+                   << row_nums << ", skip initial capacity reservation.";
     }
     std::shared_mutex rw_mutex;
     while (true) {

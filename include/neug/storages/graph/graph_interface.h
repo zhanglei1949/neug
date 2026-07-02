@@ -24,6 +24,7 @@
 #include "neug/utils/property/types.h"
 
 namespace neug {
+class IDataChunkSource;
 
 namespace graph_interface_impl {
 
@@ -444,6 +445,10 @@ class StorageInsertInterface : virtual public IStorageInterface {
   virtual Status BatchAddEdges(
       label_t src_label, label_t dst_label, label_t edge_label,
       std::shared_ptr<IDataChunkSupplier> supplier) = 0;
+
+  virtual Status BatchBuildEdges(label_t src_label, label_t dst_label,
+                                 label_t edge_label,
+                                 std::shared_ptr<IDataChunkSource> source) = 0;
 };
 
 /**
@@ -653,6 +658,9 @@ class StorageAPUpdateInterface : public StorageUpdateInterface {
       std::shared_ptr<IDataChunkSupplier> supplier) override;
   Status BatchAddEdges(label_t src_label, label_t dst_label, label_t edge_label,
                        std::shared_ptr<IDataChunkSupplier> supplier) override;
+  Status BatchBuildEdges(label_t src_label, label_t dst_label,
+                         label_t edge_label,
+                         std::shared_ptr<IDataChunkSource> source) override;
   Status BatchDeleteVertices(label_t v_label_id,
                              const std::vector<vid_t>& vids) override;
   Status BatchDeleteEdges(

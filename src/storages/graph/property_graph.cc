@@ -154,6 +154,18 @@ Status PropertyGraph::BatchAddEdges(
   return neug::Status::OK();
 }
 
+Status PropertyGraph::BatchBuildEdges(
+    label_t src_v_label, label_t dst_v_label, label_t e_label,
+    std::shared_ptr<IDataChunkSource> source) {
+  RETURN_IF_NOT_OK(edge_triplet_check(src_v_label, dst_v_label, e_label));
+  size_t index = schema_.generate_edge_label(src_v_label, dst_v_label, e_label);
+  assert(edge_tables_.count(index) > 0);
+  edge_tables_.at(index).BatchBuildEdges(
+      vertex_tables_.at(src_v_label).get_indexer(),
+      vertex_tables_.at(dst_v_label).get_indexer(), std::move(source));
+  return neug::Status::OK();
+}
+
 Status PropertyGraph::CreateVertexType(const CreateVertexTypeParam& config) {
   if (schema_.is_vertex_label_valid(config.GetVertexLabel())) {
     return Status(StatusCode::ERR_SCHEMA_MISMATCH,

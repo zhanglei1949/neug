@@ -74,21 +74,48 @@ class IDataChunkSupplier {
   virtual int64_t RowNum() const = 0;
 };
 
+class IDataChunkSource {
+ public:
+  virtual ~IDataChunkSource() = default;
+  virtual std::shared_ptr<IDataChunkSupplier> Open() const = 0;
+  virtual bool rewindable() const = 0;
+};
+
+inline constexpr int64_t kUnknownRowNum = -1;
+
+enum class CsvRowCountMode {
+  kCountOnOpen,
+  kUnknown,
+};
+
 /// csv-parser based supplier. Reads CSV in chunks and yields ValueColumns.
 class CSVChunkSupplier : public IDataChunkSupplier {
  public:
-  CSVChunkSupplier(const std::string& file_path, CsvReadConfig config);
+  CSVChunkSupplier(
+      const std::string& file_path, CsvReadConfig config,
+      CsvRowCountMode row_count_mode = CsvRowCountMode::kCountOnOpen);
 
   ~CSVChunkSupplier() override;
 
   std::shared_ptr<execution::DataChunk> GetNextChunk() override;
 
-  int64_t RowNum() const override { return row_num_; }
+  int64_t RowNum() const override;
 
  private:
-  int64_t row_num_ = 0;
   std::string file_path_;
   std::unique_ptr<CsvSupplierRuntime> runtime_;
+};
+
+class CSVChunkSource : public IDataChunkSource {
+ public:
+  CSVChunkSource(std::vector<std::string> file_paths, CsvReadConfig config);
+
+  std::shared_ptr<IDataChunkSupplier> Open() const override;
+  bool rewindable() const override { return true; }
+
+ private:
+  std::vector<std::string> file_paths_;
+  CsvReadConfig config_;
 };
 
 using CSVStreamChunkSupplier = CSVChunkSupplier;

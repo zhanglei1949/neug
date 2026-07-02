@@ -22,9 +22,13 @@
 #include <rapidjson/writer.h>
 
 #include <stddef.h>
+#include <algorithm>
+#include <cctype>
 #include <cstdint>
+#include <cstdlib>
 #include <ostream>
 #include <stdexcept>
+#include <string>
 #include <tuple>
 #include "neug/utils/exception/exception.h"
 
@@ -40,6 +44,30 @@ namespace neug {
 namespace execution {
 
 namespace ops {
+
+namespace {
+
+bool is_explicitly_disabled_env(const char* name) {
+  const char* value = std::getenv(name);
+  if (value == nullptr) {
+    return false;
+  }
+  std::string normalized(value);
+  std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                 [](unsigned char ch) { return std::tolower(ch); });
+  return normalized == "0" || normalized == "false" || normalized == "off" ||
+         normalized == "no";
+}
+
+}  // namespace
+
+bool is_copy_streaming_enabled() {
+  return !is_explicitly_disabled_env("NEUG_COPY_STREAMING");
+}
+
+bool is_edge_bulk_build_enabled() {
+  return !is_explicitly_disabled_env("NEUG_EDGE_BULK_BUILD");
+}
 
 bool check_csv_import_options(
     const std::unordered_map<std::string, std::string>& options) {
@@ -326,23 +354,18 @@ class MultiChunkSupplier : public IDataChunkSupplier {
 std::shared_ptr<IDataChunkSupplier> create_data_chunk_supplier(
     const Context& ctx,
     const std::vector<std::pair<int32_t, std::string>>& prop_mappings) {
-  std::vector<std::shared_ptr<DataChunk>> projected_chunks;
-  projected_chunks.reserve(ctx.chunk_num());
-  for (size_t i = 0; i < ctx.chunk_num(); ++i) {
-    const auto& chunk = ctx.chunk(i).chunk();
-    auto out_chunk = std::make_shared<DataChunk>();
-    for (size_t j = 0; j < prop_mappings.size(); ++j) {
-      auto tag_id = prop_mappings[j].first;
-      auto column = chunk.get(tag_id);
-      if (column == nullptr) {
-        THROW_INTERNAL_EXCEPTION("Column not found for tag id: " +
-                                 std::to_string(tag_id));
-      }
-      out_chunk->set(static_cast<int>(j), column);
-    }
-    projected_chunks.push_back(std::move(out_chunk));
+  return create_data_chunk_source(ctx, prop_mappings)->Open();
+}
+
+std::shared_ptr<IDataChunkSource> create_data_chunk_source(
+    const Context& ctx,
+    const std::vector<std::pair<int32_t, std::string>>& prop_mappings) {
+  std::vector<int32_t> aliases;
+  aliases.reserve(prop_mappings.size());
+  for (const auto& mapping : prop_mappings) {
+    aliases.push_back(mapping.first);
   }
-  return std::make_shared<MultiChunkSupplier>(std::move(projected_chunks));
+  return ctx.make_source(aliases);
 }
 
 std::vector<std::string> match_files_with_pattern(

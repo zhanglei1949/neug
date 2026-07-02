@@ -1202,6 +1202,14 @@ Status StorageTPUpdateInterface::BatchAddEdges(
                 "BatchAddEdges is not supported in TP mode currently.");
 }
 
+Status StorageTPUpdateInterface::BatchBuildEdges(
+    label_t src_label, label_t dst_label, label_t edge_label,
+    std::shared_ptr<IDataChunkSource> source) {
+  LOG(ERROR) << "BatchBuildEdges is not supported in TP mode currently.";
+  return Status(StatusCode::ERR_NOT_SUPPORTED,
+                "BatchBuildEdges is not supported in TP mode currently.");
+}
+
 Status StorageTPUpdateInterface::BatchDeleteVertices(
     label_t v_label_id, const std::vector<vid_t>& vids) {
   for (vid_t lid : vids) {

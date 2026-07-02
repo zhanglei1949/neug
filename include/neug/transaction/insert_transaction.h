@@ -255,6 +255,9 @@ class StorageTPInsertInterface : public StorageInsertInterface {
 
   Status BatchAddEdges(label_t src_label, label_t dst_label, label_t edge_label,
                        std::shared_ptr<IDataChunkSupplier> supplier) override;
+  Status BatchBuildEdges(label_t src_label, label_t dst_label,
+                         label_t edge_label,
+                         std::shared_ptr<IDataChunkSource> source) override;
 
  private:
   InsertTransaction& txn_;

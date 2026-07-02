@@ -41,6 +41,7 @@ class CheckpointManifest;
 class PropertyGraph;
 
 class IDataChunkSupplier;
+class IDataChunkSource;
 
 class EdgeTable {
  public:
@@ -134,6 +135,10 @@ class EdgeTable {
   void BatchAddEdges(const IndexerType& src_indexer,
                      const IndexerType& dst_indexer,
                      std::shared_ptr<IDataChunkSupplier> supplier);
+
+  void BatchBuildEdges(const IndexerType& src_indexer,
+                       const IndexerType& dst_indexer,
+                       std::shared_ptr<IDataChunkSource> source);
 
   // Add edges in batch to the edge table.
   void BatchAddEdges(

@@ -29,6 +29,23 @@
 namespace neug {
 namespace test {
 
+class GeneratedChunkSource : public IDataChunkSource {
+ public:
+  explicit GeneratedChunkSource(
+      std::vector<std::shared_ptr<execution::DataChunk>> chunks)
+      : chunks_(std::move(chunks)) {}
+
+  std::shared_ptr<IDataChunkSupplier> Open() const override {
+    auto chunks = chunks_;
+    return std::make_shared<::GeneratedChunkSupplier>(std::move(chunks));
+  }
+
+  bool rewindable() const override { return true; }
+
+ private:
+  std::vector<std::shared_ptr<execution::DataChunk>> chunks_;
+};
+
 class EdgeTableTest : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -59,6 +76,11 @@ class EdgeTableTest : public ::testing::Test {
         neug::EdgeStrategy::kMultiple, neug::EdgeStrategy::kMultiple, true,
         true, std::nullopt, "person creates comment edge");
     schema_.AddEdgeLabel(
+        "person", "comment", "create_sorted", {neug::DataTypeId::kInt32},
+        {"data"}, neug::EdgeStrategy::kMultiple, neug::EdgeStrategy::kMultiple,
+        true, true, std::make_optional<std::string>("data"),
+        "person creates comment edge sorted by data on compaction");
+    schema_.AddEdgeLabel(
         "person", "comment", "create2", {neug::DataTypeId::kVarchar}, {"data"},
         neug::EdgeStrategy::kMultiple, neug::EdgeStrategy::kMultiple, true,
         true, std::nullopt, "person creates comment edge");
@@ -72,6 +94,7 @@ class EdgeTableTest : public ::testing::Test {
     dst_label_ = schema_.get_vertex_label_id("comment");
     edge_label_empty_ = schema_.get_edge_label_id("create0");
     edge_label_int_ = schema_.get_edge_label_id("create1");
+    edge_label_sorted_ = schema_.get_edge_label_id("create_sorted");
     edge_label_str_ = schema_.get_edge_label_id("create2");
     edge_label_str_int_ = schema_.get_edge_label_id("create3");
     allocator_dir_ =
@@ -129,6 +152,12 @@ class EdgeTableTest : public ::testing::Test {
       std::vector<std::shared_ptr<neug::execution::DataChunk>>&& chunks) {
     auto supplier = std::make_shared<GeneratedChunkSupplier>(std::move(chunks));
     edge_table->BatchAddEdges(src_indexer, dst_indexer, supplier);
+  }
+
+  void BatchBuild(
+      std::vector<std::shared_ptr<neug::execution::DataChunk>>&& chunks) {
+    auto source = std::make_shared<GeneratedChunkSource>(std::move(chunks));
+    edge_table->BatchBuildEdges(src_indexer, dst_indexer, source);
   }
 
   size_t ExpectedBatchInsertCapacity(size_t inserted_edge_num) const {
@@ -238,7 +267,7 @@ class EdgeTableTest : public ::testing::Test {
   neug::LFIndexer<neug::vid_t> dst_indexer;
   neug::Schema schema_;
   neug::label_t src_label_, dst_label_, edge_label_empty_, edge_label_int_,
-      edge_label_str_, edge_label_str_int_;
+      edge_label_sorted_, edge_label_str_, edge_label_str_int_;
   std::string allocator_dir_;
 
  private:
@@ -696,6 +725,265 @@ TEST_F(EdgeTableTest, TestBatchAddEdgesBundled) {
   this->OutputOutgoingEndpoints(srcs, dsts, neug::MAX_TIMESTAMP);
   ASSERT_EQ(srcs.size(), edge_num + more_edge_num);
   ASSERT_EQ(dsts.size(), edge_num + more_edge_num);
+}
+
+TEST_F(EdgeTableTest, TestBatchBuildEdgesBundledInt32) {
+  auto ckp = make_checkpoint(workspace());
+  int64_t src_num = 5;
+  int64_t dst_num = 4;
+  std::vector<int64_t> src_list = {0, 1, 1, 2, 99, 3, 4, 0};
+  std::vector<int64_t> dst_list = {1, 2, 3, 99, 0, 0, 1, 2};
+  std::vector<int32_t> data_list = {10, 20, 30, 40, 50, 60, 70, 80};
+
+  auto src_arrs = split_column_to_chunks(src_list, 3);
+  auto dst_arrs = split_column_to_chunks(dst_list, 3);
+  auto data_arrs = split_column_to_chunks(data_list, 3);
+  auto batches = convert_to_data_chunks({src_arrs, dst_arrs, data_arrs});
+
+  this->InitIndexers(*ckp, src_num, dst_num);
+  this->ConstructEdgeTable(src_label_, dst_label_, edge_label_int_);
+  this->OpenEdgeTableInMemory(ckp, neug::CheckpointManifest(), 0, 0);
+  this->BatchBuild(std::move(batches));
+
+  std::vector<std::tuple<int64_t, int64_t, int32_t>> expected;
+  for (size_t i = 0; i < src_list.size(); ++i) {
+    if (src_list[i] < src_num && dst_list[i] < dst_num) {
+      expected.emplace_back(src_list[i], dst_list[i], data_list[i]);
+    }
+  }
+  std::sort(expected.begin(), expected.end());
+  EXPECT_EQ(this->edge_table->EdgeNum(), expected.size());
+  this->ExpectBundledStats(expected.size());
+
+  {
+    std::vector<int64_t> srcs, dsts;
+    std::vector<int32_t> data;
+    this->OutputOutgoingEndpoints(srcs, dsts, neug::MAX_TIMESTAMP);
+    this->OutputOutgoingEdgeData<int32_t>(data, neug::MAX_TIMESTAMP, 0);
+    ASSERT_EQ(srcs.size(), expected.size());
+    ASSERT_EQ(data.size(), expected.size());
+    std::vector<std::tuple<int64_t, int64_t, int32_t>> output;
+    for (size_t i = 0; i < srcs.size(); ++i) {
+      output.emplace_back(srcs[i], dsts[i], data[i]);
+    }
+    std::sort(output.begin(), output.end());
+    EXPECT_EQ(output, expected);
+  }
+  {
+    std::vector<int64_t> srcs, dsts;
+    std::vector<int32_t> data;
+    this->OutputIncomingEndpoints(srcs, dsts, neug::MAX_TIMESTAMP);
+    this->OutputIncomingEdgeData<int32_t>(data, neug::MAX_TIMESTAMP, 0);
+    ASSERT_EQ(srcs.size(), expected.size());
+    ASSERT_EQ(data.size(), expected.size());
+    std::vector<std::tuple<int64_t, int64_t, int32_t>> output;
+    for (size_t i = 0; i < srcs.size(); ++i) {
+      output.emplace_back(srcs[i], dsts[i], data[i]);
+    }
+    std::sort(output.begin(), output.end());
+    EXPECT_EQ(output, expected);
+  }
+}
+
+TEST_F(EdgeTableTest, TestBatchBuildEdgesBundledEmpty) {
+  auto ckp = make_checkpoint(workspace());
+  int64_t src_num = 4;
+  int64_t dst_num = 4;
+  std::vector<int64_t> src_list = {0, 1, 2, 3, 100};
+  std::vector<int64_t> dst_list = {1, 2, 3, 0, 1};
+
+  auto src_arrs = split_column_to_chunks(src_list, 2);
+  auto dst_arrs = split_column_to_chunks(dst_list, 2);
+  auto batches = convert_to_data_chunks({src_arrs, dst_arrs});
+
+  this->InitIndexers(*ckp, src_num, dst_num);
+  this->ConstructEdgeTable(src_label_, dst_label_, edge_label_empty_);
+  this->OpenEdgeTableInMemory(ckp, neug::CheckpointManifest(), 0, 0);
+  this->BatchBuild(std::move(batches));
+
+  std::vector<std::pair<int64_t, int64_t>> expected = {
+      {0, 1}, {1, 2}, {2, 3}, {3, 0}};
+  std::sort(expected.begin(), expected.end());
+  EXPECT_EQ(this->edge_table->EdgeNum(), expected.size());
+  this->ExpectBundledStats(expected.size());
+
+  std::vector<int64_t> srcs, dsts;
+  this->OutputOutgoingEndpoints(srcs, dsts, neug::MAX_TIMESTAMP);
+  ASSERT_EQ(srcs.size(), expected.size());
+  std::vector<std::pair<int64_t, int64_t>> output;
+  for (size_t i = 0; i < srcs.size(); ++i) {
+    output.emplace_back(srcs[i], dsts[i]);
+  }
+  std::sort(output.begin(), output.end());
+  EXPECT_EQ(output, expected);
+}
+
+TEST_F(EdgeTableTest, TestBatchBuildEdgesCompactSortsByEdgeData) {
+  auto ckp = make_checkpoint(workspace());
+  std::vector<int64_t> src_list = {0, 0, 0, 0};
+  std::vector<int64_t> dst_list = {0, 1, 2, 3};
+  std::vector<int32_t> data_list = {40, 10, 30, 20};
+
+  auto src_arrs = split_column_to_chunks(src_list, 2);
+  auto dst_arrs = split_column_to_chunks(dst_list, 2);
+  auto data_arrs = split_column_to_chunks(data_list, 2);
+  auto batches = convert_to_data_chunks({src_arrs, dst_arrs, data_arrs});
+
+  this->InitIndexers(*ckp, 1, 4);
+  this->ConstructEdgeTable(src_label_, dst_label_, edge_label_sorted_);
+  this->OpenEdgeTableInMemory(ckp, neug::CheckpointManifest(), 0, 0);
+  this->BatchBuild(std::move(batches));
+
+  std::vector<int32_t> before_compact;
+  this->OutputOutgoingEdgeData<int32_t>(before_compact, neug::MAX_TIMESTAMP, 0);
+  ASSERT_EQ(before_compact.size(), data_list.size());
+  EXPECT_NE(before_compact, (std::vector<int32_t>{10, 20, 30, 40}));
+
+  const auto& sort_key =
+      schema_.get_sort_key_for_nbr(src_label_, dst_label_, edge_label_sorted_);
+  ASSERT_TRUE(sort_key.has_value());
+  this->edge_table->Compact(sort_key, neug::MAX_TIMESTAMP);
+
+  std::vector<int32_t> after_compact;
+  this->OutputOutgoingEdgeData<int32_t>(after_compact, neug::MAX_TIMESTAMP, 0);
+  EXPECT_EQ(after_compact, (std::vector<int32_t>{10, 20, 30, 40}));
+}
+
+TEST_F(EdgeTableTest, TestBatchBuildEdgesSingleOutgoing) {
+  auto ckp = make_checkpoint(workspace());
+  schema_.AddEdgeLabel(
+      "person", "comment", "single_create", {neug::DataTypeId::kInt32},
+      {"data"}, neug::EdgeStrategy::kSingle, neug::EdgeStrategy::kMultiple,
+      true, true, std::nullopt, "single outgoing create edge");
+  auto single_edge_label = schema_.get_edge_label_id("single_create");
+
+  int64_t src_num = 4;
+  int64_t dst_num = 3;
+  std::vector<int64_t> src_list = {0, 1, 2, 3};
+  std::vector<int64_t> dst_list = {1, 2, 1, 0};
+  std::vector<int32_t> data_list = {11, 22, 33, 44};
+
+  auto src_arrs = split_column_to_chunks(src_list, 2);
+  auto dst_arrs = split_column_to_chunks(dst_list, 2);
+  auto data_arrs = split_column_to_chunks(data_list, 2);
+  auto batches = convert_to_data_chunks({src_arrs, dst_arrs, data_arrs});
+
+  this->InitIndexers(*ckp, src_num, dst_num);
+  this->ConstructEdgeTable(src_label_, dst_label_, single_edge_label);
+  this->OpenEdgeTableInMemory(ckp, neug::CheckpointManifest(), 0, 0);
+  this->BatchBuild(std::move(batches));
+
+  EXPECT_EQ(this->edge_table->EdgeNum(), src_list.size());
+  std::vector<int64_t> srcs, dsts;
+  std::vector<int32_t> data;
+  this->OutputOutgoingEndpoints(srcs, dsts, neug::MAX_TIMESTAMP);
+  this->OutputOutgoingEdgeData<int32_t>(data, neug::MAX_TIMESTAMP, 0);
+  ASSERT_EQ(srcs.size(), src_list.size());
+  std::vector<std::tuple<int64_t, int64_t, int32_t>> output;
+  for (size_t i = 0; i < srcs.size(); ++i) {
+    output.emplace_back(srcs[i], dsts[i], data[i]);
+  }
+  std::sort(output.begin(), output.end());
+  std::vector<std::tuple<int64_t, int64_t, int32_t>> expected = {
+      {0, 1, 11}, {1, 2, 22}, {2, 1, 33}, {3, 0, 44}};
+  std::sort(expected.begin(), expected.end());
+  EXPECT_EQ(output, expected);
+}
+
+TEST_F(EdgeTableTest, TestBatchBuildEdgesFallbackForUnbundled) {
+  auto ckp = make_checkpoint(workspace());
+  int64_t src_num = 4;
+  int64_t dst_num = 4;
+  std::vector<int64_t> src_list = {0, 1, 2};
+  std::vector<int64_t> dst_list = {1, 2, 3};
+  std::vector<std::string> data0_list = {"a", "b", "c"};
+  std::vector<int32_t> data1_list = {7, 8, 9};
+
+  auto src_arrs = split_column_to_chunks(src_list, 2);
+  auto dst_arrs = split_column_to_chunks(dst_list, 2);
+  auto data0_arrs = split_column_to_chunks(data0_list, 2);
+  auto data1_arrs = split_column_to_chunks(data1_list, 2);
+  auto batches =
+      convert_to_data_chunks({src_arrs, dst_arrs, data0_arrs, data1_arrs});
+
+  this->InitIndexers(*ckp, src_num, dst_num);
+  this->ConstructEdgeTable(src_label_, dst_label_, edge_label_str_int_);
+  this->OpenEdgeTableInMemory(ckp, neug::CheckpointManifest(), 0, 0);
+  this->BatchBuild(std::move(batches));
+
+  EXPECT_EQ(this->edge_table->EdgeNum(), src_list.size());
+  this->ExpectUnbundledStats(src_list.size(),
+                             ExpectedBatchInsertCapacity(src_list.size()));
+  std::vector<int64_t> srcs, dsts;
+  std::vector<int32_t> data1;
+  this->OutputOutgoingEndpoints(srcs, dsts, neug::MAX_TIMESTAMP);
+  this->OutputOutgoingEdgeData<int32_t>(data1, neug::MAX_TIMESTAMP, 1);
+  ASSERT_EQ(srcs.size(), src_list.size());
+  std::vector<std::tuple<int64_t, int64_t, int32_t>> output;
+  for (size_t i = 0; i < srcs.size(); ++i) {
+    output.emplace_back(srcs[i], dsts[i], data1[i]);
+  }
+  std::sort(output.begin(), output.end());
+  std::vector<std::tuple<int64_t, int64_t, int32_t>> expected = {
+      {0, 1, 7}, {1, 2, 8}, {2, 3, 9}};
+  EXPECT_EQ(output, expected);
+}
+
+TEST_F(EdgeTableTest, TestBatchBuildEdgesOneDirectionAppendFallback) {
+  auto ckp = make_checkpoint(workspace());
+  schema_.AddEdgeLabel("person", "comment", "incoming_only_create",
+                       {neug::DataTypeId::kInt32}, {"data"},
+                       neug::EdgeStrategy::kNone, neug::EdgeStrategy::kMultiple,
+                       true, true, std::nullopt, "incoming-only create edge");
+  auto incoming_only_label = schema_.get_edge_label_id("incoming_only_create");
+
+  int64_t src_num = 4;
+  int64_t dst_num = 4;
+  std::vector<int64_t> first_src_list = {0, 1, 2};
+  std::vector<int64_t> first_dst_list = {1, 2, 3};
+  std::vector<int32_t> first_data_list = {10, 20, 30};
+  std::vector<int64_t> second_src_list = {3, 1};
+  std::vector<int64_t> second_dst_list = {0, 1};
+  std::vector<int32_t> second_data_list = {40, 50};
+
+  auto first_src_arrs = split_column_to_chunks(first_src_list, 2);
+  auto first_dst_arrs = split_column_to_chunks(first_dst_list, 2);
+  auto first_data_arrs = split_column_to_chunks(first_data_list, 2);
+  auto first_batches =
+      convert_to_data_chunks({first_src_arrs, first_dst_arrs, first_data_arrs});
+
+  auto second_src_arrs = split_column_to_chunks(second_src_list, 2);
+  auto second_dst_arrs = split_column_to_chunks(second_dst_list, 2);
+  auto second_data_arrs = split_column_to_chunks(second_data_list, 2);
+  auto second_batches = convert_to_data_chunks(
+      {second_src_arrs, second_dst_arrs, second_data_arrs});
+
+  this->InitIndexers(*ckp, src_num, dst_num);
+  this->ConstructEdgeTable(src_label_, dst_label_, incoming_only_label);
+  this->OpenEdgeTableInMemory(ckp, neug::CheckpointManifest(), 0, 0);
+  this->BatchBuild(std::move(first_batches));
+  EXPECT_EQ(this->edge_table->EdgeNum(), first_src_list.size());
+
+  this->BatchBuild(std::move(second_batches));
+  EXPECT_EQ(this->edge_table->EdgeNum(),
+            first_src_list.size() + second_src_list.size());
+
+  std::vector<int64_t> srcs, dsts;
+  std::vector<int32_t> data;
+  this->OutputIncomingEndpoints(srcs, dsts, neug::MAX_TIMESTAMP);
+  this->OutputIncomingEdgeData<int32_t>(data, neug::MAX_TIMESTAMP, 0);
+  ASSERT_EQ(srcs.size(), first_src_list.size() + second_src_list.size());
+  ASSERT_EQ(data.size(), srcs.size());
+
+  std::vector<std::tuple<int64_t, int64_t, int32_t>> output;
+  for (size_t i = 0; i < srcs.size(); ++i) {
+    output.emplace_back(srcs[i], dsts[i], data[i]);
+  }
+  std::sort(output.begin(), output.end());
+  std::vector<std::tuple<int64_t, int64_t, int32_t>> expected = {
+      {0, 1, 10}, {1, 1, 50}, {1, 2, 20}, {2, 3, 30}, {3, 0, 40}};
+  std::sort(expected.begin(), expected.end());
+  EXPECT_EQ(output, expected);
 }
 
 TEST_F(EdgeTableTest, TestBatchAddEdgesUnbundled) {

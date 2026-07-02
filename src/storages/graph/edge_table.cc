@@ -323,6 +323,153 @@ void batch_add_bundled_edges_impl(
   }
 }
 
+template <typename EDATA_T>
+class EmptyCsrBulkWriter {
+ public:
+  void BeginCount(vid_t /*vnum*/) {}
+  void Count(vid_t /*src*/) {}
+  void AllocateFromCounts() {}
+  void Put(vid_t /*src*/, vid_t /*dst*/, const EDATA_T& /*data*/,
+           timestamp_t /*ts*/) {}
+  void Finish(timestamp_t /*ts*/) {}
+};
+
+template <typename EDATA_T, typename F>
+bool with_csr_bulk_writer(CsrBase* csr, F&& f) {
+  if (auto* typed = dynamic_cast<MutableCsr<EDATA_T>*>(csr)) {
+    MutableCsrBulkBuildAccess<EDATA_T> writer(*typed);
+    std::forward<F>(f)(writer);
+    return true;
+  }
+  if (auto* typed = dynamic_cast<SingleMutableCsr<EDATA_T>*>(csr)) {
+    SingleMutableCsrBulkBuildAccess<EDATA_T> writer(*typed);
+    std::forward<F>(f)(writer);
+    return true;
+  }
+  if (dynamic_cast<EmptyCsr<EDATA_T>*>(csr) != nullptr) {
+    EmptyCsrBulkWriter<EDATA_T> writer;
+    std::forward<F>(f)(writer);
+    return true;
+  }
+  return false;
+}
+
+template <typename EDATA_T>
+EDATA_T read_bulk_edge_data(
+    const std::shared_ptr<execution::IContextColumn>& col, size_t row) {
+  CHECK(col != nullptr);
+  return col->get_elem(row).template GetValue<EDATA_T>();
+}
+
+template <>
+EmptyType read_bulk_edge_data<EmptyType>(
+    const std::shared_ptr<execution::IContextColumn>& /*col*/, size_t /*row*/) {
+  return EmptyType();
+}
+
+template <typename EDATA_T, typename OUT_WRITER, typename IN_WRITER>
+void batch_build_bundled_edges_with_writers(
+    OUT_WRITER& out_writer, IN_WRITER& in_writer,
+    const IndexerType& src_indexer, const IndexerType& dst_indexer,
+    const std::shared_ptr<IDataChunkSource>& source) {
+  auto src_vnum = static_cast<vid_t>(src_indexer.size());
+  auto dst_vnum = static_cast<vid_t>(dst_indexer.size());
+  out_writer.BeginCount(src_vnum);
+  in_writer.BeginCount(dst_vnum);
+
+  auto supplier = source->Open();
+  CHECK(supplier != nullptr);
+  while (auto chunk = supplier->GetNextChunk()) {
+    CHECK_GE(chunk->col_num(), 2);
+    auto src_col = chunk->get(0);
+    auto dst_col = chunk->get(1);
+    CHECK(src_col != nullptr);
+    CHECK(dst_col != nullptr);
+    CHECK_EQ(src_col->size(), dst_col->size());
+    for (size_t i = 0; i < src_col->size(); ++i) {
+      vid_t src = src_indexer.get_index(src_col->get_elem(i));
+      vid_t dst = dst_indexer.get_index(dst_col->get_elem(i));
+      if (src == std::numeric_limits<vid_t>::max() ||
+          dst == std::numeric_limits<vid_t>::max()) {
+        continue;
+      }
+      out_writer.Count(src);
+      in_writer.Count(dst);
+    }
+  }
+
+  out_writer.AllocateFromCounts();
+  in_writer.AllocateFromCounts();
+
+  supplier = source->Open();
+  CHECK(supplier != nullptr);
+  while (auto chunk = supplier->GetNextChunk()) {
+    CHECK_GE(chunk->col_num(), 2);
+    auto src_col = chunk->get(0);
+    auto dst_col = chunk->get(1);
+    auto data_col = chunk->col_num() > 2 ? chunk->get(2) : nullptr;
+    CHECK(src_col != nullptr);
+    CHECK(dst_col != nullptr);
+    CHECK_EQ(src_col->size(), dst_col->size());
+    for (size_t i = 0; i < src_col->size(); ++i) {
+      vid_t src = src_indexer.get_index(src_col->get_elem(i));
+      vid_t dst = dst_indexer.get_index(dst_col->get_elem(i));
+      if (src == std::numeric_limits<vid_t>::max() ||
+          dst == std::numeric_limits<vid_t>::max()) {
+        continue;
+      }
+      EDATA_T data = read_bulk_edge_data<EDATA_T>(data_col, i);
+      out_writer.Put(src, dst, data, 0);
+      in_writer.Put(dst, src, data, 0);
+    }
+  }
+
+  out_writer.Finish(0);
+  in_writer.Finish(0);
+}
+
+template <typename EDATA_T>
+bool batch_build_bundled_edges_typed(CsrBase* out_csr, CsrBase* in_csr,
+                                     const IndexerType& src_indexer,
+                                     const IndexerType& dst_indexer,
+                                     std::shared_ptr<IDataChunkSource> source) {
+  bool built = false;
+  bool out_ok = with_csr_bulk_writer<EDATA_T>(out_csr, [&](auto& out_writer) {
+    bool in_ok = with_csr_bulk_writer<EDATA_T>(in_csr, [&](auto& in_writer) {
+      batch_build_bundled_edges_with_writers<EDATA_T>(
+          out_writer, in_writer, src_indexer, dst_indexer, source);
+      built = true;
+    });
+    built = built && in_ok;
+  });
+  if (!out_ok) {
+    return false;
+  }
+  return built;
+}
+
+bool batch_build_bundled_edges(CsrBase* out_csr, CsrBase* in_csr,
+                               std::shared_ptr<const EdgeSchema> meta,
+                               const IndexerType& src_indexer,
+                               const IndexerType& dst_indexer,
+                               std::shared_ptr<IDataChunkSource> source) {
+  const auto property_type =
+      meta->properties.empty() ? DataTypeId::kEmpty : meta->properties[0].id();
+  switch (property_type) {
+#define TYPE_DISPATCHER(enum_val, type)           \
+  case DataTypeId::enum_val:                      \
+    return batch_build_bundled_edges_typed<type>( \
+        out_csr, in_csr, src_indexer, dst_indexer, std::move(source));
+    FOR_EACH_DATA_TYPE_NO_STRING(TYPE_DISPATCHER)
+#undef TYPE_DISPATCHER
+  case DataTypeId::kEmpty:
+    return batch_build_bundled_edges_typed<EmptyType>(
+        out_csr, in_csr, src_indexer, dst_indexer, std::move(source));
+  default:
+    return false;
+  }
+}
+
 void EdgeTable::Init(std::shared_ptr<Checkpoint> ckp, MemoryLevel level) {
   CHECK(meta_ != nullptr) << "EdgeTable::Init requires schema";
 
@@ -577,13 +724,14 @@ void EdgeTable::EnsureCapacity(vid_t src_v_cap, vid_t dst_v_cap,
 }
 
 size_t EdgeTable::EdgeNum() const {
+  size_t edge_num = 0;
   if (out_csr_) {
-    return out_csr_->edge_num();
-  } else if (in_csr_) {
-    return in_csr_->edge_num();
-  } else {
-    return 0;
+    edge_num = std::max(edge_num, out_csr_->edge_num());
   }
+  if (in_csr_) {
+    edge_num = std::max(edge_num, in_csr_->edge_num());
+  }
+  return edge_num;
 }
 
 size_t EdgeTable::PropertyNum() const { return table_->col_num(); }
@@ -701,6 +849,25 @@ std::pair<int32_t, const void*> EdgeTable::AddEdge(
   return internal::insert_edge_into_csr_internal(
       *out_csr_, *in_csr_, *table_.get(), table_idx_, *meta_, src_lid, dst_lid,
       edge_data, ts, alloc, insert_safe);
+}
+
+void EdgeTable::BatchBuildEdges(const IndexerType& src_indexer,
+                                const IndexerType& dst_indexer,
+                                std::shared_ptr<IDataChunkSource> source) {
+  if (source == nullptr) {
+    THROW_INVALID_ARGUMENT_EXCEPTION(
+        "BatchBuildEdges requires a non-null data chunk source");
+  }
+  if (!source->rewindable() || !meta_->is_bundled() || EdgeNum() != 0) {
+    BatchAddEdges(src_indexer, dst_indexer, source->Open());
+    return;
+  }
+
+  bool built = batch_build_bundled_edges(out_csr_.get(), in_csr_.get(), meta_,
+                                         src_indexer, dst_indexer, source);
+  if (!built) {
+    BatchAddEdges(src_indexer, dst_indexer, source->Open());
+  }
 }
 
 void EdgeTable::BatchAddEdges(const IndexerType& src_indexer,
