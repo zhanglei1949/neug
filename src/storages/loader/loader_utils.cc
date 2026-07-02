@@ -23,12 +23,17 @@
 #include <cctype>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <ostream>
+#include <shared_mutex>
 #include <sstream>
+#include <string_view>
+#include <type_traits>
 #include <unordered_set>
 
 #include "csv.hpp"
 #include "neug/execution/common/columns/columns_utils.h"
+#include "neug/execution/common/columns/value_columns.h"
 #include "neug/execution/common/types/value.h"
 #include "neug/utils/datetime_parsers.h"
 #include "neug/utils/exception/exception.h"
@@ -1007,63 +1012,84 @@ void fillEdgeReaderMeta(label_t src_label_id, label_t dst_label_id,
   }
 }
 
-void set_properties_from_context_column(
-    neug::ColumnBase* col,
-    const std::shared_ptr<execution::IContextColumn>& ctx_col,
-    const std::vector<vid_t>& vids, std::shared_mutex& mutex) {
-  // Row-by-row via get_elem()
-  auto col_type = col->type();
-  for (size_t k = 0; k < vids.size(); ++k) {
-    if (vids[k] >= std::numeric_limits<vid_t>::max()) {
-      continue;
-    }
-    auto val = ctx_col->get_elem(k);
-    if (val.IsNull()) {
-      continue;
-    }
-    switch (col_type) {
-#define SET_TYPED_VALUE(enum_val, ctype)                  \
-  case DataTypeId::enum_val: {                            \
-    auto* typed = dynamic_cast<TypedColumn<ctype>*>(col); \
-    typed->set_value(vids[k], val.GetValue<ctype>());     \
-    break;                                                \
-  }
-      FOR_EACH_DATA_TYPE_PRIMITIVE(SET_TYPED_VALUE)
-#undef SET_TYPED_VALUE
-    case DataTypeId::kDate: {
-      auto* typed = dynamic_cast<TypedColumn<Date>*>(col);
-      typed->set_value(vids[k], val.GetValue<Date>());
-      break;
-    }
-    case DataTypeId::kTimestampMs: {
-      auto* typed = dynamic_cast<TypedColumn<DateTime>*>(col);
-      typed->set_value(vids[k], val.GetValue<DateTime>());
-      break;
-    }
-    case DataTypeId::kInterval: {
-      auto* typed = dynamic_cast<TypedColumn<Interval>*>(col);
-      typed->set_value(vids[k], val.GetValue<Interval>());
-      break;
-    }
-    case DataTypeId::kVarchar: {
-      auto* typed = dynamic_cast<TypedColumn<std::string_view>*>(col);
-      auto s = val.GetValue<std::string>();
-      std::shared_lock<std::shared_mutex> lock(mutex);
+namespace {
+
+template <typename SRC_T, typename COL_T = SRC_T>
+void set_column_from_value_column(
+    ColumnBase* col, const std::shared_ptr<execution::IContextColumn>& ctx_col,
+    const std::vector<vid_t>& vids, std::shared_mutex* mutex = nullptr) {
+  auto* typed = dynamic_cast<TypedColumn<COL_T>*>(col);
+  auto value_col =
+      std::dynamic_pointer_cast<execution::ValueColumn<SRC_T>>(ctx_col);
+
+  CHECK(typed != nullptr)
+      << "Storage column type does not match expected type.";
+  CHECK(value_col != nullptr)
+      << "Context column type does not match expected type.";
+  auto data = value_col->data();
+
+  auto set_value = [&](size_t k) {
+    if constexpr (std::is_same_v<COL_T, std::string_view>) {
+      CHECK(mutex != nullptr) << "String column write requires a shared mutex.";
+      const auto& s = data[k];
+      std::shared_lock<std::shared_mutex> lock(*mutex);
       if (typed->available_space() <= s.size()) {
         lock.unlock();
-        std::unique_lock<std::shared_mutex> w_lock(mutex);
+        std::unique_lock<std::shared_mutex> w_lock(*mutex);
         typed->resize(typed->size());
         w_lock.unlock();
         lock.lock();
       }
       typed->set_value(vids[k], std::string_view(s));
-      break;
+    } else {
+      typed->set_value(vids[k], data[k]);
     }
-    default:
-      THROW_NOT_SUPPORTED_EXCEPTION(
-          "set_properties_from_context_column: unsupported type " +
-          DataType(col_type).ToString());
+  };
+
+  for (size_t k = 0; k < vids.size(); ++k) {
+    if (vids[k] >= std::numeric_limits<vid_t>::max()) {
+      continue;
     }
+    set_value(k);
+  }
+}
+
+}  // namespace
+
+void set_properties_from_context_column(
+    neug::ColumnBase* col,
+    const std::shared_ptr<execution::IContextColumn>& ctx_col,
+    const std::vector<vid_t>& vids, std::shared_mutex& mutex) {
+  auto col_type = col->type();
+  switch (col_type) {
+#define SET_TYPED_VALUE(enum_val, ctype)                     \
+  case DataTypeId::enum_val: {                               \
+    set_column_from_value_column<ctype>(col, ctx_col, vids); \
+    break;                                                   \
+  }
+    FOR_EACH_DATA_TYPE_PRIMITIVE(SET_TYPED_VALUE)
+#undef SET_TYPED_VALUE
+  case DataTypeId::kDate: {
+    set_column_from_value_column<Date>(col, ctx_col, vids);
+    break;
+  }
+  case DataTypeId::kTimestampMs: {
+    set_column_from_value_column<DateTime>(col, ctx_col, vids);
+    break;
+  }
+  case DataTypeId::kInterval: {
+    set_column_from_value_column<Interval>(col, ctx_col, vids);
+    break;
+  }
+  case DataTypeId::kVarchar: {
+    set_column_from_value_column<std::string, std::string_view>(col, ctx_col,
+                                                                vids, &mutex);
+    break;
+  }
+  default:
+    THROW_NOT_SUPPORTED_EXCEPTION(
+        "set_properties_from_context_column: unsupported type " +
+        DataType(col_type).ToString());
   }
 }
 
