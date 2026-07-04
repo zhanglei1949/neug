@@ -21,12 +21,21 @@
 
 #include <glog/logging.h>
 #include <algorithm>
+#include <cerrno>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <cstdlib>
+#include <deque>
+#include <exception>
 #include <filesystem>
+#include <mutex>
 #include <ostream>
 #include <string_view>
+#include <thread>
 #include <utility>
 
+#include "neug/execution/common/columns/value_columns.h"
 #include "neug/storages/checkpoint_manager.h"
 #include "neug/storages/csr/csr_view_utils.h"
 #include "neug/storages/csr/immutable_csr.h"
@@ -334,6 +343,152 @@ class EmptyCsrBulkWriter {
   void Finish(timestamp_t /*ts*/) {}
 };
 
+class BoundedDataChunkQueue {
+ public:
+  struct Stats {
+    size_t capacity = 0;
+    uint64_t pushed_chunks = 0;
+    uint64_t popped_chunks = 0;
+    uint64_t max_queue_size = 0;
+    uint64_t producer_wait_count = 0;
+    uint64_t consumer_wait_count = 0;
+    uint64_t producer_wait_ns = 0;
+    uint64_t consumer_wait_ns = 0;
+  };
+
+  explicit BoundedDataChunkQueue(size_t capacity)
+      : capacity_(std::max<size_t>(capacity, 1)) {}
+
+  bool Push(std::shared_ptr<execution::DataChunk> chunk) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    bool waited = !aborted_ && !closed_ && queue_.size() >= capacity_;
+    auto wait_start = std::chrono::steady_clock::now();
+    not_full_.wait(lock, [&]() {
+      return aborted_ || closed_ || queue_.size() < capacity_;
+    });
+    if (waited) {
+      ++stats_.producer_wait_count;
+      stats_.producer_wait_ns += static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - wait_start)
+              .count());
+    }
+    if (aborted_ || closed_) {
+      return false;
+    }
+    queue_.push_back(std::move(chunk));
+    ++stats_.pushed_chunks;
+    stats_.max_queue_size =
+        std::max<uint64_t>(stats_.max_queue_size, queue_.size());
+    not_empty_.notify_one();
+    return true;
+  }
+
+  std::shared_ptr<execution::DataChunk> Pop() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    bool waited = !aborted_ && !closed_ && queue_.empty();
+    auto wait_start = std::chrono::steady_clock::now();
+    not_empty_.wait(lock,
+                    [&]() { return aborted_ || closed_ || !queue_.empty(); });
+    if (waited) {
+      ++stats_.consumer_wait_count;
+      stats_.consumer_wait_ns += static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - wait_start)
+              .count());
+    }
+    if (aborted_ || queue_.empty()) {
+      return nullptr;
+    }
+    auto chunk = std::move(queue_.front());
+    queue_.pop_front();
+    ++stats_.popped_chunks;
+    not_full_.notify_one();
+    return chunk;
+  }
+
+  void Close() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      closed_ = true;
+    }
+    not_empty_.notify_all();
+    not_full_.notify_all();
+  }
+
+  void Abort(std::exception_ptr error) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      aborted_ = true;
+      if (error_ == nullptr) {
+        error_ = error;
+      }
+    }
+    not_empty_.notify_all();
+    not_full_.notify_all();
+  }
+
+  std::exception_ptr Error() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return error_;
+  }
+
+  Stats GetStats() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stats stats = stats_;
+    stats.capacity = capacity_;
+    return stats;
+  }
+
+ private:
+  std::mutex mutex_;
+  std::condition_variable not_empty_;
+  std::condition_variable not_full_;
+  std::deque<std::shared_ptr<execution::DataChunk>> queue_;
+  size_t capacity_;
+  bool closed_ = false;
+  bool aborted_ = false;
+  std::exception_ptr error_;
+  Stats stats_;
+};
+
+constexpr size_t kMaxEdgeBulkBuildConsumers = 64;
+
+size_t max_edge_bulk_build_consumer_count() {
+  unsigned int hw = std::thread::hardware_concurrency();
+  if (hw <= 2) {
+    return 1;
+  }
+  return std::min<size_t>(static_cast<size_t>(hw - 1),
+                          kMaxEdgeBulkBuildConsumers);
+}
+
+size_t resolve_edge_bulk_build_consumer_count() {
+  size_t max_consumers = max_edge_bulk_build_consumer_count();
+  const char* value = std::getenv("NEUG_EDGE_BULK_BUILD_THREADS");
+  if (value != nullptr) {
+    char* end = nullptr;
+    errno = 0;
+    long parsed = std::strtol(value, &end, 10);
+    if (end == value || *end != '\0' || parsed <= 1) {
+      return 1;
+    }
+    if (errno == ERANGE) {
+      return max_consumers;
+    }
+    if (errno != 0) {
+      return 1;
+    }
+    return std::min<size_t>(static_cast<size_t>(parsed), max_consumers);
+  }
+
+  return std::min<size_t>(max_consumers, 8);
+}
+
+size_t resolve_edge_bulk_build_queue_capacity(size_t consumer_count) {
+  return std::clamp<size_t>(consumer_count * 2, 2, 16);
+}
+
 template <typename EDATA_T, typename F>
 bool with_csr_bulk_writer(CsrBase* csr, F&& f) {
   if (auto* typed = dynamic_cast<MutableCsr<EDATA_T>*>(csr)) {
@@ -355,16 +510,175 @@ bool with_csr_bulk_writer(CsrBase* csr, F&& f) {
 }
 
 template <typename EDATA_T>
-EDATA_T read_bulk_edge_data(
-    const std::shared_ptr<execution::IContextColumn>& col, size_t row) {
-  CHECK(col != nullptr);
-  return col->get_elem(row).template GetValue<EDATA_T>();
-}
+class BulkEdgeDataReader {
+ public:
+  explicit BulkEdgeDataReader(std::shared_ptr<execution::IContextColumn> column)
+      : value_column_(
+            std::dynamic_pointer_cast<execution::ValueColumn<EDATA_T>>(
+                column)) {
+    CHECK(column != nullptr);
+    if (value_column_ == nullptr) {
+      THROW_NOT_SUPPORTED_EXCEPTION(
+          "BatchBuildEdges requires ValueColumn edge data, got " +
+          column->column_info());
+    }
+  }
+
+  EDATA_T Get(size_t row) const { return value_column_->data()[row]; }
+
+ private:
+  std::shared_ptr<execution::ValueColumn<EDATA_T>> value_column_;
+};
 
 template <>
-EmptyType read_bulk_edge_data<EmptyType>(
-    const std::shared_ptr<execution::IContextColumn>& /*col*/, size_t /*row*/) {
-  return EmptyType();
+class BulkEdgeDataReader<EmptyType> {
+ public:
+  explicit BulkEdgeDataReader(
+      const std::shared_ptr<execution::IContextColumn>& /*column*/) {}
+  EmptyType Get(size_t /*row*/) const { return EmptyType(); }
+};
+
+template <typename WRITER, typename EDATA_T>
+constexpr bool supports_parallel_bulk_writer_v = requires(WRITER& writer,
+                                                          vid_t src, vid_t dst,
+                                                          const EDATA_T& data) {
+  writer.PutConcurrent(src, dst, data, timestamp_t{});
+  writer.FinishParallel(uint64_t{}, timestamp_t{});
+};
+
+template <typename EDATA_T, typename PUT_FN>
+uint64_t fill_edges_from_chunk(
+    const std::shared_ptr<execution::DataChunk>& chunk,
+    const IndexerType& src_indexer, const IndexerType& dst_indexer,
+    PUT_FN&& put_edge) {
+  CHECK_GE(chunk->col_num(), 2);
+  auto src_col = chunk->get(0);
+  auto dst_col = chunk->get(1);
+  auto data_col = chunk->col_num() > 2 ? chunk->get(2) : nullptr;
+  CHECK(src_col != nullptr);
+  CHECK(dst_col != nullptr);
+  CHECK_EQ(src_col->size(), dst_col->size());
+  if (data_col != nullptr) {
+    CHECK_EQ(data_col->size(), src_col->size());
+  }
+  BulkEdgeDataReader<EDATA_T> data_reader(data_col);
+
+  uint64_t valid_count = 0;
+  for (size_t i = 0; i < src_col->size(); ++i) {
+    vid_t src = src_indexer.get_index(src_col->get_elem(i));
+    vid_t dst = dst_indexer.get_index(dst_col->get_elem(i));
+    if (src == std::numeric_limits<vid_t>::max() ||
+        dst == std::numeric_limits<vid_t>::max()) {
+      continue;
+    }
+    EDATA_T data = data_reader.Get(i);
+    put_edge(src, dst, data);
+    ++valid_count;
+  }
+  return valid_count;
+}
+
+template <typename EDATA_T, typename OUT_WRITER, typename IN_WRITER>
+uint64_t fill_edges_serial(OUT_WRITER& out_writer, IN_WRITER& in_writer,
+                           const IndexerType& src_indexer,
+                           const IndexerType& dst_indexer,
+                           const std::shared_ptr<IDataChunkSource>& source) {
+  auto supplier = source->Open();
+  CHECK(supplier != nullptr);
+  uint64_t valid_count = 0;
+  while (auto chunk = supplier->GetNextChunk()) {
+    valid_count += fill_edges_from_chunk<EDATA_T>(
+        chunk, src_indexer, dst_indexer,
+        [&](vid_t src, vid_t dst, const EDATA_T& data) {
+          out_writer.Put(src, dst, data, 0);
+          in_writer.Put(dst, src, data, 0);
+        });
+  }
+  return valid_count;
+}
+
+template <typename EDATA_T, typename OUT_WRITER, typename IN_WRITER>
+uint64_t fill_edges_parallel(OUT_WRITER& out_writer, IN_WRITER& in_writer,
+                             const IndexerType& src_indexer,
+                             const IndexerType& dst_indexer,
+                             const std::shared_ptr<IDataChunkSource>& source,
+                             size_t consumer_count) {
+  BoundedDataChunkQueue queue(
+      resolve_edge_bulk_build_queue_capacity(consumer_count));
+  std::vector<uint64_t> local_counts(consumer_count, 0);
+  std::vector<std::thread> consumers;
+  consumers.reserve(consumer_count);
+  std::thread producer;
+
+  auto join_threads = [&]() {
+    if (producer.joinable()) {
+      producer.join();
+    }
+    for (auto& consumer : consumers) {
+      if (consumer.joinable()) {
+        consumer.join();
+      }
+    }
+  };
+
+  try {
+    for (size_t worker_id = 0; worker_id < consumer_count; ++worker_id) {
+      consumers.emplace_back([&, worker_id]() {
+        try {
+          uint64_t valid_count = 0;
+          while (auto chunk = queue.Pop()) {
+            valid_count += fill_edges_from_chunk<EDATA_T>(
+                chunk, src_indexer, dst_indexer,
+                [&](vid_t src, vid_t dst, const EDATA_T& data) {
+                  out_writer.PutConcurrent(src, dst, data, 0);
+                  in_writer.PutConcurrent(dst, src, data, 0);
+                });
+          }
+          local_counts[worker_id] = valid_count;
+        } catch (...) { queue.Abort(std::current_exception()); }
+      });
+    }
+
+    producer = std::thread([&]() {
+      try {
+        auto supplier = source->Open();
+        CHECK(supplier != nullptr);
+        while (auto chunk = supplier->GetNextChunk()) {
+          if (!queue.Push(std::move(chunk))) {
+            return;
+          }
+        }
+        queue.Close();
+      } catch (...) { queue.Abort(std::current_exception()); }
+    });
+  } catch (...) {
+    queue.Abort(std::current_exception());
+    join_threads();
+    throw;
+  }
+
+  join_threads();
+  if (auto error = queue.Error()) {
+    std::rethrow_exception(error);
+  }
+
+  uint64_t valid_count = 0;
+  for (auto count : local_counts) {
+    valid_count += count;
+  }
+  auto stats = queue.GetStats();
+  LOG(INFO) << "BatchBuildEdges parallel fill stats: consumers="
+            << consumer_count << ", queue_capacity=" << stats.capacity
+            << ", pushed_chunks=" << stats.pushed_chunks
+            << ", popped_chunks=" << stats.popped_chunks
+            << ", max_queue_size=" << stats.max_queue_size
+            << ", producer_wait_count=" << stats.producer_wait_count
+            << ", consumer_wait_count=" << stats.consumer_wait_count
+            << ", producer_wait_ms="
+            << static_cast<double>(stats.producer_wait_ns) / 1000000.0
+            << ", consumer_wait_ms="
+            << static_cast<double>(stats.consumer_wait_ns) / 1000000.0;
+  return valid_count;
 }
 
 template <typename EDATA_T, typename OUT_WRITER, typename IN_WRITER>
@@ -379,6 +693,7 @@ void batch_build_bundled_edges_with_writers(
 
   auto supplier = source->Open();
   CHECK(supplier != nullptr);
+  uint64_t valid_edge_count = 0;
   while (auto chunk = supplier->GetNextChunk()) {
     CHECK_GE(chunk->col_num(), 2);
     auto src_col = chunk->get(0);
@@ -395,35 +710,31 @@ void batch_build_bundled_edges_with_writers(
       }
       out_writer.Count(src);
       in_writer.Count(dst);
+      ++valid_edge_count;
     }
   }
 
   out_writer.AllocateFromCounts();
   in_writer.AllocateFromCounts();
 
-  supplier = source->Open();
-  CHECK(supplier != nullptr);
-  while (auto chunk = supplier->GetNextChunk()) {
-    CHECK_GE(chunk->col_num(), 2);
-    auto src_col = chunk->get(0);
-    auto dst_col = chunk->get(1);
-    auto data_col = chunk->col_num() > 2 ? chunk->get(2) : nullptr;
-    CHECK(src_col != nullptr);
-    CHECK(dst_col != nullptr);
-    CHECK_EQ(src_col->size(), dst_col->size());
-    for (size_t i = 0; i < src_col->size(); ++i) {
-      vid_t src = src_indexer.get_index(src_col->get_elem(i));
-      vid_t dst = dst_indexer.get_index(dst_col->get_elem(i));
-      if (src == std::numeric_limits<vid_t>::max() ||
-          dst == std::numeric_limits<vid_t>::max()) {
-        continue;
-      }
-      EDATA_T data = read_bulk_edge_data<EDATA_T>(data_col, i);
-      out_writer.Put(src, dst, data, 0);
-      in_writer.Put(dst, src, data, 0);
+  uint64_t filled_edge_count = 0;
+  size_t consumer_count = resolve_edge_bulk_build_consumer_count();
+  if constexpr (supports_parallel_bulk_writer_v<OUT_WRITER, EDATA_T> &&
+                supports_parallel_bulk_writer_v<IN_WRITER, EDATA_T>) {
+    if (consumer_count > 1) {
+      filled_edge_count =
+          fill_edges_parallel<EDATA_T>(out_writer, in_writer, src_indexer,
+                                       dst_indexer, source, consumer_count);
+      CHECK_EQ(filled_edge_count, valid_edge_count);
+      out_writer.FinishParallel(valid_edge_count, 0);
+      in_writer.FinishParallel(valid_edge_count, 0);
+      return;
     }
   }
 
+  filled_edge_count = fill_edges_serial<EDATA_T>(
+      out_writer, in_writer, src_indexer, dst_indexer, source);
+  CHECK_EQ(filled_edge_count, valid_edge_count);
   out_writer.Finish(0);
   in_writer.Finish(0);
 }

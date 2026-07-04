@@ -551,12 +551,25 @@ class MutableCsrBulkBuildAccess {
     nbr.set_data(data, ts);
   }
 
+  void PutConcurrent(vid_t src, vid_t dst, const EDATA_T& data,
+                     timestamp_t ts) {
+    Put(src, dst, data, ts);
+  }
+
   void Finish(timestamp_t ts) {
     uint64_t edge_num = 0;
     for (size_t i = 0; i < vertex_capacity_; ++i) {
       edge_num +=
           static_cast<uint64_t>(degrees_[i].load(std::memory_order_relaxed));
     }
+    csr_.edge_num_.store(edge_num, std::memory_order_relaxed);
+    if (ts < csr_.unsorted_since_) {
+      csr_.unsorted_since_ = 0;
+    }
+    csr_.refresh_prefetch_policy();
+  }
+
+  void FinishParallel(uint64_t edge_num, timestamp_t ts) {
     csr_.edge_num_.store(edge_num, std::memory_order_relaxed);
     if (ts < csr_.unsorted_since_) {
       csr_.unsorted_since_ = 0;
@@ -619,7 +632,20 @@ class SingleMutableCsrBulkBuildAccess {
     nbr.set_data(data, ts);
   }
 
+  void PutConcurrent(vid_t src, vid_t dst, const EDATA_T& data,
+                     timestamp_t ts) {
+    CHECK_LT(src, vertex_capacity_);
+    auto& nbr = nbrs_[src];
+    nbr.set_neighbor(dst);
+    nbr.set_data(data, ts);
+  }
+
   void Finish(timestamp_t /*ts*/) { csr_.refresh_prefetch_policy(); }
+
+  void FinishParallel(uint64_t edge_num, timestamp_t /*ts*/) {
+    csr_.edge_num_.store(edge_num, std::memory_order_relaxed);
+    csr_.refresh_prefetch_policy();
+  }
 
  private:
   void refresh_ptrs() {
