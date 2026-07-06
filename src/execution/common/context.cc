@@ -97,6 +97,20 @@ class StaticChunkSupplier final : public IDataChunkSupplier {
     return total;
   }
 
+  std::optional<ChunkSupplierStats> GetStats() const override {
+    ChunkSupplierStats stats;
+    stats.produced_chunks = static_cast<int64_t>(chunks_.size());
+    stats.consumed_chunks = static_cast<int64_t>(index_);
+    for (size_t i = 0; i < chunks_.size(); ++i) {
+      auto rows = static_cast<int64_t>(chunks_[i]->row_num());
+      stats.produced_rows += rows;
+      if (i < index_) {
+        stats.consumed_rows += rows;
+      }
+    }
+    return stats;
+  }
+
  private:
   std::vector<std::shared_ptr<DataChunk>> chunks_;
   size_t index_ = 0;
@@ -142,6 +156,10 @@ class ProjectingChunkSupplier final : public IDataChunkSupplier {
 
   int64_t RowNum() const override { return input_->RowNum(); }
 
+  std::optional<ChunkSupplierStats> GetStats() const override {
+    return input_->GetStats();
+  }
+
  private:
   std::shared_ptr<IDataChunkSupplier> input_;
   std::vector<int32_t> aliases_;
@@ -155,6 +173,12 @@ class ProjectingChunkSource final : public IDataChunkSource {
 
   std::shared_ptr<IDataChunkSupplier> Open() const override {
     return std::make_shared<ProjectingChunkSupplier>(input_->Open(), aliases_);
+  }
+
+  std::shared_ptr<IDataChunkSupplier> Open(
+      const ChunkSourceOptions& options) const override {
+    return std::make_shared<ProjectingChunkSupplier>(input_->Open(options),
+                                                     aliases_);
   }
 
   bool rewindable() const override { return input_->rewindable(); }

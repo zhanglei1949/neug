@@ -21,10 +21,16 @@
 
 #include <glog/logging.h>
 #include <algorithm>
+#include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
+#include <exception>
 #include <filesystem>
+#include <mutex>
 #include <ostream>
 #include <string_view>
+#include <thread>
 #include <utility>
 
 #include "neug/storages/checkpoint_manager.h"
@@ -367,6 +373,187 @@ EmptyType read_bulk_edge_data<EmptyType>(
   return EmptyType();
 }
 
+template <typename T>
+class EdgeChunkQueue {
+ public:
+  explicit EdgeChunkQueue(size_t capacity)
+      : capacity_(std::max<size_t>(1, capacity)) {}
+
+  bool Push(T value) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    not_full_.wait(lock,
+                   [&]() { return closed_ || queue_.size() < capacity_; });
+    if (closed_) {
+      return false;
+    }
+    queue_.push_back(std::move(value));
+    not_empty_.notify_one();
+    return true;
+  }
+
+  bool Pop(T& value) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    not_empty_.wait(lock, [&]() { return closed_ || !queue_.empty(); });
+    if (queue_.empty()) {
+      return false;
+    }
+    value = std::move(queue_.front());
+    queue_.pop_front();
+    not_full_.notify_one();
+    return true;
+  }
+
+  void Close() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      closed_ = true;
+    }
+    not_empty_.notify_all();
+    not_full_.notify_all();
+  }
+
+ private:
+  size_t capacity_;
+  std::mutex mutex_;
+  std::condition_variable not_empty_;
+  std::condition_variable not_full_;
+  std::deque<T> queue_;
+  bool closed_ = false;
+};
+
+int32_t default_edge_copy_worker_count() {
+  auto hw = static_cast<int32_t>(std::thread::hardware_concurrency());
+  if (hw <= 0) {
+    hw = 1;
+  }
+  return std::max<int32_t>(1, std::min<int32_t>(hw, 8));
+}
+
+template <typename EDATA_T, typename OUT_WRITER, typename IN_WRITER>
+void fill_edges_from_chunk(const std::shared_ptr<execution::DataChunk>& chunk,
+                           const IndexerType& src_indexer,
+                           const IndexerType& dst_indexer,
+                           OUT_WRITER& out_writer, IN_WRITER& in_writer) {
+  CHECK(chunk != nullptr);
+  CHECK_GE(chunk->col_num(), 2);
+  auto src_col = chunk->get(0);
+  auto dst_col = chunk->get(1);
+  auto data_col = chunk->col_num() > 2 ? chunk->get(2) : nullptr;
+  CHECK(src_col != nullptr);
+  CHECK(dst_col != nullptr);
+  CHECK_EQ(src_col->size(), dst_col->size());
+  for (size_t i = 0; i < src_col->size(); ++i) {
+    vid_t src = src_indexer.get_index(src_col->get_elem(i));
+    vid_t dst = dst_indexer.get_index(dst_col->get_elem(i));
+    if (src == std::numeric_limits<vid_t>::max() ||
+        dst == std::numeric_limits<vid_t>::max()) {
+      continue;
+    }
+    EDATA_T data = read_bulk_edge_data<EDATA_T>(data_col, i);
+    out_writer.Put(src, dst, data, 0);
+    in_writer.Put(dst, src, data, 0);
+  }
+}
+
+void log_chunk_supplier_stats(
+    const std::shared_ptr<IDataChunkSupplier>& supplier, const char* phase) {
+  if (supplier == nullptr) {
+    return;
+  }
+  auto stats = supplier->GetStats();
+  if (!stats) {
+    return;
+  }
+  LOG(INFO) << phase << " stats: produced_chunks=" << stats->produced_chunks
+            << ", parallel=" << stats->parallel
+            << ", worker_count=" << stats->worker_count
+            << ", produced_rows=" << stats->produced_rows
+            << ", consumed_chunks=" << stats->consumed_chunks
+            << ", consumed_rows=" << stats->consumed_rows
+            << ", bytes_read=" << stats->bytes_read
+            << ", producer_wait_ms=" << stats->producer_wait_ms
+            << ", consumer_wait_ms=" << stats->consumer_wait_ms
+            << ", max_queue_size=" << stats->max_queue_size
+            << ", fallback_reason=" << stats->fallback_reason;
+}
+
+template <typename EDATA_T, typename OUT_WRITER, typename IN_WRITER>
+void fill_edges_serial(const std::shared_ptr<IDataChunkSupplier>& supplier,
+                       const IndexerType& src_indexer,
+                       const IndexerType& dst_indexer, OUT_WRITER& out_writer,
+                       IN_WRITER& in_writer) {
+  CHECK(supplier != nullptr);
+  while (auto chunk = supplier->GetNextChunk()) {
+    fill_edges_from_chunk<EDATA_T>(chunk, src_indexer, dst_indexer, out_writer,
+                                   in_writer);
+  }
+}
+
+template <typename EDATA_T, typename OUT_WRITER, typename IN_WRITER>
+void fill_edges_concurrent(const std::shared_ptr<IDataChunkSupplier>& supplier,
+                           const IndexerType& src_indexer,
+                           const IndexerType& dst_indexer,
+                           OUT_WRITER& out_writer, IN_WRITER& in_writer,
+                           int32_t consumer_count, int32_t queue_capacity) {
+  CHECK(supplier != nullptr);
+  EdgeChunkQueue<std::shared_ptr<execution::DataChunk>> queue(queue_capacity);
+  std::atomic<bool> has_error{false};
+  std::mutex error_mutex;
+  std::exception_ptr first_error;
+
+  auto set_error = [&](std::exception_ptr error) {
+    bool expected = false;
+    if (has_error.compare_exchange_strong(expected, true,
+                                          std::memory_order_acq_rel)) {
+      {
+        std::lock_guard<std::mutex> lock(error_mutex);
+        first_error = std::move(error);
+      }
+      queue.Close();
+    }
+  };
+
+  std::vector<std::thread> consumers;
+  consumers.reserve(consumer_count);
+  for (int32_t i = 0; i < consumer_count; ++i) {
+    consumers.emplace_back([&]() {
+      try {
+        std::shared_ptr<execution::DataChunk> chunk;
+        while (queue.Pop(chunk)) {
+          fill_edges_from_chunk<EDATA_T>(chunk, src_indexer, dst_indexer,
+                                         out_writer, in_writer);
+        }
+      } catch (...) { set_error(std::current_exception()); }
+    });
+  }
+
+  try {
+    while (!has_error.load(std::memory_order_acquire)) {
+      auto chunk = supplier->GetNextChunk();
+      if (!chunk) {
+        break;
+      }
+      if (!queue.Push(std::move(chunk))) {
+        break;
+      }
+    }
+  } catch (...) { set_error(std::current_exception()); }
+  queue.Close();
+  for (auto& consumer : consumers) {
+    consumer.join();
+  }
+  if (has_error.load(std::memory_order_acquire)) {
+    std::exception_ptr error;
+    {
+      std::lock_guard<std::mutex> lock(error_mutex);
+      error = first_error;
+    }
+    if (error) {
+      std::rethrow_exception(error);
+    }
+  }
+}
+
 template <typename EDATA_T, typename OUT_WRITER, typename IN_WRITER>
 void batch_build_bundled_edges_with_writers(
     OUT_WRITER& out_writer, IN_WRITER& in_writer,
@@ -377,7 +564,9 @@ void batch_build_bundled_edges_with_writers(
   out_writer.BeginCount(src_vnum);
   in_writer.BeginCount(dst_vnum);
 
-  auto supplier = source->Open();
+  ChunkSourceOptions count_options;
+  count_options.parallel_enabled = false;
+  auto supplier = source->Open(count_options);
   CHECK(supplier != nullptr);
   while (auto chunk = supplier->GetNextChunk()) {
     CHECK_GE(chunk->col_num(), 2);
@@ -401,28 +590,34 @@ void batch_build_bundled_edges_with_writers(
   out_writer.AllocateFromCounts();
   in_writer.AllocateFromCounts();
 
-  supplier = source->Open();
-  CHECK(supplier != nullptr);
-  while (auto chunk = supplier->GetNextChunk()) {
-    CHECK_GE(chunk->col_num(), 2);
-    auto src_col = chunk->get(0);
-    auto dst_col = chunk->get(1);
-    auto data_col = chunk->col_num() > 2 ? chunk->get(2) : nullptr;
-    CHECK(src_col != nullptr);
-    CHECK(dst_col != nullptr);
-    CHECK_EQ(src_col->size(), dst_col->size());
-    for (size_t i = 0; i < src_col->size(); ++i) {
-      vid_t src = src_indexer.get_index(src_col->get_elem(i));
-      vid_t dst = dst_indexer.get_index(dst_col->get_elem(i));
-      if (src == std::numeric_limits<vid_t>::max() ||
-          dst == std::numeric_limits<vid_t>::max()) {
-        continue;
-      }
-      EDATA_T data = read_bulk_edge_data<EDATA_T>(data_col, i);
-      out_writer.Put(src, dst, data, 0);
-      in_writer.Put(dst, src, data, 0);
-    }
+  auto fill_options = resolve_default_chunk_source_options();
+  if (fill_options.worker_count <= 0) {
+    fill_options.worker_count = default_edge_copy_worker_count();
   }
+  supplier = source->Open(fill_options);
+  CHECK(supplier != nullptr);
+  int32_t consumer_count =
+      fill_options.parallel_enabled
+          ? std::max<int32_t>(1, fill_options.worker_count / 2)
+          : 1;
+  auto stats = supplier->GetStats();
+  if (!stats || !stats->parallel || !stats->fallback_reason.empty()) {
+    consumer_count = 1;
+  }
+  if (consumer_count <= 1) {
+    fill_edges_serial<EDATA_T>(supplier, src_indexer, dst_indexer, out_writer,
+                               in_writer);
+  } else {
+    int32_t queue_capacity = fill_options.queue_capacity > 0
+                                 ? fill_options.queue_capacity
+                                 : std::max<int32_t>(2, consumer_count * 2);
+    LOG(INFO) << "BatchBuildEdges pass2 concurrent fill: consumers="
+              << consumer_count << ", queue_capacity=" << queue_capacity;
+    fill_edges_concurrent<EDATA_T>(supplier, src_indexer, dst_indexer,
+                                   out_writer, in_writer, consumer_count,
+                                   queue_capacity);
+  }
+  log_chunk_supplier_stats(supplier, "BatchBuildEdges pass2");
 
   out_writer.Finish(0);
   in_writer.Finish(0);

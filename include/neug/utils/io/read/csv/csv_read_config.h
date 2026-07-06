@@ -23,6 +23,14 @@
 
 namespace neug {
 
+struct CsvParallelConfig {
+  bool enabled = true;
+  int32_t worker_count = 0;
+  int32_t queue_capacity = 0;
+  int64_t min_partition_file_bytes = 256LL << 20;
+  bool collect_stats = false;
+};
+
 /// Native CSV reader configuration for csv-parser based IO.
 struct CsvReadConfig {
   char delimiter = ',';
@@ -45,6 +53,8 @@ struct CsvReadConfig {
   std::vector<std::string> null_values;
   std::vector<std::string> true_values;
   std::vector<std::string> false_values;
+
+  CsvParallelConfig parallel;
 };
 
 }  // namespace neug

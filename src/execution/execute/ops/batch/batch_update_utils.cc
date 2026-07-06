@@ -400,8 +400,7 @@ std::vector<std::shared_ptr<IDataChunkSupplier>> create_csv_chunk_suppliers(
 
   for (auto& path : file_paths) {
     auto config = build_csv_read_config(path, csv_options, column_types);
-    suppliers.emplace_back(
-        std::make_shared<CSVChunkSupplier>(path, std::move(config)));
+    suppliers.emplace_back(CSVChunkSource({path}, std::move(config)).Open());
   }
   return suppliers;
 }

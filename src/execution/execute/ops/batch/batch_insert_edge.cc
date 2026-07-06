@@ -148,6 +148,19 @@ neug::result<Context> BatchInsertEdgeOpr::Eval(
     auto supplier = create_data_chunk_supplier(ctx, total_mappings);
     RETURN_STATUS_ERROR_IF_NOT_OK(graph.BatchAddEdges(
         src_label_id, dst_label_id, edge_label_id, supplier));
+    if (auto stats = supplier->GetStats()) {
+      LOG(INFO) << "BatchInsertEdge supplier stats: produced_chunks="
+                << stats->produced_chunks << ", parallel=" << stats->parallel
+                << ", worker_count=" << stats->worker_count
+                << ", produced_rows=" << stats->produced_rows
+                << ", consumed_chunks=" << stats->consumed_chunks
+                << ", consumed_rows=" << stats->consumed_rows
+                << ", bytes_read=" << stats->bytes_read
+                << ", producer_wait_ms=" << stats->producer_wait_ms
+                << ", consumer_wait_ms=" << stats->consumer_wait_ms
+                << ", max_queue_size=" << stats->max_queue_size
+                << ", fallback_reason=" << stats->fallback_reason;
+    }
     return neug::result<Context>(std::move(ctx));
   }
 

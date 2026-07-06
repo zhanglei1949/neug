@@ -19,6 +19,7 @@
 
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -67,17 +68,49 @@ CsvReadConfig build_csv_read_config(
     const std::unordered_map<std::string, std::string>& csv_options,
     const std::vector<DataType>& column_types);
 
+struct ChunkSourceOptions {
+  bool parallel_enabled = true;
+  int32_t worker_count = 0;
+  int32_t queue_capacity = 0;
+  int64_t min_partition_file_bytes = -1;
+  bool collect_stats = false;
+};
+
+struct ChunkSupplierStats {
+  bool parallel = false;
+  int32_t worker_count = 0;
+  int64_t produced_chunks = 0;
+  int64_t produced_rows = 0;
+  int64_t consumed_chunks = 0;
+  int64_t consumed_rows = 0;
+  int64_t bytes_read = 0;
+  int64_t producer_wait_ms = 0;
+  int64_t consumer_wait_ms = 0;
+  int64_t max_queue_size = 0;
+  std::string fallback_reason;
+};
+
+ChunkSourceOptions resolve_default_chunk_source_options();
+
 class IDataChunkSupplier {
  public:
   virtual ~IDataChunkSupplier() = default;
   virtual std::shared_ptr<execution::DataChunk> GetNextChunk() = 0;
   virtual int64_t RowNum() const = 0;
+  virtual std::optional<ChunkSupplierStats> GetStats() const {
+    return std::nullopt;
+  }
 };
 
 class IDataChunkSource {
  public:
   virtual ~IDataChunkSource() = default;
   virtual std::shared_ptr<IDataChunkSupplier> Open() const = 0;
+  virtual std::shared_ptr<IDataChunkSupplier> Open(
+      const ChunkSourceOptions& options) const {
+    (void) options;
+    return Open();
+  }
   virtual bool rewindable() const = 0;
 };
 
@@ -93,7 +126,8 @@ class CSVChunkSupplier : public IDataChunkSupplier {
  public:
   CSVChunkSupplier(
       const std::string& file_path, CsvReadConfig config,
-      CsvRowCountMode row_count_mode = CsvRowCountMode::kCountOnOpen);
+      CsvRowCountMode row_count_mode = CsvRowCountMode::kCountOnOpen,
+      std::string fallback_reason = "");
 
   ~CSVChunkSupplier() override;
 
@@ -101,8 +135,11 @@ class CSVChunkSupplier : public IDataChunkSupplier {
 
   int64_t RowNum() const override;
 
+  std::optional<ChunkSupplierStats> GetStats() const override;
+
  private:
   std::string file_path_;
+  std::string fallback_reason_;
   std::unique_ptr<CsvSupplierRuntime> runtime_;
 };
 
@@ -111,6 +148,8 @@ class CSVChunkSource : public IDataChunkSource {
   CSVChunkSource(std::vector<std::string> file_paths, CsvReadConfig config);
 
   std::shared_ptr<IDataChunkSupplier> Open() const override;
+  std::shared_ptr<IDataChunkSupplier> Open(
+      const ChunkSourceOptions& options) const override;
   bool rewindable() const override { return true; }
 
  private:
