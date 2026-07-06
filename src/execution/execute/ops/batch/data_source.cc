@@ -23,7 +23,6 @@
 #include "neug/compiler/function/read_function.h"
 #include "neug/compiler/main/metadata_registry.h"
 #include "neug/execution/common/context.h"
-#include "neug/execution/execute/ops/batch/batch_update_utils.h"
 #include "neug/execution/execute/ops/batch/data_source.h"
 #include "neug/utils/io/read/common/schema.h"
 #include "neug/utils/io/reader.h"
@@ -55,14 +54,6 @@ class DataSourceOpr : public IOperator {
       neug::execution::Context&& ctx,
       neug::execution::OprTimer* timer) override {
     NEUG_ASSERT(readFunction != nullptr);
-    if (is_copy_streaming_enabled() && readFunction->sourceFunc != nullptr) {
-      auto source = readFunction->sourceFunc(sharedState);
-      if (source != nullptr) {
-        neug::execution::Context out;
-        out.set_streaming_source(std::move(source));
-        return out;
-      }
-    }
     return readFunction->execFunc(sharedState);
   }
 };

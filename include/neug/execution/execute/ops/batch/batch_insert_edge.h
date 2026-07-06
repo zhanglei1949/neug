@@ -40,6 +40,23 @@ class BatchInsertEdgeOprBuilder : public IOperatorBuilder {
   }
 };
 
+class BatchInsertEdgeFromSourceOprBuilder : public IOperatorBuilder {
+ public:
+  BatchInsertEdgeFromSourceOprBuilder() = default;
+  ~BatchInsertEdgeFromSourceOprBuilder() = default;
+
+  neug::result<OpBuildResultT> Build(const Schema& schema,
+                                     const ContextMeta& ctx_meta,
+                                     const physical::PhysicalPlan& plan,
+                                     int op_idx) override;
+
+  std::vector<physical::PhysicalOpr_Operator::OpKindCase> GetOpKinds()
+      const override {
+    return {physical::PhysicalOpr_Operator::OpKindCase::kSource,
+            physical::PhysicalOpr_Operator::OpKindCase::kLoadEdge};
+  }
+};
+
 }  // namespace ops
 }  // namespace execution
 }  // namespace neug

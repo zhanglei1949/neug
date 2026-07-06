@@ -126,6 +126,8 @@ void PlanParser::init() {
 
   register_operator_builder(std::make_unique<ops::DataExportOprBuilder>());
 
+  register_operator_builder(
+      std::make_unique<ops::BatchInsertEdgeFromSourceOprBuilder>());
   register_operator_builder(std::make_unique<ops::DataSourceOprBuilder>());
   register_operator_builder(
       std::make_unique<ops::BatchInsertVertexOprBuilder>());
