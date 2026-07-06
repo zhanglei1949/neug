@@ -1737,7 +1737,7 @@ void set_column_from_value_column(
       << "Storage column type does not match expected type.";
   CHECK(value_col != nullptr)
       << "Context column type does not match expected type.";
-  auto data = value_col->data();
+  const auto& data = value_col->data();
 
   auto set_value = [&](size_t k) {
     if constexpr (std::is_same_v<COL_T, std::string_view>) {
