@@ -1071,14 +1071,13 @@ class PartitionedCSVChunkSupplier final : public IDataChunkSupplier {
           worker_count_, static_cast<int32_t>(std::min<int64_t>(
                              file_size_, std::numeric_limits<int32_t>::max())));
     }
-    LOG(INFO) << "PartitionedCSVChunkSupplier opened: file=" << file_path_
-              << ", file_size=" << file_size_ << ", workers=" << worker_count_
-              << ", queue_capacity=" << queue_capacity_
-              << ", chunk_size=" << chunk_size_
-              << ", skip_rows=" << rows_to_skip_
-              << ", physical_columns=" << config_.column_names.size()
-              << ", selected_columns=" << selected_column_names_.size()
-              << ", delimiter='" << config_.delimiter << "'";
+    VLOG(9) << "PartitionedCSVChunkSupplier opened: file=" << file_path_
+            << ", file_size=" << file_size_ << ", workers=" << worker_count_
+            << ", queue_capacity=" << queue_capacity_
+            << ", chunk_size=" << chunk_size_ << ", skip_rows=" << rows_to_skip_
+            << ", physical_columns=" << config_.column_names.size()
+            << ", selected_columns=" << selected_column_names_.size()
+            << ", delimiter='" << config_.delimiter << "'";
     start_workers();
   }
 
@@ -1230,8 +1229,8 @@ class PartitionedCSVChunkSupplier final : public IDataChunkSupplier {
   }
 
   void start_workers() {
-    LOG(INFO) << "PartitionedCSVChunkSupplier starting workers: file="
-              << file_path_ << ", workers=" << worker_count_;
+    VLOG(9) << "PartitionedCSVChunkSupplier starting workers: file="
+            << file_path_ << ", workers=" << worker_count_;
     active_workers_.store(worker_count_, std::memory_order_relaxed);
     workers_.reserve(worker_count_);
     for (int32_t worker_id = 0; worker_id < worker_count_; ++worker_id) {
@@ -1264,9 +1263,9 @@ class PartitionedCSVChunkSupplier final : public IDataChunkSupplier {
     }
     int64_t start = file_size_ * worker_id / worker_count_;
     int64_t end = file_size_ * (worker_id + 1) / worker_count_;
-    LOG(INFO) << "PartitionedCSVChunkSupplier worker started: file="
-              << file_path_ << ", worker=" << worker_id << "/" << worker_count_
-              << ", byte_range=[" << start << ", " << end << ")";
+    VLOG(9) << "PartitionedCSVChunkSupplier worker started: file=" << file_path_
+            << ", worker=" << worker_id << "/" << worker_count_
+            << ", byte_range=[" << start << ", " << end << ")";
 
     const char* const data = mmap_->data();
     const auto file_size = static_cast<size_t>(file_size_);
@@ -1344,12 +1343,6 @@ class PartitionedCSVChunkSupplier final : public IDataChunkSupplier {
       ++local_chunks;
     }
     bytes_read_.fetch_add(local_bytes, std::memory_order_relaxed);
-    LOG(INFO) << "PartitionedCSVChunkSupplier worker finished: file="
-              << file_path_ << ", worker=" << worker_id << ", byte_range=["
-              << start << ", " << end << ")"
-              << ", rows=" << local_rows << ", chunks=" << local_chunks
-              << ", bytes_read=" << local_bytes
-              << ", stopped=" << stop_.load(std::memory_order_relaxed);
   }
 
   void set_error(std::exception_ptr error) {
@@ -1387,18 +1380,18 @@ class PartitionedCSVChunkSupplier final : public IDataChunkSupplier {
     }
     auto stats = GetStats();
     CHECK(stats.has_value());
-    LOG(INFO) << "PartitionedCSVChunkSupplier " << state
-              << ": file=" << file_path_
-              << ", produced_chunks=" << stats->produced_chunks
-              << ", produced_rows=" << stats->produced_rows
-              << ", consumed_chunks=" << stats->consumed_chunks
-              << ", consumed_rows=" << stats->consumed_rows
-              << ", bytes_read=" << stats->bytes_read
-              << ", producer_wait_ms=" << stats->producer_wait_ms
-              << ", consumer_wait_ms=" << stats->consumer_wait_ms
-              << ", max_queue_size=" << stats->max_queue_size
-              << ", workers=" << stats->worker_count
-              << ", has_error=" << has_error_.load(std::memory_order_relaxed);
+    VLOG(9) << "PartitionedCSVChunkSupplier " << state
+            << ": file=" << file_path_
+            << ", produced_chunks=" << stats->produced_chunks
+            << ", produced_rows=" << stats->produced_rows
+            << ", consumed_chunks=" << stats->consumed_chunks
+            << ", consumed_rows=" << stats->consumed_rows
+            << ", bytes_read=" << stats->bytes_read
+            << ", producer_wait_ms=" << stats->producer_wait_ms
+            << ", consumer_wait_ms=" << stats->consumer_wait_ms
+            << ", max_queue_size=" << stats->max_queue_size
+            << ", workers=" << stats->worker_count
+            << ", has_error=" << has_error_.load(std::memory_order_relaxed);
   }
 
  private:
@@ -1557,17 +1550,17 @@ std::shared_ptr<IDataChunkSupplier> CSVChunkSource::Open(
     partition_options.collect_stats = effective.collect_stats;
     partition_options.min_partition_file_bytes =
         effective.min_partition_file_bytes;
-    LOG(INFO) << "Using partitioned CSV supplier for file "
-              << file_paths_.front() << ", size=" << file_size
-              << ", workers=" << effective.worker_count << ", queue_capacity="
-              << (effective.queue_capacity > 0
-                      ? effective.queue_capacity
-                      : std::max<int32_t>(2, effective.worker_count * 2));
+    VLOG(9) << "Using partitioned CSV supplier for file " << file_paths_.front()
+            << ", size=" << file_size << ", workers=" << effective.worker_count
+            << ", queue_capacity="
+            << (effective.queue_capacity > 0
+                    ? effective.queue_capacity
+                    : std::max<int32_t>(2, effective.worker_count * 2));
     return std::make_shared<PartitionedCSVChunkSupplier>(
         file_paths_.front(), config_, partition_options);
   }
   if (effective.collect_stats || options.collect_stats) {
-    LOG(INFO) << "Using serial CSV supplier: " << fallback_reason;
+    VLOG(9) << "Using serial CSV supplier: " << fallback_reason;
   }
   if (file_paths_.size() == 1) {
     return std::make_shared<CSVChunkSupplier>(file_paths_.front(), config_,

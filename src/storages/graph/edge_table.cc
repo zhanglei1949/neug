@@ -464,17 +464,17 @@ void log_chunk_supplier_stats(
   if (!stats) {
     return;
   }
-  LOG(INFO) << phase << " stats: produced_chunks=" << stats->produced_chunks
-            << ", parallel=" << stats->parallel
-            << ", worker_count=" << stats->worker_count
-            << ", produced_rows=" << stats->produced_rows
-            << ", consumed_chunks=" << stats->consumed_chunks
-            << ", consumed_rows=" << stats->consumed_rows
-            << ", bytes_read=" << stats->bytes_read
-            << ", producer_wait_ms=" << stats->producer_wait_ms
-            << ", consumer_wait_ms=" << stats->consumer_wait_ms
-            << ", max_queue_size=" << stats->max_queue_size
-            << ", fallback_reason=" << stats->fallback_reason;
+  VLOG(1) << phase << " stats: produced_chunks=" << stats->produced_chunks
+          << ", parallel=" << stats->parallel
+          << ", worker_count=" << stats->worker_count
+          << ", produced_rows=" << stats->produced_rows
+          << ", consumed_chunks=" << stats->consumed_chunks
+          << ", consumed_rows=" << stats->consumed_rows
+          << ", bytes_read=" << stats->bytes_read
+          << ", producer_wait_ms=" << stats->producer_wait_ms
+          << ", consumer_wait_ms=" << stats->consumer_wait_ms
+          << ", max_queue_size=" << stats->max_queue_size
+          << ", fallback_reason=" << stats->fallback_reason;
 }
 
 template <typename EDATA_T, typename OUT_WRITER, typename IN_WRITER>
@@ -611,8 +611,8 @@ void batch_build_bundled_edges_with_writers(
     int32_t queue_capacity = fill_options.queue_capacity > 0
                                  ? fill_options.queue_capacity
                                  : std::max<int32_t>(2, consumer_count * 2);
-    LOG(INFO) << "BatchBuildEdges pass2 concurrent fill: consumers="
-              << consumer_count << ", queue_capacity=" << queue_capacity;
+    VLOG(1) << "BatchBuildEdges pass2 concurrent fill: consumers="
+            << consumer_count << ", queue_capacity=" << queue_capacity;
     fill_edges_concurrent<EDATA_T>(supplier, src_indexer, dst_indexer,
                                    out_writer, in_writer, consumer_count,
                                    queue_capacity);

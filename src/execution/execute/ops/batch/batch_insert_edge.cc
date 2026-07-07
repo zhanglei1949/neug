@@ -246,7 +246,7 @@ neug::result<Context> BatchInsertEdgeFromSourceOpr::Eval(
   if (is_copy_streaming_enabled() && read_function_->sourceFunc != nullptr) {
     auto raw_source = read_function_->sourceFunc(shared_state_);
     if (raw_source != nullptr) {
-      LOG(INFO) << "BatchInsertEdgeFromSourceOpr using streaming source";
+      VLOG(1) << "BatchInsertEdgeFromSourceOpr using streaming source";
       Context streaming_ctx;
       streaming_ctx.set_streaming_source(std::move(raw_source));
       if (is_edge_bulk_build_enabled()) {
