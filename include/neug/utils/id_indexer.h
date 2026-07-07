@@ -357,6 +357,10 @@ class LFIndexer {
       return owner_->insert_typed(keys_, oid, insert_safe);
     }
 
+    std::pair<INDEX_T, bool> insert_or_get(const KEY_T& oid, bool insert_safe) {
+      return owner_->insert_or_get_typed(keys_, oid, insert_safe);
+    }
+
    private:
     friend class LFIndexer<INDEX_T>;
 
@@ -507,6 +511,56 @@ class LFIndexer {
       index = (index + 1) % (num_slots_minus_one_ + 1);
     }
     return ind;
+  }
+
+  template <typename KEY_T>
+  std::pair<INDEX_T, bool> insert_or_get_typed(TypedColumn<KEY_T>* keys,
+                                               const KEY_T& oid,
+                                               bool insert_safe) {
+    if (NEUG_UNLIKELY(indices_->size() == 0)) {
+      if (!insert_safe) {
+        THROW_INTERNAL_EXCEPTION(
+            "Reserved size is not enough: " + std::to_string(capacity()) +
+            " vs " + std::to_string(num_elements_.load()));
+      }
+      size_t cap = capacity();
+      reserve(cap + (cap >> 2));
+    }
+
+    auto* indices_ptr = indices_->mutable_data();
+    size_t index =
+        hash_policy_.index_for_hash(GHash<KEY_T>()(oid), num_slots_minus_one_);
+    while (true) {
+      INDEX_T ind = indices_ptr[index];
+      if (ind == LFIndexer<INDEX_T>::sentinel) {
+        if (NEUG_UNLIKELY(num_elements_.load(std::memory_order_relaxed) >=
+                          capacity())) {
+          if (!insert_safe) {
+            THROW_INTERNAL_EXCEPTION(
+                "Reserved size is not enough: " + std::to_string(capacity()) +
+                " vs " + std::to_string(num_elements_.load()));
+          }
+          size_t cap = capacity();
+          reserve(cap + (cap >> 2));
+          return insert_or_get_typed(keys, oid, insert_safe);
+        }
+        INDEX_T new_ind = static_cast<INDEX_T>(
+            num_elements_.fetch_add(1, std::memory_order_acq_rel));
+        if (!insert_safe &&
+            NEUG_UNLIKELY(static_cast<size_t>(new_ind) >= capacity())) {
+          THROW_INTERNAL_EXCEPTION(
+              "Reserved size is not enough: " + std::to_string(capacity()) +
+              " vs " + std::to_string(new_ind));
+        }
+        keys->set_value(new_ind, oid);
+        indices_ptr[index] = new_ind;
+        return {new_ind, true};
+      } else if (keys->get_view(ind) == oid) {
+        return {ind, false};
+      } else {
+        index = (index + 1) % (num_slots_minus_one_ + 1);
+      }
+    }
   }
 
   template <typename KEY_T>
