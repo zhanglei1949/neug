@@ -1256,11 +1256,7 @@ class PartitionedCSVChunkSupplier final : public IDataChunkSupplier {
   }
 
   void ensure_workers_started() {
-    if (workers_started_) {
-      return;
-    }
-    workers_started_ = true;
-    start_workers();
+    std::call_once(workers_once_, [this]() { start_workers(); });
   }
 
   void worker_main(int32_t worker_id) {
@@ -1440,7 +1436,7 @@ class PartitionedCSVChunkSupplier final : public IDataChunkSupplier {
   std::shared_ptr<mio::mmap_source> mmap_;
   BoundedBlockingQueue<std::shared_ptr<execution::DataChunk>> queue_;
   std::vector<std::thread> workers_;
-  bool workers_started_ = false;
+  std::once_flag workers_once_;
   std::atomic<int32_t> active_workers_{0};
   std::atomic<bool> stop_{false};
   std::atomic<bool> has_error_{false};

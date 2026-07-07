@@ -33,6 +33,9 @@
 #include <thread>
 #include <utility>
 
+#include <chrono>
+#include <cstdlib>
+
 #include "neug/storages/checkpoint_manager.h"
 #include "neug/storages/csr/csr_view_utils.h"
 #include "neug/storages/csr/immutable_csr.h"
@@ -429,6 +432,40 @@ int32_t default_edge_copy_worker_count() {
   return std::max<int32_t>(1, std::min<int32_t>(hw, 8));
 }
 
+/// Resolve the initial number of edge-building consumer threads.
+/// Defaults to matching the CSV worker count for balanced throughput,
+/// since edge building (index lookup + CSR write) is typically heavier
+/// per-chunk than CSV line parsing.
+static int32_t resolve_edge_consumer_count(int32_t csv_worker_count,
+                                           bool parallel) {
+  if (!parallel) {
+    return 1;
+  }
+  if (const char* env = std::getenv("NEUG_COPY_EDGE_CONSUMERS")) {
+    try {
+      return std::max<int32_t>(1, std::stoi(env));
+    } catch (const std::exception&) {
+      LOG(WARNING) << "Invalid NEUG_COPY_EDGE_CONSUMERS=" << env;
+    }
+  }
+  return std::max<int32_t>(1, csv_worker_count);
+}
+
+/// Resolve the maximum number of edge-building consumers for adaptive
+/// scaling. Allows the pool to grow beyond the initial count when
+/// producers are consistently blocked (queue full).
+static int32_t resolve_max_edge_consumer_count(int32_t initial_count) {
+  if (const char* env = std::getenv("NEUG_COPY_EDGE_MAX_CONSUMERS")) {
+    try {
+      return std::max<int32_t>(initial_count, std::stoi(env));
+    } catch (const std::exception&) {
+      LOG(WARNING) << "Invalid NEUG_COPY_EDGE_MAX_CONSUMERS=" << env;
+    }
+  }
+  // Default: allow up to 2x the initial count for adaptive headroom.
+  return std::max<int32_t>(initial_count, initial_count * 2);
+}
+
 template <typename EDATA_T, typename OUT_WRITER, typename IN_WRITER>
 void fill_edges_from_chunk(const std::shared_ptr<execution::DataChunk>& chunk,
                            const IndexerType& src_indexer,
@@ -489,14 +526,31 @@ void fill_edges_serial(const std::shared_ptr<IDataChunkSupplier>& supplier,
   }
 }
 
+/// Adaptive concurrent edge fill: consumer threads directly pull chunks
+/// from the supplier, eliminating the intermediate EdgeChunkQueue.
+///
+/// Architecture (merged pipeline):
+///   N CSV workers → [supplier queue] → M edge builders (direct GetNextChunk)
+///
+/// The supplier's internal queue becomes the single flow-control point.
+/// Backpressure propagates directly: when edge builders are slow, the queue
+/// fills and CSV workers naturally throttle; when CSV parsing is slow, edge
+/// builders wait on GetNextChunk.
+///
+/// Adaptive scaling: the main thread monitors per-thread wait times and
+/// spawns additional edge builders when producers are consistently blocked
+/// (queue full), self-tuning the producer/consumer ratio at runtime.
 template <typename EDATA_T, typename OUT_WRITER, typename IN_WRITER>
-void fill_edges_concurrent(const std::shared_ptr<IDataChunkSupplier>& supplier,
-                           const IndexerType& src_indexer,
-                           const IndexerType& dst_indexer,
-                           OUT_WRITER& out_writer, IN_WRITER& in_writer,
-                           int32_t consumer_count, int32_t queue_capacity) {
+void fill_edges_adaptive(const std::shared_ptr<IDataChunkSupplier>& supplier,
+                          const IndexerType& src_indexer,
+                          const IndexerType& dst_indexer,
+                          OUT_WRITER& out_writer, IN_WRITER& in_writer,
+                          int32_t initial_consumer_count,
+                          int32_t max_consumer_count) {
   CHECK(supplier != nullptr);
-  EdgeChunkQueue<std::shared_ptr<execution::DataChunk>> queue(queue_capacity);
+  CHECK_GE(initial_consumer_count, 1);
+  CHECK_GE(max_consumer_count, initial_consumer_count);
+
   std::atomic<bool> has_error{false};
   std::mutex error_mutex;
   std::exception_ptr first_error;
@@ -505,43 +559,101 @@ void fill_edges_concurrent(const std::shared_ptr<IDataChunkSupplier>& supplier,
     bool expected = false;
     if (has_error.compare_exchange_strong(expected, true,
                                           std::memory_order_acq_rel)) {
-      {
-        std::lock_guard<std::mutex> lock(error_mutex);
-        first_error = std::move(error);
-      }
-      queue.Close();
+      std::lock_guard<std::mutex> lock(error_mutex);
+      first_error = std::move(error);
     }
   };
 
-  std::vector<std::thread> consumers;
-  consumers.reserve(consumer_count);
-  for (int32_t i = 0; i < consumer_count; ++i) {
-    consumers.emplace_back([&]() {
-      try {
-        std::shared_ptr<execution::DataChunk> chunk;
-        while (queue.Pop(chunk)) {
-          fill_edges_from_chunk<EDATA_T>(chunk, src_indexer, dst_indexer,
-                                         out_writer, in_writer);
+  std::atomic<int32_t> active_consumers{0};
+
+  auto worker_fn = [&]() {
+    active_consumers.fetch_add(1, std::memory_order_relaxed);
+    try {
+      std::shared_ptr<execution::DataChunk> chunk;
+      while (!has_error.load(std::memory_order_acquire)) {
+        chunk = supplier->GetNextChunk();
+        if (!chunk) {
+          break;
         }
-      } catch (...) { set_error(std::current_exception()); }
-    });
+        fill_edges_from_chunk<EDATA_T>(chunk, src_indexer, dst_indexer,
+                                       out_writer, in_writer);
+      }
+    } catch (...) {
+      set_error(std::current_exception());
+    }
+    active_consumers.fetch_sub(1, std::memory_order_relaxed);
+  };
+
+  std::vector<std::thread> consumers;
+  consumers.reserve(static_cast<size_t>(max_consumer_count));
+  for (int32_t i = 0; i < initial_consumer_count; ++i) {
+    consumers.emplace_back(worker_fn);
   }
 
-  try {
-    while (!has_error.load(std::memory_order_acquire)) {
-      auto chunk = supplier->GetNextChunk();
-      if (!chunk) {
-        break;
-      }
-      if (!queue.Push(std::move(chunk))) {
-        break;
+  // Adaptive controller: monitors queue pressure and spawns additional
+  // consumers when CSV producers are blocked more than edge builders.
+  // Per-thread wait times are compared for fairness, since producer_wait
+  // is accumulated across all CSV workers and consumer_wait across all
+  // edge builders.
+  constexpr int64_t kSpawnThresholdMs = 500;
+  constexpr auto kMonitorInterval = std::chrono::milliseconds(100);
+
+  while (active_consumers.load(std::memory_order_acquire) > 0) {
+    std::this_thread::sleep_for(kMonitorInterval);
+
+    if (has_error.load(std::memory_order_acquire)) {
+      break;
+    }
+
+    auto stats = supplier->GetStats();
+    if (!stats || stats->worker_count == 0) {
+      continue;
+    }
+
+    int32_t current_count = static_cast<int32_t>(consumers.size());
+    if (current_count >= max_consumer_count) {
+      continue;
+    }
+
+    // All consumers may have finished while we were sleeping.
+    if (active_consumers.load(std::memory_order_acquire) == 0) {
+      break;
+    }
+
+    // Compare per-thread wait times for fairness.
+    double per_producer_wait =
+        static_cast<double>(stats->producer_wait_ms) / stats->worker_count;
+    double per_consumer_wait =
+        static_cast<double>(stats->consumer_wait_ms) /
+        std::max(1, static_cast<int>(consumers.size()));
+
+    if (per_producer_wait > per_consumer_wait + kSpawnThresholdMs) {
+      // Producers are blocked (queue full) → edge building is the
+      // bottleneck. Spawn more consumers to drain the queue faster.
+      int32_t to_spawn = std::min<int32_t>(
+          std::max<int32_t>(
+              1, static_cast<int32_t>((per_producer_wait -
+                                       per_consumer_wait) /
+                                      kSpawnThresholdMs)),
+          max_consumer_count - current_count);
+      VLOG(1) << "Adaptive edge fill: spawning " << to_spawn
+              << " more consumers (total=" << current_count + to_spawn
+              << ", per_producer_wait="
+              << static_cast<int64_t>(per_producer_wait) << "ms"
+              << ", per_consumer_wait="
+              << static_cast<int64_t>(per_consumer_wait) << "ms)";
+      for (int32_t i = 0; i < to_spawn; ++i) {
+        consumers.emplace_back(worker_fn);
       }
     }
-  } catch (...) { set_error(std::current_exception()); }
-  queue.Close();
-  for (auto& consumer : consumers) {
-    consumer.join();
   }
+
+  for (auto& consumer : consumers) {
+    if (consumer.joinable()) {
+      consumer.join();
+    }
+  }
+
   if (has_error.load(std::memory_order_acquire)) {
     std::exception_ptr error;
     {
@@ -596,26 +708,25 @@ void batch_build_bundled_edges_with_writers(
   }
   supplier = source->Open(fill_options);
   CHECK(supplier != nullptr);
-  int32_t consumer_count =
-      fill_options.parallel_enabled
-          ? std::max<int32_t>(1, fill_options.worker_count / 2)
-          : 1;
+  bool use_parallel = fill_options.parallel_enabled;
   auto stats = supplier->GetStats();
   if (!stats || !stats->parallel || !stats->fallback_reason.empty()) {
-    consumer_count = 1;
+    use_parallel = false;
   }
+  int32_t consumer_count =
+      resolve_edge_consumer_count(fill_options.worker_count, use_parallel);
+  int32_t max_consumer_count =
+      resolve_max_edge_consumer_count(consumer_count);
   if (consumer_count <= 1) {
     fill_edges_serial<EDATA_T>(supplier, src_indexer, dst_indexer, out_writer,
                                in_writer);
   } else {
-    int32_t queue_capacity = fill_options.queue_capacity > 0
-                                 ? fill_options.queue_capacity
-                                 : std::max<int32_t>(2, consumer_count * 2);
-    VLOG(1) << "BatchBuildEdges pass2 concurrent fill: consumers="
-            << consumer_count << ", queue_capacity=" << queue_capacity;
-    fill_edges_concurrent<EDATA_T>(supplier, src_indexer, dst_indexer,
-                                   out_writer, in_writer, consumer_count,
-                                   queue_capacity);
+    VLOG(1) << "BatchBuildEdges pass2 adaptive fill: initial_consumers="
+            << consumer_count << ", max_consumers=" << max_consumer_count
+            << ", csv_workers=" << fill_options.worker_count;
+    fill_edges_adaptive<EDATA_T>(supplier, src_indexer, dst_indexer,
+                                  out_writer, in_writer, consumer_count,
+                                  max_consumer_count);
   }
   log_chunk_supplier_stats(supplier, "BatchBuildEdges pass2");
 
