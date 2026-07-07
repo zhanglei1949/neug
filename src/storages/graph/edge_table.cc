@@ -542,11 +542,10 @@ void fill_edges_serial(const std::shared_ptr<IDataChunkSupplier>& supplier,
 /// (queue full), self-tuning the producer/consumer ratio at runtime.
 template <typename EDATA_T, typename OUT_WRITER, typename IN_WRITER>
 void fill_edges_adaptive(const std::shared_ptr<IDataChunkSupplier>& supplier,
-                          const IndexerType& src_indexer,
-                          const IndexerType& dst_indexer,
-                          OUT_WRITER& out_writer, IN_WRITER& in_writer,
-                          int32_t initial_consumer_count,
-                          int32_t max_consumer_count) {
+                         const IndexerType& src_indexer,
+                         const IndexerType& dst_indexer, OUT_WRITER& out_writer,
+                         IN_WRITER& in_writer, int32_t initial_consumer_count,
+                         int32_t max_consumer_count) {
   CHECK(supplier != nullptr);
   CHECK_GE(initial_consumer_count, 1);
   CHECK_GE(max_consumer_count, initial_consumer_count);
@@ -578,9 +577,7 @@ void fill_edges_adaptive(const std::shared_ptr<IDataChunkSupplier>& supplier,
         fill_edges_from_chunk<EDATA_T>(chunk, src_indexer, dst_indexer,
                                        out_writer, in_writer);
       }
-    } catch (...) {
-      set_error(std::current_exception());
-    }
+    } catch (...) { set_error(std::current_exception()); }
     active_consumers.fetch_sub(1, std::memory_order_relaxed);
   };
 
@@ -623,17 +620,15 @@ void fill_edges_adaptive(const std::shared_ptr<IDataChunkSupplier>& supplier,
     // Compare per-thread wait times for fairness.
     double per_producer_wait =
         static_cast<double>(stats->producer_wait_ms) / stats->worker_count;
-    double per_consumer_wait =
-        static_cast<double>(stats->consumer_wait_ms) /
-        std::max(1, static_cast<int>(consumers.size()));
+    double per_consumer_wait = static_cast<double>(stats->consumer_wait_ms) /
+                               std::max(1, static_cast<int>(consumers.size()));
 
     if (per_producer_wait > per_consumer_wait + kSpawnThresholdMs) {
       // Producers are blocked (queue full) → edge building is the
       // bottleneck. Spawn more consumers to drain the queue faster.
       int32_t to_spawn = std::min<int32_t>(
           std::max<int32_t>(
-              1, static_cast<int32_t>((per_producer_wait -
-                                       per_consumer_wait) /
+              1, static_cast<int32_t>((per_producer_wait - per_consumer_wait) /
                                       kSpawnThresholdMs)),
           max_consumer_count - current_count);
       VLOG(1) << "Adaptive edge fill: spawning " << to_spawn
@@ -715,8 +710,7 @@ void batch_build_bundled_edges_with_writers(
   }
   int32_t consumer_count =
       resolve_edge_consumer_count(fill_options.worker_count, use_parallel);
-  int32_t max_consumer_count =
-      resolve_max_edge_consumer_count(consumer_count);
+  int32_t max_consumer_count = resolve_max_edge_consumer_count(consumer_count);
   if (consumer_count <= 1) {
     fill_edges_serial<EDATA_T>(supplier, src_indexer, dst_indexer, out_writer,
                                in_writer);
@@ -724,9 +718,8 @@ void batch_build_bundled_edges_with_writers(
     VLOG(1) << "BatchBuildEdges pass2 adaptive fill: initial_consumers="
             << consumer_count << ", max_consumers=" << max_consumer_count
             << ", csv_workers=" << fill_options.worker_count;
-    fill_edges_adaptive<EDATA_T>(supplier, src_indexer, dst_indexer,
-                                  out_writer, in_writer, consumer_count,
-                                  max_consumer_count);
+    fill_edges_adaptive<EDATA_T>(supplier, src_indexer, dst_indexer, out_writer,
+                                 in_writer, consumer_count, max_consumer_count);
   }
   log_chunk_supplier_stats(supplier, "BatchBuildEdges pass2");
 
