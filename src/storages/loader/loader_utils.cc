@@ -35,7 +35,6 @@
 #include <memory>
 #include <mutex>
 #include <ostream>
-#include <shared_mutex>
 #include <sstream>
 #include <string_view>
 #include <thread>
@@ -1852,9 +1851,9 @@ void fillEdgeReaderMeta(label_t src_label_id, label_t dst_label_id,
 namespace {
 
 template <typename SRC_T, typename COL_T = SRC_T>
-void set_column_from_value_column(
+void set_column_from_value_column_rowwise(
     ColumnBase* col, const std::shared_ptr<execution::IContextColumn>& ctx_col,
-    const std::vector<vid_t>& vids, std::shared_mutex* mutex = nullptr) {
+    const std::vector<vid_t>& vids) {
   auto* typed = dynamic_cast<TypedColumn<COL_T>*>(col);
   auto value_col =
       std::dynamic_pointer_cast<execution::ValueColumn<SRC_T>>(ctx_col);
@@ -1864,19 +1863,12 @@ void set_column_from_value_column(
   CHECK(value_col != nullptr)
       << "Context column type does not match expected type.";
   const auto& data = value_col->data();
+  CHECK_EQ(vids.size(), data.size());
 
   auto set_value = [&](size_t k) {
     if constexpr (std::is_same_v<COL_T, std::string_view>) {
-      CHECK(mutex != nullptr) << "String column write requires a shared mutex.";
       const auto& s = data[k];
-      std::shared_lock<std::shared_mutex> lock(*mutex);
-      if (typed->available_space() <= s.size()) {
-        lock.unlock();
-        std::unique_lock<std::shared_mutex> w_lock(*mutex);
-        typed->resize(typed->size());
-        w_lock.unlock();
-        lock.lock();
-      }
+      typed->reserve_string_bytes(s.size());
       typed->set_value(vids[k], std::string_view(s));
     } else {
       typed->set_value(vids[k], data[k]);
@@ -1891,36 +1883,73 @@ void set_column_from_value_column(
   }
 }
 
+template <typename T>
+void set_fixed_column_from_value_column(
+    ColumnBase* col, const std::shared_ptr<execution::IContextColumn>& ctx_col,
+    const std::vector<vid_t>& vids) {
+  auto* typed = dynamic_cast<TypedColumn<T>*>(col);
+  auto value_col =
+      std::dynamic_pointer_cast<execution::ValueColumn<T>>(ctx_col);
+
+  CHECK(typed != nullptr)
+      << "Storage column type does not match expected type.";
+  CHECK(value_col != nullptr)
+      << "Context column type does not match expected type.";
+  if (value_col->is_optional()) {
+    set_column_from_value_column_rowwise<T>(col, ctx_col, vids);
+    return;
+  }
+  typed->set_values(vids, value_col->data());
+}
+
+void set_string_column_from_value_column(
+    ColumnBase* col, const std::shared_ptr<execution::IContextColumn>& ctx_col,
+    const std::vector<vid_t>& vids) {
+  auto* typed = dynamic_cast<StringColumn*>(col);
+  auto value_col =
+      std::dynamic_pointer_cast<execution::ValueColumn<std::string>>(ctx_col);
+
+  CHECK(typed != nullptr)
+      << "Storage column type does not match expected type.";
+  CHECK(value_col != nullptr)
+      << "Context column type does not match expected type.";
+  if (value_col->is_optional()) {
+    set_column_from_value_column_rowwise<std::string, std::string_view>(
+        col, ctx_col, vids);
+    return;
+  }
+  typed->set_string_values(vids, value_col->data());
+}
+
 }  // namespace
 
 void set_properties_from_context_column(
     neug::ColumnBase* col,
     const std::shared_ptr<execution::IContextColumn>& ctx_col,
-    const std::vector<vid_t>& vids, std::shared_mutex& mutex) {
+    const std::vector<vid_t>& vids) {
   auto col_type = col->type();
   switch (col_type) {
-#define SET_TYPED_VALUE(enum_val, ctype)                     \
-  case DataTypeId::enum_val: {                               \
-    set_column_from_value_column<ctype>(col, ctx_col, vids); \
-    break;                                                   \
+#define SET_TYPED_VALUE(enum_val, ctype)                           \
+  case DataTypeId::enum_val: {                                     \
+    set_fixed_column_from_value_column<ctype>(col, ctx_col, vids); \
+    break;                                                         \
   }
     FOR_EACH_DATA_TYPE_PRIMITIVE(SET_TYPED_VALUE)
 #undef SET_TYPED_VALUE
   case DataTypeId::kDate: {
-    set_column_from_value_column<Date>(col, ctx_col, vids);
+    set_fixed_column_from_value_column<Date>(col, ctx_col, vids);
     break;
   }
   case DataTypeId::kTimestampMs: {
-    set_column_from_value_column<DateTime>(col, ctx_col, vids);
+    set_fixed_column_from_value_column<DateTime>(col, ctx_col, vids);
     break;
   }
   case DataTypeId::kInterval: {
-    set_column_from_value_column<Interval>(col, ctx_col, vids);
+    set_fixed_column_from_value_column<Interval>(col, ctx_col, vids);
     break;
   }
   case DataTypeId::kVarchar: {
-    set_column_from_value_column<std::string, std::string_view>(col, ctx_col,
-                                                                vids, &mutex);
+    set_string_column_from_value_column(col, ctx_col, vids);
     break;
   }
   default:

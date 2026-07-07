@@ -320,7 +320,9 @@ class VertexTable {
       auto indexer_access = indexer_->template typed_access<PK_T>();
       for (size_t j = 0; j < data.size(); ++j) {
         const auto& oid = data[j];
-        if (NEUG_UNLIKELY(indexer_access.get_index(oid, vids[j]))) {
+        auto [vid, inserted] = indexer_access.insert_or_get(oid, false);
+        vids[j] = vid;
+        if (NEUG_UNLIKELY(!inserted)) {
           if (NEUG_UNLIKELY(v_ts_->IsVertexValid(vids[j], MAX_TIMESTAMP))) {
             vids[j] = std::numeric_limits<vid_t>::max();
           } else {
@@ -328,7 +330,6 @@ class VertexTable {
           }
           continue;
         }
-        vids[j] = indexer_access.insert(oid, false);
         v_ts_->InsertVertex(vids[j], 0);
       }
       return vids;
@@ -348,7 +349,6 @@ class VertexTable {
           "Unexpected negative row number from supplier: " +
           std::to_string(row_nums));
     }
-    std::shared_mutex rw_mutex;
     while (true) {
       auto chunk = supplier->GetNextChunk();
       if (chunk == nullptr) {
@@ -381,7 +381,7 @@ class VertexTable {
 
       for (size_t i = 0; i < prop_cols.size(); ++i) {
         auto col = table_->get_column_by_id(i);
-        set_properties_from_context_column(col, prop_cols[i], vids, rw_mutex);
+        set_properties_from_context_column(col, prop_cols[i], vids);
       }
       VLOG(10) << "Inserted " << chunk_rows
                << " vertices, current vertex num: " << VertexNum();

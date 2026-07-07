@@ -19,19 +19,22 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <ostream>
-#include <shared_mutex>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "neug/config.h"
+#include "neug/execution/common/columns/container_types.h"
 #include "neug/execution/common/types/value.h"
 #include "neug/storages/checkpoint.h"
 #include "neug/storages/container/container_utils.h"
@@ -131,6 +134,43 @@ class TypedColumn : public ColumnBase {
       reinterpret_cast<T*>(buffer_->GetData())[index] = val;
     } else {
       THROW_RUNTIME_ERROR("Index out of range");
+    }
+  }
+
+  void set_values(const std::vector<vid_t>& vids, const vector_t<T>& values) {
+    CHECK_EQ(vids.size(), values.size());
+    auto* raw_data = reinterpret_cast<T*>(buffer_->GetData());
+    auto is_valid_vid = [](vid_t vid) {
+      return vid < std::numeric_limits<vid_t>::max();
+    };
+    size_t k = 0;
+    while (k < values.size()) {
+      while (k < values.size() && !is_valid_vid(vids[k])) {
+        ++k;
+      }
+      if (k == values.size()) {
+        break;
+      }
+
+      size_t begin = k;
+      vid_t begin_vid = vids[k];
+      CHECK_LT(begin_vid, size_) << "Index out of range";
+      ++k;
+      while (k < values.size() && is_valid_vid(vids[k]) &&
+             static_cast<size_t>(vids[k]) ==
+                 static_cast<size_t>(begin_vid) + (k - begin)) {
+        CHECK_LT(vids[k], size_) << "Index out of range";
+        ++k;
+      }
+
+      if constexpr (std::is_same_v<T, bool>) {
+        for (size_t i = begin; i < k; ++i) {
+          raw_data[vids[i]] = values[i];
+        }
+      } else {
+        std::copy(values.begin() + begin, values.begin() + k,
+                  raw_data + begin_vid);
+      }
     }
   }
 
@@ -450,24 +490,71 @@ class TypedColumn<std::string_view> : public ColumnBase {
   DataTypeId type() const override { return DataTypeId::kVarchar; }
 
   void set_value(size_t idx, const std::string_view& val) {
-    auto copied_val = val;
-    if (copied_val.size() >= width_) {
-      VLOG(1) << "String length" << copied_val.size()
-              << " exceeds the maximum length: " << width_ << ", cut off.";
-      copied_val = truncate_utf8(copied_val, width_);
-    }
+    auto copied_val = truncate_to_width(val, true);
     if (idx < size_ &&
         pos_.load() + copied_val.size() <= data_buffer_->GetDataSize()) {
-      // NOTE: Even if idx has been set before, we always append the new value
-      // to the end of buffer_. The previous value is not reclaimed, and should
-      // be handled by garbage collection or compaction.
-      size_t offset = pos_.fetch_add(copied_val.size());
-      set_string_item(idx, {offset, static_cast<uint32_t>(copied_val.size())});
-      assert(offset + copied_val.size() <= data_buffer_->GetDataSize());
-      auto raw_data = reinterpret_cast<char*>(data_buffer_->GetData());
-      memcpy(raw_data + offset, copied_val.data(), copied_val.size());
+      append_reserved_string(idx, copied_val);
     } else {
       THROW_RUNTIME_ERROR("Index out of range or not enough space in buffer");
+    }
+  }
+
+  void reserve_string_bytes(size_t extra_bytes) {
+    if (extra_bytes == 0) {
+      return;
+    }
+    size_t current_pos = pos_.load();
+    if (NEUG_UNLIKELY(extra_bytes >
+                      std::numeric_limits<size_t>::max() - current_pos)) {
+      THROW_RUNTIME_ERROR("String column buffer size overflow");
+    }
+    size_t required = current_pos + extra_bytes;
+    size_t current = data_buffer_->GetDataSize();
+    if (required <= current) {
+      return;
+    }
+    size_t new_size = std::max(current, size_t{4096});
+    while (new_size < required) {
+      size_t grown = new_size + std::max(new_size / 4, size_t{4096});
+      if (grown <= new_size) {
+        new_size = required;
+        break;
+      }
+      new_size = grown;
+    }
+    data_buffer_->Resize(new_size);
+  }
+
+  void set_string_values(const std::vector<vid_t>& vids,
+                         const vector_t<std::string>& values) {
+    CHECK_EQ(vids.size(), values.size());
+    auto is_valid_vid = [](vid_t vid) {
+      return vid < std::numeric_limits<vid_t>::max();
+    };
+    // Truncate once and cache the results to avoid double truncation.
+    std::vector<std::string_view> truncated;
+    truncated.reserve(values.size());
+    size_t bytes_required = 0;
+    for (size_t k = 0; k < values.size(); ++k) {
+      if (!is_valid_vid(vids[k])) {
+        truncated.emplace_back();
+        continue;
+      }
+      CHECK_LT(vids[k], size_) << "Index out of range";
+      auto sv = truncate_to_width(values[k], true);
+      if (NEUG_UNLIKELY(sv.size() >
+                        std::numeric_limits<size_t>::max() - bytes_required)) {
+        THROW_RUNTIME_ERROR("String column buffer size overflow");
+      }
+      bytes_required += sv.size();
+      truncated.emplace_back(sv);
+    }
+    reserve_string_bytes(bytes_required);
+    for (size_t k = 0; k < values.size(); ++k) {
+      if (!is_valid_vid(vids[k])) {
+        continue;
+      }
+      append_reserved_string(vids[k], truncated[k]);
     }
   }
 
@@ -558,6 +645,30 @@ class TypedColumn<std::string_view> : public ColumnBase {
     assert(idx < size_);
     auto raw_items = reinterpret_cast<string_item*>(items_buffer_->GetData());
     raw_items[idx] = item;
+  }
+
+  std::string_view truncate_to_width(std::string_view val,
+                                     bool log_truncation) const {
+    if (val.size() >= width_) {
+      if (log_truncation) {
+        VLOG(1) << "String length" << val.size()
+                << " exceeds the maximum length: " << width_ << ", cut off.";
+      }
+      return truncate_utf8(val, width_);
+    }
+    return val;
+  }
+
+  void append_reserved_string(size_t idx, std::string_view val) {
+    assert(idx < size_);
+    // NOTE: Even if idx has been set before, we always append the new value
+    // to the end of buffer_. The previous value is not reclaimed, and should
+    // be handled by garbage collection or compaction.
+    size_t offset = pos_.fetch_add(val.size());
+    set_string_item(idx, {offset, static_cast<uint32_t>(val.size())});
+    assert(offset + val.size() <= data_buffer_->GetDataSize());
+    auto raw_data = reinterpret_cast<char*>(data_buffer_->GetData());
+    memcpy(raw_data + offset, val.data(), val.size());
   }
 
   size_t string_avg_size() const {
