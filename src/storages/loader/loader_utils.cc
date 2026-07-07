@@ -22,9 +22,11 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <charconv>
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
+#include <cstring>
 #include <deque>
 #include <exception>
 #include <filesystem>
@@ -44,6 +46,7 @@
 #include "neug/execution/common/columns/columns_utils.h"
 #include "neug/execution/common/columns/value_columns.h"
 #include "neug/execution/common/types/value.h"
+#include "neug/execution/utils/numeric_cast.h"
 #include "neug/utils/datetime_parsers.h"
 #include "neug/utils/exception/exception.h"
 #include "neug/utils/property/column.h"
@@ -273,97 +276,169 @@ std::vector<DataType> resolve_selected_column_types(
   return selected_column_types;
 }
 
-bool parse_timestamp_ms(const std::string& token, int64_t* out_ms) {
+bool parse_timestamp_ms(std::string_view token, int64_t* out_ms) {
   return utils::parse_timestamp_ms(token.data(), token.size(), out_ms);
 }
 
-bool parse_epoch_timestamp_ms(const std::string& token, int64_t* out_ms) {
+bool parse_epoch_timestamp_ms(std::string_view token, int64_t* out_ms) {
   return utils::parse_epoch_timestamp_ms(token.data(), token.size(), out_ms);
 }
 
-std::string canonicalize_bool_token(
-    const std::string& token,
-    const std::unordered_set<std::string>& true_values,
-    const std::unordered_set<std::string>& false_values) {
-  if (token == "1" || token == "0") {
-    return token;
+bool equals_ignore_case(std::string_view lhs, std::string_view rhs) {
+  if (lhs.size() != rhs.size()) {
+    return false;
   }
-  if (true_values.contains(token)) {
-    return "true";
+  for (size_t i = 0; i < lhs.size(); ++i) {
+    auto l = static_cast<unsigned char>(lhs[i]);
+    auto r = static_cast<unsigned char>(rhs[i]);
+    if (std::tolower(l) != std::tolower(r)) {
+      return false;
+    }
   }
-  if (false_values.contains(token)) {
-    return "false";
-  }
+  return true;
+}
 
-  auto lowered = to_lower_copy(token);
-  if (lowered == "true" || lowered == "false") {
-    return lowered;
+bool contains_string_view(const std::unordered_set<std::string>& values,
+                          std::string_view token) {
+  for (const auto& value : values) {
+    if (token.size() == value.size() &&
+        std::memcmp(token.data(), value.data(), token.size()) == 0) {
+      return true;
+    }
   }
-  THROW_CONVERSION_EXCEPTION("Invalid boolean value: " + token);
+  return false;
+}
+
+bool parse_bool_token(std::string_view token,
+                      const std::unordered_set<std::string>& true_values,
+                      const std::unordered_set<std::string>& false_values) {
+  if (token == "1") {
+    return true;
+  }
+  if (token == "0") {
+    return false;
+  }
+  if (contains_string_view(true_values, token) ||
+      equals_ignore_case(token, "true")) {
+    return true;
+  }
+  if (contains_string_view(false_values, token) ||
+      equals_ignore_case(token, "false")) {
+    return false;
+  }
+  THROW_CONVERSION_EXCEPTION("Invalid boolean value: " + std::string(token));
 }
 
 template <typename T>
-execution::Value parse_typed_value(const std::string& token) {
-  return execution::Value::CreateValue<T>(
-      execution::ValueConverter<T>::typed_from_string(token));
+T parse_integral_token(std::string_view token) {
+  auto [data, len] = execution::removeWhiteSpaces(token);
+  if (len == 0) {
+    THROW_CONVERSION_EXCEPTION("Invalid integer value: " + std::string(token));
+  }
+  T value{};
+  auto* end = data + len;
+  auto result = std::from_chars(data, end, value);
+  if (result.ec != std::errc() || result.ptr != end) {
+    return execution::ValueConverter<T>::typed_from_string(std::string(token));
+  }
+  return value;
 }
 
-execution::Value parse_date_value(const std::string& token) {
+template <typename T>
+T parse_floating_token(std::string_view token) {
+  T value{};
+  if (!execution::tryDoubleCast(token, value)) {
+    return execution::ValueConverter<T>::typed_from_string(std::string(token));
+  }
+  return value;
+}
+
+Date parse_date_token(std::string_view token) {
   int64_t millis = 0;
   if (parse_timestamp_ms(token, &millis) ||
       parse_epoch_timestamp_ms(token, &millis)) {
     Date d;
     d.from_timestamp(millis);
-    return execution::Value::CreateValue<Date>(d);
+    return d;
   }
-  return parse_typed_value<execution::date_t>(token);
+  return Date(std::string(token));
 }
 
-execution::Value parse_timestamp_value(const std::string& token) {
+DateTime parse_timestamp_token(std::string_view token) {
   int64_t millis = 0;
   if (parse_timestamp_ms(token, &millis) ||
       parse_epoch_timestamp_ms(token, &millis)) {
-    return execution::Value::CreateValue<execution::timestamp_ms_t>(
-        DateTime(millis));
+    return DateTime(millis);
   }
-  return parse_typed_value<execution::timestamp_ms_t>(token);
+  return DateTime(std::string(token));
 }
 
-execution::Value parse_value_by_type(
-    const std::string& token, const DataType& data_type,
+template <typename T>
+void append_builder_value(
+    const std::shared_ptr<execution::IContextColumnBuilder>& builder,
+    T&& value) {
+  using ValueT = std::decay_t<T>;
+#ifdef NDEBUG
+  // Type safety is guaranteed by ColumnsUtils::create_builder() which creates
+  // the correct ValueColumnBuilder<T> for each DataType. Skip RTTI in release.
+  auto* typed =
+      static_cast<execution::ValueColumnBuilder<ValueT>*>(builder.get());
+  CHECK(typed != nullptr) << "Context column builder is null.";
+#else
+  auto* typed =
+      dynamic_cast<execution::ValueColumnBuilder<ValueT>*>(builder.get());
+  CHECK(typed != nullptr) << "Context column builder type does not match.";
+#endif
+  typed->push_back_opt(value);
+}
+
+void append_value_by_type(
+    const std::shared_ptr<execution::IContextColumnBuilder>& builder,
+    std::string_view token, const DataType& data_type,
     const std::unordered_set<std::string>& true_values,
     const std::unordered_set<std::string>& false_values) {
   switch (data_type.id()) {
   case DataTypeId::kInt32:
-    return parse_typed_value<int32_t>(token);
+    append_builder_value(builder, parse_integral_token<int32_t>(token));
+    return;
   case DataTypeId::kInt64:
-    return parse_typed_value<int64_t>(token);
+    append_builder_value(builder, parse_integral_token<int64_t>(token));
+    return;
   case DataTypeId::kUInt32:
-    return parse_typed_value<uint32_t>(token);
+    append_builder_value(builder, parse_integral_token<uint32_t>(token));
+    return;
   case DataTypeId::kUInt64:
-    return parse_typed_value<uint64_t>(token);
+    append_builder_value(builder, parse_integral_token<uint64_t>(token));
+    return;
   case DataTypeId::kFloat:
-    return parse_typed_value<float>(token);
+    append_builder_value(builder, parse_floating_token<float>(token));
+    return;
   case DataTypeId::kDouble:
-    return parse_typed_value<double>(token);
+    append_builder_value(builder, parse_floating_token<double>(token));
+    return;
   case DataTypeId::kBoolean:
-    return parse_typed_value<bool>(
-        canonicalize_bool_token(token, true_values, false_values));
+    append_builder_value(builder,
+                         parse_bool_token(token, true_values, false_values));
+    return;
   case DataTypeId::kDate:
-    return parse_date_value(token);
+    append_builder_value(builder, parse_date_token(token));
+    return;
   case DataTypeId::kTimestampMs:
-    return parse_timestamp_value(token);
+    append_builder_value(builder, parse_timestamp_token(token));
+    return;
   case DataTypeId::kInterval:
-    return parse_typed_value<execution::interval_t>(token);
+    append_builder_value(builder, Interval(token));
+    return;
   case DataTypeId::kVarchar:
-    return parse_typed_value<std::string>(token);
+    append_builder_value(builder, std::string(token));
+    return;
   default:
     THROW_NOT_SUPPORTED_EXCEPTION("Unsupported data type in CSV parser: " +
                                   data_type.ToString());
   }
 }
 
-std::string unescape_token(const std::string& token, char escape_char) {
+std::string unescape_token(std::string_view token, char escape_char) {
   std::string res;
   res.reserve(token.size());
   for (size_t i = 0; i < token.size(); ++i) {
@@ -379,30 +454,31 @@ std::string unescape_token(const std::string& token, char escape_char) {
 
 void append_csv_token_to_builder(
     std::shared_ptr<execution::IContextColumnBuilder>& builder,
-    const DataType& data_type, std::string token,
+    const DataType& data_type, std::string_view token,
     const std::unordered_set<std::string>& null_values,
     const std::unordered_set<std::string>& true_values,
     const std::unordered_set<std::string>& false_values,
     const std::string& file_path, int64_t row_number,
     const std::string& column_name, bool escaping, char escape_char) {
-  if (null_values.contains(token)) {
+  if (token.empty() || contains_string_view(null_values, token)) {
     builder->push_back_null();
     return;
   }
 
+  std::string unescaped;
   if (escaping) {
-    token = unescape_token(token, escape_char);
+    unescaped = unescape_token(token, escape_char);
+    token = unescaped;
   }
 
   try {
-    builder->push_back_elem(
-        parse_value_by_type(token, data_type, true_values, false_values));
+    append_value_by_type(builder, token, data_type, true_values, false_values);
   } catch (const std::exception& error) {
-    THROW_CONVERSION_EXCEPTION("Failed to parse CSV field, file=" + file_path +
-                               ", row=" + std::to_string(row_number) +
-                               ", column=" + column_name +
-                               ", type=" + data_type.ToString() + ", value='" +
-                               token + "', reason=" + error.what());
+    THROW_CONVERSION_EXCEPTION(
+        "Failed to parse CSV field, file=" + file_path +
+        ", row=" + std::to_string(row_number) + ", column=" + column_name +
+        ", type=" + data_type.ToString() + ", value='" + std::string(token) +
+        "', reason=" + error.what());
   }
 }
 
@@ -418,7 +494,8 @@ void append_csv_field_to_builder(
     builder->push_back_null();
     return;
   }
-  append_csv_token_to_builder(builder, data_type, field.get<std::string>(),
+  auto token = field.get<std::string>();
+  append_csv_token_to_builder(builder, data_type, std::string_view(token),
                               null_values, true_values, false_values, file_path,
                               row_number, column_name, escaping, escape_char);
 }
@@ -973,7 +1050,22 @@ class PartitionedCSVChunkSupplier final : public IDataChunkSupplier {
         physical_to_output_[physical_index] = static_cast<int>(output_index);
       }
     }
-    file_size_ = static_cast<int64_t>(std::filesystem::file_size(file_path_));
+    std::error_code error;
+    auto file_size = std::filesystem::file_size(file_path_, error);
+    if (error) {
+      THROW_IO_EXCEPTION("Failed to stat CSV file: " + file_path_ +
+                         ", reason=" + error.message());
+    }
+    file_size_ = static_cast<int64_t>(file_size);
+    if (file_size_ > 0) {
+      auto mmap =
+          mio::make_mmap_source(file_path_, 0, mio::map_entire_file, error);
+      if (error) {
+        THROW_IO_EXCEPTION("Failed to mmap CSV file: " + file_path_ +
+                           ", reason=" + error.message());
+      }
+      mmap_ = std::make_shared<mio::mmap_source>(std::move(mmap));
+    }
     if (file_size_ > 0) {
       worker_count_ = std::min<int32_t>(
           worker_count_, static_cast<int32_t>(std::min<int64_t>(
@@ -1081,31 +1173,34 @@ class PartitionedCSVChunkSupplier final : public IDataChunkSupplier {
   }
 
   void append_line(
-      const std::string& line, int64_t row_number,
-      std::vector<std::shared_ptr<execution::IContextColumnBuilder>>&
-          builders) {
-    std::vector<std::string_view> selected_tokens(builders.size());
-    std::vector<bool> found(builders.size(), false);
-
+      std::string_view line, int64_t row_number,
+      std::vector<std::shared_ptr<execution::IContextColumnBuilder>>& builders,
+      std::vector<uint8_t>& found) {
+    std::fill(found.begin(), found.end(), 0);
     size_t field_index = 0;
-    size_t field_start = 0;
-    while (field_start <= line.size()) {
-      auto field_end = line.find(config_.delimiter, field_start);
-      if (field_end == std::string::npos) {
-        field_end = line.size();
-      }
+    const char* field_start = line.data();
+    const char* const line_end = line.data() + line.size();
+    while (field_start <= line_end) {
+      const auto remaining = static_cast<size_t>(line_end - field_start);
+      const char* delimiter = static_cast<const char*>(
+          std::memchr(field_start, config_.delimiter, remaining));
+      const char* field_end = delimiter == nullptr ? line_end : delimiter;
       if (field_index < physical_to_output_.size()) {
         int output_index = physical_to_output_[field_index];
         if (output_index >= 0) {
-          selected_tokens[output_index] = std::string_view(
-              line.data() + field_start, field_end - field_start);
+          append_csv_token_to_builder(
+              builders[output_index], selected_column_types_[output_index],
+              std::string_view(field_start,
+                               static_cast<size_t>(field_end - field_start)),
+              null_values_, true_values_, false_values_, file_path_, row_number,
+              selected_column_names_[output_index], escaping_, escape_char_);
           found[output_index] = true;
         }
       }
-      if (field_end == line.size()) {
+      if (delimiter == nullptr) {
         break;
       }
-      field_start = field_end + 1;
+      field_start = delimiter + 1;
       ++field_index;
     }
 
@@ -1115,11 +1210,6 @@ class PartitionedCSVChunkSupplier final : public IDataChunkSupplier {
         builders[column_index]->push_back_null();
         continue;
       }
-      append_csv_token_to_builder(
-          builders[column_index], selected_column_types_[column_index],
-          std::string(selected_tokens[column_index]), null_values_,
-          true_values_, false_values_, file_path_, row_number,
-          selected_column_names_[column_index], escaping_, escape_char_);
     }
   }
 
@@ -1169,7 +1259,7 @@ class PartitionedCSVChunkSupplier final : public IDataChunkSupplier {
   }
 
   void read_partition(int32_t worker_id) {
-    if (file_size_ <= 0) {
+    if (file_size_ <= 0 || mmap_ == nullptr || mmap_->data() == nullptr) {
       return;
     }
     int64_t start = file_size_ * worker_id / worker_count_;
@@ -1178,66 +1268,68 @@ class PartitionedCSVChunkSupplier final : public IDataChunkSupplier {
               << file_path_ << ", worker=" << worker_id << "/" << worker_count_
               << ", byte_range=[" << start << ", " << end << ")";
 
-    std::ifstream file(file_path_, std::ios::binary);
-    if (!file.is_open()) {
-      THROW_IO_EXCEPTION("Failed to open CSV file: " + file_path_);
-    }
-
-    std::string line;
+    const char* const data = mmap_->data();
+    const auto file_size = static_cast<size_t>(file_size_);
+    auto line_start = static_cast<size_t>(start);
+    const auto partition_end = static_cast<size_t>(end);
     int64_t row_number = 0;
     if (worker_id == 0) {
       for (int64_t skipped = 0; skipped < rows_to_skip_; ++skipped) {
-        if (!std::getline(file, line)) {
+        if (line_start >= file_size) {
           return;
         }
+        const char* newline = static_cast<const char*>(
+            std::memchr(data + line_start, '\n', file_size - line_start));
+        if (newline == nullptr) {
+          return;
+        }
+        line_start = static_cast<size_t>(newline - data) + 1;
       }
       row_number = rows_to_skip_;
     } else {
-      if (start <= 0) {
-        file.seekg(0);
-      } else {
-        file.seekg(start - 1);
-        char previous = '\0';
-        file.get(previous);
-        if (previous == '\n') {
-          file.seekg(start);
-        } else {
-          if (!std::getline(file, line)) {
-            return;
-          }
+      if (line_start > 0 && data[line_start - 1] != '\n') {
+        const char* newline = static_cast<const char*>(
+            std::memchr(data + line_start, '\n', file_size - line_start));
+        if (newline == nullptr) {
+          return;
         }
+        line_start = static_cast<size_t>(newline - data) + 1;
       }
     }
 
     auto builders = create_builders();
+    std::vector<uint8_t> found(builders.size(), 0);
     size_t output_rows = 0;
     int64_t local_rows = 0;
     int64_t local_chunks = 0;
     int64_t local_bytes = 0;
     while (!stop_.load(std::memory_order_relaxed)) {
-      auto pos = file.tellg();
-      if (pos == std::streampos(-1)) {
+      if (line_start >= file_size) {
         break;
       }
-      if (static_cast<int64_t>(pos) >= end && worker_id != worker_count_ - 1) {
+      if (worker_id != worker_count_ - 1 && line_start >= partition_end) {
         break;
       }
-      if (!std::getline(file, line)) {
-        break;
-      }
-      local_bytes += static_cast<int64_t>(line.size() + 1);
-      bytes_read_.fetch_add(static_cast<int64_t>(line.size() + 1),
-                            std::memory_order_relaxed);
+      const char* newline = static_cast<const char*>(
+          std::memchr(data + line_start, '\n', file_size - line_start));
+      const auto line_end =
+          newline == nullptr ? file_size : static_cast<size_t>(newline - data);
+      auto next_line_start = newline == nullptr ? file_size : line_end + 1;
+      auto line_size = line_end - line_start;
+      local_bytes += static_cast<int64_t>(next_line_start - line_start);
+      std::string_view line(data + line_start, line_size);
       if (!line.empty() && line.back() == '\r') {
-        line.pop_back();
+        line.remove_suffix(1);
       }
       if (line.empty()) {
+        line_start = next_line_start;
         continue;
       }
       ++row_number;
-      append_line(line, row_number, builders);
+      append_line(line, row_number, builders, found);
       ++output_rows;
       ++local_rows;
+      line_start = next_line_start;
       if (output_rows >= chunk_size_) {
         if (push_chunk(builders, output_rows)) {
           ++local_chunks;
@@ -1251,6 +1343,7 @@ class PartitionedCSVChunkSupplier final : public IDataChunkSupplier {
     if (push_chunk(builders, output_rows)) {
       ++local_chunks;
     }
+    bytes_read_.fetch_add(local_bytes, std::memory_order_relaxed);
     LOG(INFO) << "PartitionedCSVChunkSupplier worker finished: file="
               << file_path_ << ", worker=" << worker_id << ", byte_range=["
               << start << ", " << end << ")"
@@ -1325,6 +1418,7 @@ class PartitionedCSVChunkSupplier final : public IDataChunkSupplier {
   int32_t worker_count_ = 1;
   int32_t queue_capacity_ = 1;
   int64_t file_size_ = 0;
+  std::shared_ptr<mio::mmap_source> mmap_;
   BoundedBlockingQueue<std::shared_ptr<execution::DataChunk>> queue_;
   std::vector<std::thread> workers_;
   std::atomic<int32_t> active_workers_{0};
