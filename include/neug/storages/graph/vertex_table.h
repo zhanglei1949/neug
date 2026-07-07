@@ -14,6 +14,7 @@
  */
 #pragma once
 
+#include "neug/execution/common/columns/value_columns.h"
 #include "neug/execution/common/types/value.h"
 #include "neug/storages/graph/schema.h"
 #include "neug/storages/graph/vertex_timestamp.h"
@@ -266,8 +267,20 @@ class VertexTable {
  private:
   vid_t insert_vertex_pk(const execution::Value& id, timestamp_t ts,
                          bool insert_safe);
+
+  void ensure_insert_capacity(size_t required_size) {
+    if (required_size <= indexer_->capacity()) {
+      return;
+    }
+    size_t cap = indexer_->capacity();
+    while (required_size >= cap) {
+      cap = cap < 4096 ? 4096 : cap + cap / 4;
+    }
+    EnsureCapacity(cap);
+  }
+
   template <typename PK_T>
-  std::vector<vid_t> insert_primary_keys(
+  std::vector<vid_t> insert_primary_keys_value_path(
       const std::shared_ptr<execution::IContextColumn>& pk_col) {
     size_t row_num = pk_col->size();
     std::vector<vid_t> vids;
@@ -290,20 +303,50 @@ class VertexTable {
   }
 
   template <typename PK_T>
+  std::vector<vid_t> insert_primary_keys(
+      const std::shared_ptr<execution::IContextColumn>& pk_col) {
+    if constexpr (std::is_same_v<PK_T, std::string_view> ||
+                  std::is_same_v<PK_T, std::string>) {
+      return insert_primary_keys_value_path<PK_T>(pk_col);
+    } else {
+      auto value_col =
+          std::dynamic_pointer_cast<execution::ValueColumn<PK_T>>(pk_col);
+      if (value_col == nullptr || value_col->is_optional()) {
+        return insert_primary_keys_value_path<PK_T>(pk_col);
+      }
+
+      const auto& data = value_col->data();
+      std::vector<vid_t> vids(data.size());
+      auto indexer_access = indexer_->template typed_access<PK_T>();
+      for (size_t j = 0; j < data.size(); ++j) {
+        const auto& oid = data[j];
+        if (NEUG_UNLIKELY(indexer_access.get_index(oid, vids[j]))) {
+          if (NEUG_UNLIKELY(v_ts_->IsVertexValid(vids[j], MAX_TIMESTAMP))) {
+            vids[j] = std::numeric_limits<vid_t>::max();
+          } else {
+            v_ts_->InsertVertex(vids[j], 0);
+          }
+          continue;
+        }
+        vids[j] = indexer_access.insert(oid, false);
+        v_ts_->InsertVertex(vids[j], 0);
+      }
+      return vids;
+    }
+  }
+
+  template <typename PK_T>
   void insert_vertices_impl(std::shared_ptr<IDataChunkSupplier> supplier) {
     auto row_nums = supplier->RowNum();
     if (row_nums > 0) {
       size_t new_size = indexer_->size() + static_cast<size_t>(row_nums);
-      if (new_size > indexer_->capacity()) {
-        size_t cap = indexer_->capacity();
-        while (new_size >= cap) {
-          cap = cap < 4096 ? 4096 : cap + cap / 4;
-        }
-        EnsureCapacity(cap);
-      }
-    } else if (row_nums != 0 && row_nums != kUnknownRowNum) {
-      LOG(WARNING) << "Unexpected negative row number from supplier: "
-                   << row_nums << ", skip initial capacity reservation.";
+      ensure_insert_capacity(new_size);
+    } else if (row_nums == kUnknownRowNum) {
+      THROW_INTERNAL_EXCEPTION("Vertex bulk load requires supplier row count.");
+    } else if (row_nums < 0) {
+      THROW_INTERNAL_EXCEPTION(
+          "Unexpected negative row number from supplier: " +
+          std::to_string(row_nums));
     }
     std::shared_mutex rw_mutex;
     while (true) {
@@ -332,13 +375,7 @@ class VertexTable {
       // Capacity check for actual batch size.
       size_t chunk_rows = chunk->row_num();
       size_t new_size = indexer_->size() + chunk_rows;
-      if (new_size > indexer_->capacity()) {
-        size_t cap = indexer_->capacity();
-        while (new_size >= cap) {
-          cap = cap < 4096 ? 4096 : cap + cap / 4;
-        }
-        EnsureCapacity(cap);
-      }
+      ensure_insert_capacity(new_size);
 
       auto vids = insert_primary_keys<PK_T>(pk_col);
 

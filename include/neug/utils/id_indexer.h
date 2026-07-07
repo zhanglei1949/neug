@@ -346,6 +346,34 @@ class LFIndexer {
   size_t size() const { return num_elements_.load(); }
   DataTypeId get_type() const { return keys_->type(); }
 
+  template <typename KEY_T>
+  class TypedAccess {
+   public:
+    bool get_index(const KEY_T& oid, INDEX_T& ret) const {
+      return owner_->get_index_typed(keys_, oid, ret);
+    }
+
+    INDEX_T insert(const KEY_T& oid, bool insert_safe) {
+      return owner_->insert_typed(keys_, oid, insert_safe);
+    }
+
+   private:
+    friend class LFIndexer<INDEX_T>;
+
+    TypedAccess(LFIndexer<INDEX_T>* owner, TypedColumn<KEY_T>* keys)
+        : owner_(owner), keys_(keys) {}
+
+    LFIndexer<INDEX_T>* owner_;
+    TypedColumn<KEY_T>* keys_;
+  };
+
+  template <typename KEY_T>
+  TypedAccess<KEY_T> typed_access() {
+    auto* keys = dynamic_cast<TypedColumn<KEY_T>*>(keys_.get());
+    CHECK(keys != nullptr) << "Indexer key column type does not match.";
+    return TypedAccess<KEY_T>(this, keys);
+  }
+
   INDEX_T insert(const execution::Value& oid, bool insert_safe) {
     assert(oid.type().id() == get_type());
 
@@ -450,6 +478,60 @@ class LFIndexer {
   const ColumnBase& get_keys() const { return *keys_; }
 
  private:
+  template <typename KEY_T>
+  INDEX_T insert_typed(TypedColumn<KEY_T>* keys, const KEY_T& oid,
+                       bool insert_safe) {
+    if (insert_safe) {
+      if (NEUG_UNLIKELY(num_elements_.load(std::memory_order_relaxed) >=
+                        capacity())) {
+        size_t cap = capacity();
+        reserve(cap + (cap >> 2));
+      }
+    }
+    INDEX_T ind = static_cast<INDEX_T>(
+        num_elements_.fetch_add(1, std::memory_order_acq_rel));
+    if (!insert_safe && NEUG_UNLIKELY(static_cast<size_t>(ind) >= capacity())) {
+      THROW_INTERNAL_EXCEPTION(
+          "Reserved size is not enough: " + std::to_string(capacity()) +
+          " vs " + std::to_string(ind));
+    }
+    keys->set_value(ind, oid);
+    auto* indices_ptr = indices_->mutable_data();
+    size_t index =
+        hash_policy_.index_for_hash(GHash<KEY_T>()(oid), num_slots_minus_one_);
+    while (true) {
+      if (__sync_bool_compare_and_swap(&indices_ptr[index],
+                                       LFIndexer<INDEX_T>::sentinel, ind)) {
+        break;
+      }
+      index = (index + 1) % (num_slots_minus_one_ + 1);
+    }
+    return ind;
+  }
+
+  template <typename KEY_T>
+  bool get_index_typed(const TypedColumn<KEY_T>* keys, const KEY_T& oid,
+                       INDEX_T& ret) const {
+    if (indices_->size() == 0) {
+      return false;
+    }
+    auto* indices_ptr = indices_->data();
+    size_t index =
+        hash_policy_.index_for_hash(GHash<KEY_T>()(oid), num_slots_minus_one_);
+    while (true) {
+      INDEX_T ind = indices_ptr[index];
+      if (ind == LFIndexer<INDEX_T>::sentinel) {
+        return false;
+      } else if (keys->get_view(ind) == oid) {
+        ret = ind;
+        return true;
+      } else {
+        index = (index + 1) % (num_slots_minus_one_ + 1);
+      }
+    }
+    return false;
+  }
+
   std::unique_ptr<TypedColumn<INDEX_T>> indices_;
   std::atomic<size_t> num_elements_;
   size_t num_slots_minus_one_;

@@ -528,6 +528,36 @@ ChunkSourceOptions resolve_default_chunk_source_options() {
   return options;
 }
 
+void skip_csv_rows(csv::CSVReader& reader, int64_t rows_to_skip) {
+  csv::CSVRow skipped_row;
+  for (int64_t index = 0; index < rows_to_skip; ++index) {
+    if (!reader.read_row(skipped_row)) {
+      break;
+    }
+  }
+}
+
+int64_t count_csv_rows_with_parser(const std::string& file_path,
+                                   const csv::CSVFormat& csv_format,
+                                   int64_t rows_to_skip) {
+  try {
+    csv::CSVReader counter(file_path, csv_format);
+    skip_csv_rows(counter, rows_to_skip);
+    int64_t count = 0;
+    csv::CSVRow row;
+    while (counter.read_row(row)) {
+      if (row.empty()) {
+        continue;
+      }
+      count += 1;
+    }
+    return count;
+  } catch (const std::exception& error) {
+    THROW_IO_EXCEPTION("Failed to count rows for file: " + file_path +
+                       ", reason=" + error.what());
+  }
+}
+
 struct CsvSupplierRuntime {
   explicit CsvSupplierRuntime(const std::string& file_path,
                               const CsvReadConfig& config,
@@ -606,7 +636,12 @@ struct CsvSupplierRuntime {
     return chunk;
   }
 
-  int64_t row_num() const { return row_num_; }
+  int64_t row_num() const {
+    if (row_num_ == kUnknownRowNum) {
+      row_num_ = count_rows();
+    }
+    return row_num_;
+  }
   int64_t produced_chunks() const { return produced_chunks_; }
   int64_t produced_rows() const { return produced_rows_; }
 
@@ -614,7 +649,7 @@ struct CsvSupplierRuntime {
   void reset_reader() {
     try {
       reader_ = std::make_unique<csv::CSVReader>(file_path_, csv_format_);
-      skip_rows(*reader_);
+      skip_csv_rows(*reader_, rows_to_skip_);
       current_row_number_ = rows_to_skip_;
     } catch (const std::exception& error) {
       THROW_IO_EXCEPTION("Failed to initialize CSV reader for file: " +
@@ -622,32 +657,8 @@ struct CsvSupplierRuntime {
     }
   }
 
-  void skip_rows(csv::CSVReader& reader) const {
-    csv::CSVRow skipped_row;
-    for (int64_t index = 0; index < rows_to_skip_; ++index) {
-      if (!reader.read_row(skipped_row)) {
-        break;
-      }
-    }
-  }
-
   int64_t count_rows() const {
-    try {
-      csv::CSVReader counter(file_path_, csv_format_);
-      skip_rows(counter);
-      int64_t count = 0;
-      csv::CSVRow row;
-      while (counter.read_row(row)) {
-        if (row.empty()) {
-          continue;
-        }
-        count += 1;
-      }
-      return count;
-    } catch (const std::exception& error) {
-      THROW_IO_EXCEPTION("Failed to count rows for file: " + file_path_ +
-                         ", reason=" + error.what());
-    }
+    return count_csv_rows_with_parser(file_path_, csv_format_, rows_to_skip_);
   }
 
  private:
@@ -663,7 +674,7 @@ struct CsvSupplierRuntime {
   size_t chunk_size_ = kDefaultCsvChunkRows;
   bool escaping_ = false;
   char escape_char_ = '\\';
-  int64_t row_num_ = 0;
+  mutable int64_t row_num_ = 0;
   int64_t current_row_number_ = 0;
   int64_t produced_chunks_ = 0;
   int64_t produced_rows_ = 0;
@@ -1078,7 +1089,6 @@ class PartitionedCSVChunkSupplier final : public IDataChunkSupplier {
             << ", physical_columns=" << config_.column_names.size()
             << ", selected_columns=" << selected_column_names_.size()
             << ", delimiter='" << config_.delimiter << "'";
-    start_workers();
   }
 
   ~PartitionedCSVChunkSupplier() override {
@@ -1093,6 +1103,7 @@ class PartitionedCSVChunkSupplier final : public IDataChunkSupplier {
   }
 
   std::shared_ptr<execution::DataChunk> GetNextChunk() override {
+    ensure_workers_started();
     std::shared_ptr<execution::DataChunk> chunk;
     if (queue_.Pop(chunk, &consumer_wait_ns_)) {
       consumed_chunks_.fetch_add(1, std::memory_order_relaxed);
@@ -1105,7 +1116,13 @@ class PartitionedCSVChunkSupplier final : public IDataChunkSupplier {
     return nullptr;
   }
 
-  int64_t RowNum() const override { return kUnknownRowNum; }
+  int64_t RowNum() const override {
+    if (row_num_ == kUnknownRowNum) {
+      row_num_ = count_csv_rows_with_parser(
+          file_path_, build_csv_format(config_), rows_to_skip_);
+    }
+    return row_num_;
+  }
 
   std::optional<ChunkSupplierStats> GetStats() const override {
     ChunkSupplierStats stats;
@@ -1236,6 +1253,14 @@ class PartitionedCSVChunkSupplier final : public IDataChunkSupplier {
     for (int32_t worker_id = 0; worker_id < worker_count_; ++worker_id) {
       workers_.emplace_back([this, worker_id]() { worker_main(worker_id); });
     }
+  }
+
+  void ensure_workers_started() {
+    if (workers_started_) {
+      return;
+    }
+    workers_started_ = true;
+    start_workers();
   }
 
   void worker_main(int32_t worker_id) {
@@ -1411,9 +1436,11 @@ class PartitionedCSVChunkSupplier final : public IDataChunkSupplier {
   int32_t worker_count_ = 1;
   int32_t queue_capacity_ = 1;
   int64_t file_size_ = 0;
+  mutable int64_t row_num_ = kUnknownRowNum;
   std::shared_ptr<mio::mmap_source> mmap_;
   BoundedBlockingQueue<std::shared_ptr<execution::DataChunk>> queue_;
   std::vector<std::thread> workers_;
+  bool workers_started_ = false;
   std::atomic<int32_t> active_workers_{0};
   std::atomic<bool> stop_{false};
   std::atomic<bool> has_error_{false};
@@ -1452,12 +1479,24 @@ class ChainedChunkSupplier final : public IDataChunkSupplier {
     return nullptr;
   }
 
-  int64_t RowNum() const override { return kUnknownRowNum; }
+  int64_t RowNum() const override {
+    if (row_num_ == kUnknownRowNum) {
+      auto csv_format = build_csv_format(config_);
+      auto rows_to_skip = std::max<int64_t>(0, config_.skip_rows);
+      row_num_ = 0;
+      for (const auto& file_path : file_paths_) {
+        row_num_ +=
+            count_csv_rows_with_parser(file_path, csv_format, rows_to_skip);
+      }
+    }
+    return row_num_;
+  }
 
  private:
   std::vector<std::string> file_paths_;
   CsvReadConfig config_;
   std::shared_ptr<IDataChunkSupplier> current_;
+  mutable int64_t row_num_ = kUnknownRowNum;
   size_t index_ = 0;
 };
 
