@@ -117,6 +117,11 @@ Status StorageAPUpdateInterface::BatchAddVertices(
   return graph_.BatchAddVertices(v_label_id, std::move(supplier));
 }
 
+Status StorageAPUpdateInterface::BatchBuildVertices(
+    label_t v_label_id, std::shared_ptr<IDataChunkSource> source) {
+  return graph_.BatchBuildVertices(v_label_id, std::move(source));
+}
+
 Status StorageAPUpdateInterface::BatchAddEdges(
     label_t src_label, label_t dst_label, label_t edge_label,
     std::shared_ptr<IDataChunkSupplier> supplier) {

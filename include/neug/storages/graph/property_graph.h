@@ -308,6 +308,9 @@ class PropertyGraph {
   Status BatchAddVertices(label_t v_label_id,
                           std::shared_ptr<IDataChunkSupplier> supplier);
 
+  Status BatchBuildVertices(label_t v_label_id,
+                            std::shared_ptr<IDataChunkSource> source);
+
   Status BatchAddEdges(label_t src_label, label_t dst_label, label_t edge_label,
                        std::shared_ptr<IDataChunkSupplier> supplier);
 

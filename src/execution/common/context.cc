@@ -183,6 +183,8 @@ class ProjectingChunkSource final : public IDataChunkSource {
 
   bool rewindable() const override { return input_->rewindable(); }
 
+  int64_t EstimatedBytes() const override { return input_->EstimatedBytes(); }
+
  private:
   std::shared_ptr<IDataChunkSource> input_;
   std::vector<int32_t> aliases_;

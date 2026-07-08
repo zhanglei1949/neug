@@ -280,6 +280,13 @@ Status StorageTPInsertInterface::BatchAddVertices(
                 "BatchAddVertices is not supported in TP mode currently.");
 }
 
+Status StorageTPInsertInterface::BatchBuildVertices(
+    label_t v_label_id, std::shared_ptr<IDataChunkSource> source) {
+  LOG(ERROR) << "BatchBuildVertices is not supported in TP mode currently.";
+  return Status(StatusCode::ERR_NOT_SUPPORTED,
+                "BatchBuildVertices is not supported in TP mode currently.");
+}
+
 Status StorageTPInsertInterface::BatchAddEdges(
     label_t src_label, label_t dst_label, label_t edge_label,
     std::shared_ptr<IDataChunkSupplier> supplier) {

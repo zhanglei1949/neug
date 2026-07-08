@@ -22,10 +22,7 @@
 #include <rapidjson/writer.h>
 
 #include <stddef.h>
-#include <algorithm>
-#include <cctype>
 #include <cstdint>
-#include <cstdlib>
 #include <ostream>
 #include <stdexcept>
 #include <string>
@@ -36,6 +33,7 @@
 #include "neug/execution/common/context.h"
 #include "neug/execution/common/types/value.h"
 #include "neug/storages/graph/graph_interface.h"
+#include "neug/storages/loader/chunk_pipeline_utils.h"
 #include "neug/storages/loader/loader_utils.h"
 #include "neug/utils/string_utils.h"
 
@@ -45,28 +43,17 @@ namespace execution {
 
 namespace ops {
 
-namespace {
-
-bool is_explicitly_disabled_env(const char* name) {
-  const char* value = std::getenv(name);
-  if (value == nullptr) {
-    return false;
-  }
-  std::string normalized(value);
-  std::transform(normalized.begin(), normalized.end(), normalized.begin(),
-                 [](unsigned char ch) { return std::tolower(ch); });
-  return normalized == "0" || normalized == "false" || normalized == "off" ||
-         normalized == "no";
-}
-
-}  // namespace
-
 bool is_copy_streaming_enabled() {
-  return !is_explicitly_disabled_env("NEUG_COPY_STREAMING");
+  return ::neug::is_copy_streaming_env_enabled();
 }
 
 bool is_edge_bulk_build_enabled() {
-  return !is_explicitly_disabled_env("NEUG_EDGE_BULK_BUILD");
+  return ::neug::is_copy_bulk_build_env_enabled(::neug::CopyLoadTarget::kEdge);
+}
+
+bool is_vertex_bulk_build_enabled() {
+  return ::neug::is_copy_bulk_build_env_enabled(
+      ::neug::CopyLoadTarget::kVertex);
 }
 
 bool check_csv_import_options(

@@ -92,6 +92,8 @@ struct ChunkSupplierStats {
 
 ChunkSourceOptions resolve_default_chunk_source_options();
 
+inline constexpr int64_t kUnknownSourceBytes = -1;
+
 class IDataChunkSupplier {
  public:
   virtual ~IDataChunkSupplier() = default;
@@ -112,6 +114,7 @@ class IDataChunkSource {
     return Open();
   }
   virtual bool rewindable() const = 0;
+  virtual int64_t EstimatedBytes() const { return kUnknownSourceBytes; }
 };
 
 inline constexpr int64_t kUnknownRowNum = -1;
@@ -151,6 +154,7 @@ class CSVChunkSource : public IDataChunkSource {
   std::shared_ptr<IDataChunkSupplier> Open(
       const ChunkSourceOptions& options) const override;
   bool rewindable() const override { return true; }
+  int64_t EstimatedBytes() const override;
 
  private:
   std::vector<std::string> file_paths_;

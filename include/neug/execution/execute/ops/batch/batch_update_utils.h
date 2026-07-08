@@ -60,6 +60,8 @@ bool is_copy_streaming_enabled();
 
 bool is_edge_bulk_build_enabled();
 
+bool is_vertex_bulk_build_enabled();
+
 std::string vertex_to_json_string(label_t label, vid_t vid,
                                   const StorageReadInterface& graph);
 

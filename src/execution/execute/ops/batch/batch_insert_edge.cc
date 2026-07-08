@@ -21,6 +21,7 @@
 #include "neug/execution/execute/ops/batch/batch_update_utils.h"
 #include "neug/execution/execute/ops/batch/data_source.h"
 #include "neug/storages/graph/graph_interface.h"
+#include "neug/storages/loader/chunk_pipeline_utils.h"
 #include "neug/utils/exception/exception.h"
 #include "neug/utils/result.h"
 
@@ -111,27 +112,6 @@ std::vector<std::pair<int32_t, std::string>> build_total_edge_mappings(
   return total_mappings;
 }
 
-void log_edge_supplier_stats(
-    const std::shared_ptr<IDataChunkSupplier>& supplier, const char* phase) {
-  if (supplier == nullptr) {
-    return;
-  }
-  if (auto stats = supplier->GetStats()) {
-    LOG(INFO) << phase
-              << " supplier stats: produced_chunks=" << stats->produced_chunks
-              << ", parallel=" << stats->parallel
-              << ", worker_count=" << stats->worker_count
-              << ", produced_rows=" << stats->produced_rows
-              << ", consumed_chunks=" << stats->consumed_chunks
-              << ", consumed_rows=" << stats->consumed_rows
-              << ", bytes_read=" << stats->bytes_read
-              << ", producer_wait_ms=" << stats->producer_wait_ms
-              << ", consumer_wait_ms=" << stats->consumer_wait_ms
-              << ", max_queue_size=" << stats->max_queue_size
-              << ", fallback_reason=" << stats->fallback_reason;
-  }
-}
-
 }  // namespace
 
 class BatchInsertEdgeOpr : public IOperator {
@@ -212,7 +192,7 @@ neug::result<Context> BatchInsertEdgeOpr::Eval(
     auto supplier = create_data_chunk_supplier(ctx, total_mappings);
     RETURN_STATUS_ERROR_IF_NOT_OK(graph.BatchAddEdges(
         src_label_id, dst_label_id, edge_label_id, supplier));
-    log_edge_supplier_stats(supplier, "BatchInsertEdge");
+    log_chunk_supplier_stats(supplier, "BatchInsertEdge supplier", true);
     return neug::result<Context>(std::move(ctx));
   }
 
@@ -258,7 +238,8 @@ neug::result<Context> BatchInsertEdgeFromSourceOpr::Eval(
             create_data_chunk_supplier(streaming_ctx, total_mappings);
         RETURN_STATUS_ERROR_IF_NOT_OK(graph.BatchAddEdges(
             src_label_id, dst_label_id, edge_label_id, supplier));
-        log_edge_supplier_stats(supplier, "BatchInsertEdgeFromSource");
+        log_chunk_supplier_stats(supplier, "BatchInsertEdgeFromSource supplier",
+                                 true);
       }
       return neug::result<Context>(std::move(streaming_ctx));
     }
@@ -275,7 +256,8 @@ neug::result<Context> BatchInsertEdgeFromSourceOpr::Eval(
         create_data_chunk_supplier(materialized_ctx, total_mappings);
     RETURN_STATUS_ERROR_IF_NOT_OK(graph.BatchAddEdges(
         src_label_id, dst_label_id, edge_label_id, supplier));
-    log_edge_supplier_stats(supplier, "BatchInsertEdgeFromSource");
+    log_chunk_supplier_stats(supplier, "BatchInsertEdgeFromSource supplier",
+                             true);
   }
   return neug::result<Context>(std::move(materialized_ctx));
 }

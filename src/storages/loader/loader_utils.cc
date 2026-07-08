@@ -46,6 +46,7 @@
 #include "neug/execution/common/columns/value_columns.h"
 #include "neug/execution/common/types/value.h"
 #include "neug/execution/utils/numeric_cast.h"
+#include "neug/storages/loader/chunk_pipeline_utils.h"
 #include "neug/utils/datetime_parsers.h"
 #include "neug/utils/exception/exception.h"
 #include "neug/utils/property/column.h"
@@ -503,7 +504,7 @@ void append_csv_field_to_builder(
 
 ChunkSourceOptions resolve_default_chunk_source_options() {
   ChunkSourceOptions options;
-  if (const char* mode = std::getenv("NEUG_COPY_PARALLEL_CSV")) {
+  if (const char* mode = std::getenv(copy_load_env::kParallelCsv)) {
     std::string normalized(mode);
     std::transform(normalized.begin(), normalized.end(), normalized.begin(),
                    [](unsigned char ch) { return std::tolower(ch); });
@@ -517,13 +518,13 @@ ChunkSourceOptions resolve_default_chunk_source_options() {
     }
   }
   options.worker_count =
-      parse_env_i32("NEUG_COPY_CSV_WORKERS", options.worker_count);
+      parse_env_i32(copy_load_env::kCsvWorkers, options.worker_count);
   options.queue_capacity =
-      parse_env_i32("NEUG_COPY_CSV_QUEUE_CAPACITY", options.queue_capacity);
+      parse_env_i32(copy_load_env::kCsvQueueCapacity, options.queue_capacity);
   options.min_partition_file_bytes = parse_env_i64(
-      "NEUG_COPY_CSV_MIN_FILE_BYTES", options.min_partition_file_bytes);
-  options.collect_stats =
-      parse_env_bool(std::getenv("NEUG_COPY_CSV_STATS"), options.collect_stats);
+      copy_load_env::kCsvMinFileBytes, options.min_partition_file_bytes);
+  options.collect_stats = parse_env_bool(std::getenv(copy_load_env::kCsvStats),
+                                         options.collect_stats);
   return options;
 }
 
@@ -1319,8 +1320,6 @@ class PartitionedCSVChunkSupplier final : public IDataChunkSupplier {
     auto builders = create_builders();
     std::vector<uint8_t> found(builders.size(), 0);
     size_t output_rows = 0;
-    int64_t local_rows = 0;
-    int64_t local_chunks = 0;
     int64_t local_bytes = 0;
     while (!stop_.load(std::memory_order_relaxed)) {
       if (line_start >= file_size) {
@@ -1347,21 +1346,16 @@ class PartitionedCSVChunkSupplier final : public IDataChunkSupplier {
       ++row_number;
       append_line(line, row_number, builders, found);
       ++output_rows;
-      ++local_rows;
       line_start = next_line_start;
       if (output_rows >= chunk_size_) {
-        if (push_chunk(builders, output_rows)) {
-          ++local_chunks;
-        } else {
+        if (!push_chunk(builders, output_rows)) {
           break;
         }
         builders = create_builders();
         output_rows = 0;
       }
     }
-    if (push_chunk(builders, output_rows)) {
-      ++local_chunks;
-    }
+    push_chunk(builders, output_rows);
     bytes_read_.fetch_add(local_bytes, std::memory_order_relaxed);
   }
 
@@ -1602,6 +1596,24 @@ std::shared_ptr<IDataChunkSupplier> CSVChunkSource::Open(
                                               std::move(fallback_reason));
   }
   return std::make_shared<ChainedChunkSupplier>(file_paths_, config_);
+}
+
+int64_t CSVChunkSource::EstimatedBytes() const {
+  int64_t total = 0;
+  for (const auto& file_path : file_paths_) {
+    std::error_code ec;
+    auto size = std::filesystem::file_size(file_path, ec);
+    if (ec) {
+      return kUnknownSourceBytes;
+    }
+    auto remaining =
+        static_cast<uintmax_t>(std::numeric_limits<int64_t>::max() - total);
+    if (size > remaining) {
+      return kUnknownSourceBytes;
+    }
+    total += static_cast<int64_t>(size);
+  }
+  return total;
 }
 
 void fillVertexReaderMeta(

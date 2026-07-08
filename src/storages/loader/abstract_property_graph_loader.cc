@@ -17,6 +17,9 @@
 #include "neug/storages/loader/loader_utils.h"
 #include "neug/utils/exception/exception.h"
 
+#include <atomic>
+#include <thread>
+
 namespace neug {
 
 void AbstractPropertyGraphLoader::addVerticesToVertexTable(

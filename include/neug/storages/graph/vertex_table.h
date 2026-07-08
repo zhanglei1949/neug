@@ -259,6 +259,8 @@ class VertexTable {
 
   void insert_vertices(std::shared_ptr<IDataChunkSupplier> suppliers);
 
+  void BatchBuildVertices(std::shared_ptr<IDataChunkSource> source);
+
   const VertexTimestamp& get_vertex_timestamp() const { return *v_ts_; }
 
   const Table& get_table() const { return *table_; }

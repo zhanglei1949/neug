@@ -142,6 +142,13 @@ Status PropertyGraph::BatchAddVertices(
   return neug::Status::OK();
 }
 
+Status PropertyGraph::BatchBuildVertices(
+    label_t v_label, std::shared_ptr<IDataChunkSource> source) {
+  RETURN_IF_NOT_OK(vertex_label_check(v_label));
+  vertex_tables_[v_label].BatchBuildVertices(std::move(source));
+  return neug::Status::OK();
+}
+
 Status PropertyGraph::BatchAddEdges(
     label_t src_v_label, label_t dst_v_label, label_t e_label,
     std::shared_ptr<IDataChunkSupplier> supplier) {

@@ -525,6 +525,22 @@ class TypedColumn<std::string_view> : public ColumnBase {
     data_buffer_->Resize(new_size);
   }
 
+  void bulk_resize(size_t size, size_t string_bytes) {
+    CHECK_EQ(size_, 0U) << "bulk_resize expects an empty string column";
+    size_t data_bytes = string_bytes;
+    if (size > 0 && data_bytes == 0) {
+      data_bytes = 1;
+    }
+    items_buffer_->Resize(size * sizeof(string_item));
+    data_buffer_->Resize(data_bytes);
+    size_ = size;
+    pos_.store(0);
+  }
+
+  size_t truncated_byte_size(std::string_view val) const {
+    return truncate_to_width(val, false).size();
+  }
+
   void set_string_values(const std::vector<vid_t>& vids,
                          const vector_t<std::string>& values) {
     CHECK_EQ(vids.size(), values.size());
