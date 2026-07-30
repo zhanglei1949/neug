@@ -103,9 +103,7 @@ class ReadTransaction {
 
   const GraphView& view() const { return lease_.view(); }
 
-  GraphStats statistic() const {
-    return GraphStats(*lease_.graph());
-  }
+  GraphStats statistic() const { return GraphStats(*lease_.graph()); }
 
   const Schema& schema() const;
 
