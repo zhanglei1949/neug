@@ -362,7 +362,7 @@ TEST_F(ConnectionTest, ApMutationCheckpointRoundTripUsesBaselineTimestamp) {
     // timeline. Both vertex and edge mutations must therefore remain visible
     // from the baseline timestamp restored on process restart.
     SnapshotGuard snapshot(reopened.graph_snapshot_store());
-    StorageReadInterface storage(snapshot.get().view(), 0);
+    StorageReadInterface storage(snapshot.view(), 0);
     const auto person_label = storage.schema().get_vertex_label_id("person");
     vid_t vertex_id = 0;
     EXPECT_TRUE(

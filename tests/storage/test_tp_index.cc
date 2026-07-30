@@ -125,7 +125,7 @@ class TPIndexTest : public ::testing::Test {
   }
 
   UpdateTransaction NewUpdateTransaction() {
-    auto ts = version_manager_.acquire_update_timestamp();
+    auto ts = version_manager_.acquire_write_timestamp(WriteIntent::kUpdate);
     auto cow_graph = snapshot_store_->CurrentSnapshot().Clone();
     return UpdateTransaction(std::move(cow_graph), allocator_, wal_writer_,
                              version_manager_, *snapshot_store_, *local_cache_,
@@ -133,9 +133,10 @@ class TPIndexTest : public ::testing::Test {
   }
 
   ReadTransaction NewReadTransaction() {
-    auto ts = version_manager_.acquire_read_timestamp();
-    SnapshotGuard guard(*snapshot_store_);
-    return ReadTransaction(std::move(guard), version_manager_, ts);
+    // Read views are assembled by the generation-validating lease factory
+    // (read-view publication protocol, Phase 3).
+    return ReadTransaction(
+        ReadSnapshotLease::Acquire(version_manager_, *snapshot_store_));
   }
 
   void Commit(UpdateTransaction& txn) { ASSERT_TRUE(txn.Commit()); }
@@ -237,7 +238,7 @@ class TPIndexTest : public ::testing::Test {
       const std::string& name, const std::string& label_name,
       const std::string& property_name) {
     SnapshotGuard guard(*snapshot_store_);
-    return CreateIndexOnGraph(*guard.get().mutable_graph(), name, label_name,
+    return CreateIndexOnGraph(*guard.mutable_graph(), name, label_name,
                               property_name);
   }
 
@@ -512,7 +513,7 @@ TEST_F(TPIndexTest, IndexPersistsAfterCheckpointReopen) {
   {
     SnapshotGuard guard(*snapshot_store_);
     auto staging = checkpoint_mgr_.CreateStagingCheckpoint();
-    guard.get().mutable_graph()->DumpAndClear(staging.checkpoint());
+    guard.mutable_graph()->DumpAndClear(staging.checkpoint());
     published_checkpoint = staging.Commit();
   }
 
@@ -550,7 +551,7 @@ TEST_F(TPIndexTest, AutomaticallyDeletedIndexStaysDeletedAfterReopen) {
   {
     SnapshotGuard guard(*snapshot_store_);
     auto staging = checkpoint_mgr_.CreateStagingCheckpoint();
-    guard.get().mutable_graph()->DumpAndClear(staging.checkpoint());
+    guard.mutable_graph()->DumpAndClear(staging.checkpoint());
     published_checkpoint = staging.Commit();
   }
 

@@ -33,6 +33,7 @@
 #include "neug/storages/graph/graph_stats.h"
 #include "neug/storages/graph/property_graph.h"
 #include "neug/storages/graph/schema.h"
+#include "neug/transaction/transaction_utils.h"
 #include "neug/transaction/version_manager.h"
 #include "neug/transaction/wal/wal.h"
 #include "neug/utils/exception/exception.h"
@@ -79,23 +80,16 @@ void ExecutionSlotLease::reset() noexcept {
 
 namespace {
 
-enum class LeaseKind {
-  kRead,
-  kUpdate,
-};
-
+/// Admission token for the AP in-place write paths (direct ExecutionSlot
+/// execution and temporary-schema cleanup). These paths mutate the current
+/// slot in place under an exclusive update and publish NO snapshot, so
+/// completion resolves the timestamp gap on the unchanged view generation.
 class TimestampLease {
  public:
-  TimestampLease(IVersionManager& version_manager, LeaseKind kind)
-      : version_manager_(&version_manager), kind_(kind) {
-    switch (kind_) {
-    case LeaseKind::kRead:
-      timestamp_ = version_manager_->acquire_read_timestamp();
-      break;
-    case LeaseKind::kUpdate:
-      timestamp_ = version_manager_->acquire_update_timestamp();
-      break;
-    }
+  explicit TimestampLease(IVersionManager& version_manager)
+      : version_manager_(&version_manager) {
+    timestamp_ =
+        version_manager_->acquire_write_timestamp(WriteIntent::kUpdate);
   }
 
   ~TimestampLease() { release(); }
@@ -106,9 +100,17 @@ class TimestampLease {
   timestamp_t timestamp() const { return timestamp_; }
 
   void makeUpdateExclusive() {
-    CHECK(kind_ == LeaseKind::kUpdate);
-    version_manager_->begin_update_commit(timestamp_);
-    version_manager_->drain_readers();
+    version_manager_->begin_write_commit(timestamp_, WriteCompletion::kInPlace);
+  }
+
+  void completeInPlace(GraphSnapshotStore& snapshot_store,
+                       uint32_t view_generation) {
+    if (!active_) {
+      return;
+    }
+    CompleteInPlaceCommit(*version_manager_, snapshot_store, timestamp_,
+                          view_generation);
+    active_ = false;
   }
 
  private:
@@ -116,19 +118,11 @@ class TimestampLease {
     if (!active_) {
       return;
     }
-    switch (kind_) {
-    case LeaseKind::kRead:
-      version_manager_->release_read_timestamp();
-      break;
-    case LeaseKind::kUpdate:
-      version_manager_->release_update_timestamp(timestamp_);
-      break;
-    }
+    version_manager_->complete_write(timestamp_, WriteCompletion::kNoSnapshot);
     active_ = false;
   }
 
   IVersionManager* version_manager_;
-  LeaseKind kind_;
   timestamp_t timestamp_{INVALID_TIMESTAMP};
   bool active_{true};
 };
@@ -187,9 +181,8 @@ Status executePreparedQuery(execution::CacheValue& prepared_query,
 }  // namespace
 
 ReadTransaction ExecutionSlot::GetReadTransaction() const {
-  uint32_t ts = version_manager_.acquire_read_timestamp();
-  SnapshotGuard guard(snapshot_store_);
-  return ReadTransaction(std::move(guard), version_manager_, ts);
+  return ReadTransaction(
+      ReadSnapshotLease::Acquire(version_manager_, snapshot_store_));
 }
 
 InsertTransaction ExecutionSlot::GetInsertTransaction() {
@@ -200,7 +193,7 @@ InsertTransaction ExecutionSlot::GetInsertTransaction() {
 }
 
 UpdateTransaction ExecutionSlot::GetUpdateTransaction() {
-  uint32_t ts = version_manager_.acquire_update_timestamp();
+  uint32_t ts = version_manager_.acquire_write_timestamp(WriteIntent::kUpdate);
   auto cow_graph = snapshot_store_.CurrentSnapshot().Clone();
   return UpdateTransaction(std::move(cow_graph), alloc_, *wal_writer_,
                            version_manager_, snapshot_store_, pipeline_cache_,
@@ -208,13 +201,15 @@ UpdateTransaction ExecutionSlot::GetUpdateTransaction() {
 }
 
 CompactTransaction ExecutionSlot::GetCompactTransaction() {
-  timestamp_t ts = version_manager_.acquire_compact_timestamp();
+  timestamp_t ts =
+      version_manager_.acquire_write_timestamp(WriteIntent::kCompact);
   return CompactTransaction(snapshot_store_, *wal_writer_, version_manager_,
                             ts);
 }
 
 result<std::shared_ptr<execution::CacheValue>> ExecutionSlot::prepareQuery(
-    const GraphStats& stats, const std::string& query, int32_t num_threads) {
+    const GraphStats& stats, const std::string& query, int32_t num_threads,
+    uint32_t schema_generation) {
   if (num_threads == 0) {
     num_threads = db_config_.max_thread_num;
   }
@@ -224,7 +219,7 @@ result<std::shared_ptr<execution::CacheValue>> ExecutionSlot::prepareQuery(
                         "Number of threads must be greater than 0"));
   }
 
-  GS_AUTO(cache_value, pipeline_cache_.Get(stats, query));
+  GS_AUTO(cache_value, pipeline_cache_.Get(stats, schema_generation, query));
   return cache_value;
 }
 
@@ -294,9 +289,10 @@ Status ExecutionSlot::executeCore(const std::string& query,
                                : requested_mode;
 
   auto execute_on_storage = [this, &query, access_mode, &parameters,
-                             num_threads, &response](const GraphStats& stats,
-                                                     auto& storage) -> Status {
-    auto prepared = prepareQuery(stats, query, num_threads);
+                             num_threads,
+                             &response](const GraphStats& stats, auto& storage,
+                                        uint32_t schema_generation) -> Status {
+    auto prepared = prepareQuery(stats, query, num_threads, schema_generation);
     if (!prepared) {
       return prepared.error();
     }
@@ -304,6 +300,11 @@ Status ExecutionSlot::executeCore(const std::string& query,
     auto status = validatePlan(access_mode, cache_value->flags);
     if (!status.ok()) {
       return status;
+    }
+    if (cache_value->flags.schema() || cache_value->flags.create_temp_table()) {
+      // Fail before executing a schema mutation if its generation cannot be
+      // advanced and published afterwards.
+      (void) snapshot_store_.NextCurrentSchemaGeneration();
     }
 
     auto parsed_parameters =
@@ -320,6 +321,15 @@ Status ExecutionSlot::executeCore(const std::string& query,
     if (execution_strategy_ == QueryExecutionStrategy::kDirect &&
         invalidatesQueryCache(cache_value->flags)) {
       pipeline_cache_.clearGlobalCache();
+      // AP in-place schema mutations publish no snapshot: advance the
+      // current slot's schema generation in place so later compilations
+      // key on the new schema (the caller holds the exclusive admission
+      // with readers drained). Read-mode plans are read-only, so this
+      // branch is unreachable on the kRead path.
+      if (cache_value->flags.schema() ||
+          cache_value->flags.create_temp_table()) {
+        snapshot_store_.AdvanceCurrentSlotSchemaGeneration();
+      }
     }
     return Status::OK();
   };
@@ -327,22 +337,29 @@ Status ExecutionSlot::executeCore(const std::string& query,
   Status status;
   if (execution_strategy_ == QueryExecutionStrategy::kDirect) {
     if (access_mode == AccessMode::kRead) {
-      TimestampLease lease(version_manager_, LeaseKind::kRead);
-      SnapshotGuard guard(snapshot_store_);
-      StorageReadInterface storage(guard.get().view(), lease.timestamp());
-      status =
-          execute_on_storage(GraphStats(*guard.get().mutable_graph()), storage);
+      auto lease =
+          ReadSnapshotLease::Acquire(version_manager_, snapshot_store_);
+      StorageReadInterface storage(lease.view(), lease.timestamp());
+      status = execute_on_storage(GraphStats(*lease.graph()), storage,
+                                  lease.schema_generation());
     } else if (access_mode == AccessMode::kInsert ||
                access_mode == AccessMode::kUpdate ||
                access_mode == AccessMode::kSchema) {
-      TimestampLease lease(version_manager_, LeaseKind::kUpdate);
+      TimestampLease lease(version_manager_);
       lease.makeUpdateExclusive();
       SnapshotGuard guard(snapshot_store_);
-      auto& slot = guard.get();
-      StorageAPUpdateInterface storage(*slot.mutable_graph(),
-                                       slot.mutable_view(), lease.timestamp(),
+      StorageAPUpdateInterface storage(*guard.mutable_graph(),
+                                       guard.mutable_view(), lease.timestamp(),
                                        alloc_);
-      status = execute_on_storage(GraphStats(*slot.mutable_graph()), storage);
+      status = execute_on_storage(GraphStats(*guard.mutable_graph()), storage,
+                                  guard.schema_generation());
+      if (status.ok()) {
+        // AP writes are in-place only after exclusive admission has drained.
+        // Publish a fresh view generation on the same current slot before
+        // reopening admission, so the visible frontier still describes one
+        // coherent logical graph view.
+        lease.completeInPlace(snapshot_store_, lease.timestamp());
+      }
     } else {
       return Status(
           StatusCode::ERR_NOT_SUPPORTED,
@@ -352,8 +369,8 @@ Status ExecutionSlot::executeCore(const std::string& query,
   } else {
     auto execute_and_commit = [&execute_on_storage](auto& transaction,
                                                     auto& storage) -> Status {
-      auto transaction_status =
-          execute_on_storage(transaction.statistic(), storage);
+      auto transaction_status = execute_on_storage(
+          transaction.statistic(), storage, transaction.schema_generation());
       if (!transaction_status.ok()) {
         return transaction_status;
       }
@@ -419,31 +436,32 @@ result<std::string> ExecutionSlot::ExecuteTransactionalRequest(
 }
 
 std::string ExecutionSlot::GetSchema() const {
-  TimestampLease lease(version_manager_, LeaseKind::kRead);
-  SnapshotGuard guard(snapshot_store_);
-  auto yaml = guard.get().mutable_graph()->schema().to_yaml();
+  auto lease = ReadSnapshotLease::Acquire(version_manager_, snapshot_store_);
+  auto yaml = lease.graph()->schema().to_yaml();
   return get_json_string_from_yaml(yaml.value()).value();
 }
 
 void ExecutionSlot::ClearTemporarySchema() {
   CHECK(execution_strategy_ == QueryExecutionStrategy::kDirect);
   {
-    TimestampLease lease(version_manager_, LeaseKind::kRead);
-    SnapshotGuard guard(snapshot_store_);
-    const auto& schema = guard.get().mutable_graph()->schema();
+    auto lease = ReadSnapshotLease::Acquire(version_manager_, snapshot_store_);
+    const auto& schema = lease.graph()->schema();
     if (schema.get_temporary_edge_triplet_keys().empty() &&
         schema.get_temporary_vertex_labels().empty()) {
       return;
     }
   }
 
-  TimestampLease lease(version_manager_, LeaseKind::kUpdate);
+  TimestampLease lease(version_manager_);
   lease.makeUpdateExclusive();
   SnapshotGuard guard(snapshot_store_);
-  auto& slot = guard.get();
-  auto* graph = slot.mutable_graph();
+  auto* graph = guard.mutable_graph();
 
   auto temporary_edges = graph->schema().get_temporary_edge_triplet_keys();
+  auto temporary_vertices = graph->schema().get_temporary_vertex_labels();
+  if (!temporary_edges.empty() || !temporary_vertices.empty()) {
+    (void) snapshot_store_.NextCurrentSchemaGeneration();
+  }
   for (auto key : temporary_edges) {
     auto [src, dst, edge] = graph->schema().parse_edge_label(key);
     try {
@@ -453,7 +471,6 @@ void ExecutionSlot::ClearTemporarySchema() {
     }
   }
 
-  auto temporary_vertices = graph->schema().get_temporary_vertex_labels();
   for (auto label : temporary_vertices) {
     try {
       graph->DeleteVertexType(label);
@@ -463,8 +480,13 @@ void ExecutionSlot::ClearTemporarySchema() {
   }
 
   if (!temporary_edges.empty() || !temporary_vertices.empty()) {
-    slot.mutable_view().Rebuild(*graph);
+    guard.mutable_view().Rebuild(*graph);
+    // Temporary-schema cleanup mutates the committed schema in place
+    // (exclusive admission, readers drained): advance the schema
+    // generation so no later compilation reuses a pre-cleanup plan.
+    snapshot_store_.AdvanceCurrentSlotSchemaGeneration();
     pipeline_cache_.clearGlobalCache();
+    lease.completeInPlace(snapshot_store_, lease.timestamp());
   }
 }
 

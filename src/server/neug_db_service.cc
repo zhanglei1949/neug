@@ -79,10 +79,14 @@ void NeugDBService::init(const ServiceConfig& config) {
   bthread_setconcurrency(
       std::max(db_config_.max_thread_num, BTHREAD_MIN_CONCURRENCY));
 
+  // Quiescent-only access: service init runs before any request is
+  // served, so reading the live graph's WAL directory here is exempt from
+  // the read-lease requirement ("API Boundaries" in the read-view
+  // publication protocol).
   execution_slot_pool_ = std::make_unique<neug::TpExecutionSlotPool>(
-      db_.graph_snapshot_store(), db_.GetPlanner(), db_.GetQueryCache(),
+      db_.snapshotStoreForServiceInit(), db_.GetPlanner(), db_.GetQueryCache(),
       *db_.version_manager_, db_.allocators_,
-      db_.graph().checkpoint().wal_dir(), db_config_);
+      db_.QuiescentWalDirectoryForServiceInit(), db_config_);
 
   hdl_mgr_ = std::make_unique<BrpcServiceManager>(db_, *execution_slot_pool_);
   hdl_mgr_->Init(config);

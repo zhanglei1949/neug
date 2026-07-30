@@ -586,6 +586,53 @@ TEST_F(NeugDBServiceTest, TpDmlKeepsQueryCacheAndDdlInvalidatesOnce) {
   EXPECT_EQ(query_cache->version(), initial_version + 1);
 }
 
+// Read-view publication protocol, Phase 5 exit criterion: old- and
+// new-schema readers cannot share a compiled plan. The cache correctness
+// key is {schema_generation, query}. A reader pinned on the pre-DDL
+// generation can compile after the DDL's cache clear and re-insert an
+// old-schema plan; readers of the new generation must NOT hit it.
+TEST_F(NeugDBServiceTest, QueryCacheIsolatesPlansAcrossSchemaGenerations) {
+  neug::NeugDBService service(*db_, config_);
+  auto slot = service.AcquireExecutionSlot();
+  ASSERT_TRUE(slot);
+
+  // Pin the pre-DDL schema generation via a read transaction; its lease
+  // keeps the old snapshot (and its generation) alive across the DDL.
+  auto old_txn = slot->GetReadTransaction();
+  const auto old_gen = old_txn.schema_generation();
+
+  const auto query_cache = db_->GetQueryCache();
+  const size_t initial_size = query_cache->size();
+  const std::string read_query = "MATCH (n:person) RETURN count(n);";
+
+  // Commit a DDL on a second slot: advances the committed schema
+  // generation and clears the global cache (memory reclamation).
+  auto ddl_slot = service.AcquireExecutionSlot();
+  ASSERT_TRUE(ddl_slot);
+  auto ddl =
+      ddl_slot->ExecuteTransactionalRequest(RequestSerializer::SerializeRequest(
+          "CREATE NODE TABLE cache_gen_probe(id INT64, PRIMARY KEY(id));",
+          "schema", {}));
+  ASSERT_TRUE(ddl) << ddl.error().ToString();
+
+  // The old-generation reader compiles the query AFTER the clear and
+  // inserts an old-schema plan back into the global cache.
+  auto old_plan = query_cache->Get(old_txn.statistic(), old_gen, read_query);
+  ASSERT_TRUE(old_plan) << old_plan.error().ToString();
+  EXPECT_EQ(query_cache->size(), initial_size + 1);
+
+  // A reader of the new generation must not share that plan: same query,
+  // different schema-generation key, so it compiles its own entry.
+  auto new_txn = slot->GetReadTransaction();
+  ASSERT_GT(new_txn.schema_generation(), old_gen);
+  auto new_plan = query_cache->Get(new_txn.statistic(),
+                                   new_txn.schema_generation(), read_query);
+  ASSERT_TRUE(new_plan) << new_plan.error().ToString();
+  EXPECT_EQ(query_cache->size(), initial_size + 2)
+      << "old- and new-schema generations must occupy distinct entries";
+  EXPECT_NE(old_plan.value().get(), new_plan.value().get());
+}
+
 TEST_F(NeugDBServiceTest, TransactionalRequestBindsBooleanParameters) {
   auto connection = db_->Connect();
   ASSERT_TRUE(

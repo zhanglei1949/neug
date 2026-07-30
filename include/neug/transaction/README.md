@@ -42,17 +42,31 @@ When reading graph data with a `ReadTransaction` or `UpdateTransaction`, only re
 
 There is no synchronization between read and insert transactions in the normal state. All read and insert transactions can be executed concurrently.
 
-The `VersionManager` state machine has three effective states for read, insert, and update transactions:
+The `VersionManager` packs the operation phase and active reader/inserter
+counts into one atomic state word. It has four phases:
 
-| State | Meaning | New Reads | New Inserts | New Updates | Existing Reads |
+| Phase | Meaning | New Reads | New Inserts | New Writes | Existing Reads |
 |-------|---------|-----------|-------------|-------------|----------------|
-| `kOpen` | Normal | allowed | allowed | allowed | continue |
-| `kInsertsBlocked` | Update execution | allowed | blocked | blocked | continue |
-| `kAllBlocked` | Update commit or compaction | blocked | blocked | blocked | continue |
+| `kNormal` | Normal | allowed | allowed | allowed | continue |
+| `kUpdateExecution` | COW update execution | allowed | blocked | blocked | continue |
+| `kPublishing` | COW snapshot publication | blocked | blocked | blocked | continue |
+| `kExclusive` | In-place update or compaction | blocked | blocked | blocked | drained before mutation |
 
-When an `UpdateTransaction` is created, the admission state changes from `kOpen` to `kInsertsBlocked`. It waits for all in-flight insert transactions to finish, but does not block or wait for read transactions. New insert transactions and new update transactions are blocked during this phase; existing and new reads continue.
+When an `UpdateTransaction` is created, the phase changes from `kNormal` to
+`kUpdateExecution`. It waits for all in-flight insert transactions to finish,
+but does not block or wait for read transactions. New inserts and writers are
+blocked during this phase; existing and new reads continue on pinned
+snapshots.
 
-When `VersionManager::begin_update_commit` is called, the admission state changes from `kInsertsBlocked` to `kAllBlocked`. New reads and new inserts are blocked until the `UpdateTransaction` is committed or aborted. Already-acquired reads continue unaffected on their pinned snapshot.
+For COW commit, `VersionManager::begin_write_commit(..., kSnapshot)` changes
+the phase to `kPublishing`, blocking new readers and inserts while
+already-acquired readers continue on their pinned snapshots. In-place updates
+use `kExclusive` and drain existing readers/inserters before mutation.
+
+Read transactions acquire a `ReadSnapshotLease`, which loads the visibility
+timestamp and view generation as one published value, pins a snapshot, and
+retries unless the pinned generation matches. This prevents a reader from
+combining an old visibility timestamp with a newer snapshot.
 
 ## Serializability
 

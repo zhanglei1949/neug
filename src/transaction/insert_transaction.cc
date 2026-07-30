@@ -37,7 +37,7 @@ InsertTransaction::InsertTransaction(SnapshotGuard guard, Allocator& alloc,
                                      IWalWriter& logger, IVersionManager& vm,
                                      timestamp_t timestamp)
     : guard_(std::move(guard)),
-      view_(&guard_.get().mutable_view()),
+      view_(&guard_.mutable_view()),
       alloc_(alloc),
       logger_(logger),
       vm_(vm),

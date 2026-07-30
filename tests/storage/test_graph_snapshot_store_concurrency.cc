@@ -16,8 +16,7 @@
 // Concurrency tests for GraphSnapshotStore at the unit level (no NeugDB
 // execution-slot layer). Validates the lock-window invariants documented in
 // graph_snapshot_store.h: phantom-pin, last-reader-cleans rule, pool exhaustion
-// safety, and the shared/exclusive interlock between PinCurrentSnapshot and
-// PublishSnapshot.
+// safety, and the guard/install interlock.
 //
 // Run under thread sanitizer to surface data races:
 //   cmake -DENABLE_THREAD_SANITIZER=ON -DBUILD_TEST=ON ..
@@ -29,6 +28,8 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <future>
+#include <limits>
 #include <random>
 #include <thread>
 #include <vector>
@@ -38,10 +39,28 @@
 #include "neug/storages/graph/operation_params.h"
 #include "neug/storages/graph/property_graph.h"
 #include "neug/storages/graph_snapshot_store.h"
+#include "neug/utils/concurrency_test_hooks.h"
 #include "neug/utils/result.h"
 #include "unittest/utils.h"
 
 namespace neug {
+
+namespace {
+
+Status InstallPreparedSnapshotForTest(
+    GraphSnapshotStore& store, const std::shared_ptr<PropertyGraph>& graph,
+    uint32_t view_generation, uint32_t schema_generation) {
+  GraphSnapshotStore::PreparedSnapshot prepared;
+  auto status = store.PrepareSnapshot(graph, view_generation, schema_generation,
+                                      prepared);
+  if (!status.ok()) {
+    return status;
+  }
+  store.InstallPreparedSnapshot(std::move(prepared));
+  return Status::OK();
+}
+
+}  // namespace
 
 class GraphSnapshotStoreConcurrencyTest : public ::testing::Test {
  protected:
@@ -77,6 +96,7 @@ class GraphSnapshotStoreConcurrencyTest : public ::testing::Test {
   }
 
   void TearDown() override {
+    g_concurrency_test_hooks.Reset();
     store_.reset();
     initial_pg_.reset();
     if (std::filesystem::exists(work_dir_)) {
@@ -84,20 +104,30 @@ class GraphSnapshotStoreConcurrencyTest : public ::testing::Test {
     }
   }
 
-  // Build a fresh PG suitable for PublishSnapshot. Clones from initial_pg_
-  // (held alive by the fixture) rather than from store_->CurrentSnapshot()
-  // to avoid racing on a slot that may be freed under concurrent publishes.
+  // Build a fresh PG suitable for prepared installation. Clones from
+  // initial_pg_ (held alive by the fixture) rather than from
+  // store_->CurrentSnapshot() to avoid racing on a slot that may be freed under
+  // concurrent publishes.
   std::shared_ptr<PropertyGraph> make_new_pg() const {
     return initial_pg_->Clone();
   }
+
+  // Publish with a monotonically increasing view generation, mirroring the
+  // TP commit convention (view generation = update timestamp).
+  Status publish(std::shared_ptr<PropertyGraph> pg) {
+    return InstallPreparedSnapshotForTest(*store_, pg, ++last_view_generation_,
+                                          /*schema_generation=*/0);
+  }
+
+  uint32_t last_view_generation_{0};
 };
 
-// 1. Heavy concurrent pin/unpin vs publish. Verifies PinCurrentSnapshot
+// 1. Heavy concurrent guard acquisition vs publish. Verifies SnapshotGuard
 // always returns a handle whose view points to a live PG with the seeded
 // schema — i.e., readers never observe a freed or partially-published slot.
 // TSan catches the data races; this assertion catches the high-level break.
 TEST_F(GraphSnapshotStoreConcurrencyTest,
-       PinCurrentSnapshotIsConsistentUnderPublishRace) {
+       GuardAcquisitionIsConsistentUnderInstallRace) {
   constexpr int kReaders = 16;
   constexpr int kWriters = 4;
   constexpr auto kDuration = std::chrono::milliseconds(500);
@@ -111,9 +141,8 @@ TEST_F(GraphSnapshotStoreConcurrencyTest,
   for (int i = 0; i < kReaders; ++i) {
     threads.emplace_back([&] {
       while (!stop.load(std::memory_order_relaxed)) {
-        auto& slot = store_->PinCurrentSnapshot();
-        ASSERT_GE(slot.view().schema().vertex_label_num(), 1u);
-        store_->UnpinSnapshot(slot);
+        SnapshotGuard guard(*store_);
+        ASSERT_GE(guard.view().schema().vertex_label_num(), 1u);
         pins_done.fetch_add(1, std::memory_order_relaxed);
       }
     });
@@ -122,10 +151,10 @@ TEST_F(GraphSnapshotStoreConcurrencyTest,
     threads.emplace_back([&] {
       while (!stop.load(std::memory_order_relaxed)) {
         auto pg = make_new_pg();
-        // PublishSnapshot is NOT safe for concurrent calls — caller must
+        // Prepared installation is NOT safe for concurrent calls — caller must
         // serialize externally (see GraphSnapshotStore class doc).
         std::lock_guard<std::mutex> lock(publish_mutex);
-        auto status = store_->PublishSnapshot(pg);
+        auto status = publish(pg);
         if (status.ok()) {
           publishes_done.fetch_add(1, std::memory_order_relaxed);
         }
@@ -140,10 +169,9 @@ TEST_F(GraphSnapshotStoreConcurrencyTest,
   EXPECT_GT(pins_done.load(), 0);
   EXPECT_GT(publishes_done.load(), 0);
 
-  // Final bookkeeping: a fresh pin/unpin works cleanly.
-  auto& slot = store_->PinCurrentSnapshot();
-  EXPECT_GE(slot.view().schema().vertex_label_num(), 1u);
-  store_->UnpinSnapshot(slot);
+  // Final bookkeeping: a fresh guard works cleanly.
+  SnapshotGuard guard(*store_);
+  EXPECT_GE(guard.view().schema().vertex_label_num(), 1u);
 }
 
 // 2. Hold N reader pins on the original cur slot, publish N new snapshots,
@@ -152,30 +180,29 @@ TEST_F(GraphSnapshotStoreConcurrencyTest,
 TEST_F(GraphSnapshotStoreConcurrencyTest, PhantomPinPreventsCleanupLeak) {
   constexpr int kReaders = 32;
 
-  std::vector<GraphSnapshotStore::SnapshotSlot*> pinned_slots;
+  std::vector<SnapshotGuard> pinned_slots;
   pinned_slots.reserve(kReaders);
   for (int i = 0; i < kReaders; ++i) {
-    auto& slot = store_->PinCurrentSnapshot();
-    pinned_slots.push_back(&slot);
+    pinned_slots.emplace_back(*store_);
   }
 
   // Publish kReaders new snapshots while readers continue holding slot 0.
   for (int i = 0; i < kReaders; ++i) {
-    auto status = store_->PublishSnapshot(make_new_pg());
+    auto status = publish(make_new_pg());
     ASSERT_TRUE(status.ok()) << "publish " << i << " failed";
   }
 
   // Release all reader pins on slot 0 in reverse order. The last release
   // should trigger slot 0 cleanup.
   for (int i = kReaders - 1; i >= 0; --i) {
-    store_->UnpinSnapshot(*pinned_slots[i]);
+    pinned_slots[i].release();
   }
 
   // Verify no slot leak: we should be able to do (kSlotNum - 2) more
   // publishes back-to-back without exhausting the pool. (1 slot is the live
   // cur; all others must have been recycled.)
   for (int i = 0; i < kSlotNum - 2; ++i) {
-    auto status = store_->PublishSnapshot(make_new_pg());
+    auto status = publish(make_new_pg());
     ASSERT_TRUE(status.ok())
         << "publish " << i << " failed — pool leak suspected";
   }
@@ -184,24 +211,24 @@ TEST_F(GraphSnapshotStoreConcurrencyTest, PhantomPinPreventsCleanupLeak) {
 // 3. Last-reader-cleans rule under randomized release order. Variant of test
 // 2 with explicit shuffle to exercise interleaved release ordering.
 TEST_F(GraphSnapshotStoreConcurrencyTest, LastReaderCleansRule) {
-  std::vector<GraphSnapshotStore::SnapshotSlot*> pins;
+  std::vector<SnapshotGuard> pins;
   for (int i = 0; i < 3; ++i) {
-    pins.push_back(&store_->PinCurrentSnapshot());
+    pins.emplace_back(*store_);
   }
 
   // Publish slot B → phantom-pin on slot 0, then release. Slot 0 still has 3
   // real reader pins, so it survives.
-  ASSERT_TRUE(store_->PublishSnapshot(make_new_pg()).ok());
+  ASSERT_TRUE(publish(make_new_pg()).ok());
 
   std::mt19937 gen(12345);
   std::shuffle(pins.begin(), pins.end(), gen);
-  for (auto* slot : pins) {
-    store_->UnpinSnapshot(*slot);
+  for (auto& guard : pins) {
+    guard.release();
   }
 
   // Slot 0 must now be in the free pool. Verify by exhausting publishes.
   for (int i = 0; i < kSlotNum - 2; ++i) {
-    auto status = store_->PublishSnapshot(make_new_pg());
+    auto status = publish(make_new_pg());
     ASSERT_TRUE(status.ok())
         << "publish " << i << " failed — slot 0 leak suspected";
   }
@@ -212,26 +239,26 @@ TEST_F(GraphSnapshotStoreConcurrencyTest, LastReaderCleansRule) {
 TEST_F(GraphSnapshotStoreConcurrencyTest, PoolExhaustionDoesNotConsumeNewPg) {
   // Pin all kSlotNum slots: pin cur, publish, repeat. Each iteration
   // pins the about-to-become-non-cur slot before swapping cur.
-  std::vector<GraphSnapshotStore::SnapshotSlot*> pinned;
-  pinned.push_back(&store_->PinCurrentSnapshot());
+  std::vector<SnapshotGuard> pinned;
+  pinned.emplace_back(*store_);
   for (int i = 0; i < kSlotNum - 1; ++i) {
-    ASSERT_TRUE(store_->PublishSnapshot(make_new_pg()).ok())
+    ASSERT_TRUE(publish(make_new_pg()).ok())
         << "setup publish " << i << " failed";
-    pinned.push_back(&store_->PinCurrentSnapshot());
+    pinned.emplace_back(*store_);
   }
 
   // All slots pinned; one more publish must fail with ERR_POOL_EXHAUSTED.
   auto extra_pg = make_new_pg();
   long use_count_before = extra_pg.use_count();
-  auto status = store_->PublishSnapshot(extra_pg);
+  auto status = publish(extra_pg);
   EXPECT_FALSE(status.ok());
   EXPECT_EQ(status.error_code(), StatusCode::ERR_POOL_EXHAUSTED);
   EXPECT_EQ(extra_pg.use_count(), use_count_before)
-      << "PublishSnapshot must not consume new_pg on failure";
+      << "PrepareSnapshot must not consume new_pg on failure";
 
   // Release all pins so TearDown can run cleanly.
-  for (auto* slot : pinned) {
-    store_->UnpinSnapshot(*slot);
+  for (auto& guard : pinned) {
+    guard.release();
   }
 }
 
@@ -248,15 +275,14 @@ TEST_F(GraphSnapshotStoreConcurrencyTest, PublishExclusivityVsPinShared) {
   for (int i = 0; i < kReaders; ++i) {
     readers.emplace_back([&] {
       while (!readers_stop.load(std::memory_order_relaxed)) {
-        auto& slot = store_->PinCurrentSnapshot();
-        store_->UnpinSnapshot(slot);
+        SnapshotGuard guard(*store_);
         reads_done.fetch_add(1, std::memory_order_relaxed);
       }
     });
   }
   std::thread writer([&] {
     for (int i = 0; i < kPublishes; ++i) {
-      (void) store_->PublishSnapshot(make_new_pg());
+      (void) publish(make_new_pg());
     }
   });
 
@@ -269,19 +295,17 @@ TEST_F(GraphSnapshotStoreConcurrencyTest, PublishExclusivityVsPinShared) {
   EXPECT_GT(reads_done.load(), 0);
 }
 
-// 6. PinCurrentSnapshot keeps the pinned PG alive across a concurrent
-// PublishSnapshot that publishes a new cur slot.
+// 6. SnapshotGuard keeps the pinned PG alive across a concurrent install
+// that publishes a new cur slot.
 TEST_F(GraphSnapshotStoreConcurrencyTest, PinnedSnapshotSurvivesPublish) {
-  auto& slot = store_->PinCurrentSnapshot();
-  ASSERT_NE(slot.mutable_graph(), nullptr);
+  SnapshotGuard guard(*store_);
+  ASSERT_NE(guard.graph(), nullptr);
 
-  ASSERT_TRUE(store_->PublishSnapshot(make_new_pg()).ok());
+  ASSERT_TRUE(publish(make_new_pg()).ok());
 
   // graph pointer is still safely dereferenceable: storage held alive by our
   // pin.
-  EXPECT_GE(slot.mutable_graph()->schema().vertex_label_num(), 1u);
-
-  store_->UnpinSnapshot(slot);
+  EXPECT_GE(guard.graph()->schema().vertex_label_num(), 1u);
 }
 
 // 7. COW publish → pin sees new snapshot (E2E visibility).
@@ -299,33 +323,32 @@ TEST_F(GraphSnapshotStoreConcurrencyTest, CowPublishIsVisibleToNewReaders) {
   ASSERT_TRUE(status.ok());
 
   // Publish the mutated snapshot.
-  ASSERT_TRUE(store_->PublishSnapshot(cow_pg).ok());
+  ASSERT_TRUE(publish(cow_pg).ok());
 
   // A new reader must observe the "company" vertex type.
-  auto& slot = store_->PinCurrentSnapshot();
-  EXPECT_TRUE(slot.mutable_graph()->schema().is_vertex_label_valid("company"));
-  EXPECT_TRUE(slot.mutable_graph()->schema().is_vertex_label_valid("person"));
-  EXPECT_EQ(slot.mutable_graph()->schema().vertex_label_num(), 2u);
-  store_->UnpinSnapshot(slot);
+  SnapshotGuard guard(*store_);
+  EXPECT_TRUE(guard.graph()->schema().is_vertex_label_valid("company"));
+  EXPECT_TRUE(guard.graph()->schema().is_vertex_label_valid("person"));
+  EXPECT_EQ(guard.graph()->schema().vertex_label_num(), 2u);
 }
 
 // 8. Abort-style release recycles the slot properly.
 // Simulates an UpdateTransaction that clones, publishes, then the caller
 // releases the old pin (as Abort would). Verifies no slot leak.
 TEST_F(GraphSnapshotStoreConcurrencyTest, AbortReleasesSlotWithoutLeak) {
-  // Pin the current slot (simulates PinCurrentSnapshot in txn constructor).
-  auto& old_slot = store_->PinCurrentSnapshot();
+  // Pin the current slot (simulates a transaction-owned SnapshotGuard).
+  SnapshotGuard old_slot(*store_);
 
   // Publish a new snapshot (simulates successful COW commit path).
-  ASSERT_TRUE(store_->PublishSnapshot(make_new_pg()).ok());
+  ASSERT_TRUE(publish(make_new_pg()).ok());
 
   // Release the old pin (simulates Abort/release_pin).
-  store_->UnpinSnapshot(old_slot);
+  old_slot.release();
 
   // Verify no slot leak: we should still be able to exhaust (kSlotNum - 2)
   // publishes without hitting pool exhaustion.
   for (int i = 0; i < kSlotNum - 2; ++i) {
-    auto status = store_->PublishSnapshot(make_new_pg());
+    auto status = publish(make_new_pg());
     ASSERT_TRUE(status.ok())
         << "publish " << i << " failed — abort slot leak suspected";
   }
@@ -360,7 +383,7 @@ TEST_F(GraphSnapshotStoreConcurrencyTest, CowIsolationAfterCloneMutatePublish) {
   ASSERT_EQ(cow1->VertexNum(0, MAX_TIMESTAMP), 2u);
 
   // Publish the mutated COW clone as the new snapshot.
-  ASSERT_TRUE(store_->PublishSnapshot(cow1).ok());
+  ASSERT_TRUE(publish(cow1).ok());
 
   // Phase 3: clone again from the published snapshot. Explicitly detach
   // shared modules so cow2's mutations don't leak back to cow1.
@@ -385,10 +408,182 @@ TEST_F(GraphSnapshotStoreConcurrencyTest, CowIsolationAfterCloneMutatePublish) {
   EXPECT_EQ(initial_pg_->VertexNum(0, MAX_TIMESTAMP), 1u);
 
   // Publish cow2 and verify a reader sees all three.
-  ASSERT_TRUE(store_->PublishSnapshot(cow2).ok());
-  auto& slot = store_->PinCurrentSnapshot();
-  EXPECT_EQ(slot.mutable_graph()->VertexNum(0, MAX_TIMESTAMP), 3u);
-  store_->UnpinSnapshot(slot);
+  ASSERT_TRUE(publish(cow2).ok());
+  SnapshotGuard guard(*store_);
+  EXPECT_EQ(guard.graph()->VertexNum(0, MAX_TIMESTAMP), 3u);
+}
+
+// 10. Prepared installation tags the slot with the given view generation; a
+// pinned incarnation keeps its generation stable across later publishes.
+TEST_F(GraphSnapshotStoreConcurrencyTest,
+       GenerationTaggedOnPublishAndStableWhilePinned) {
+  ASSERT_TRUE(publish(make_new_pg()).ok());
+  const uint32_t pinned_gen = last_view_generation_;
+
+  SnapshotGuard guard(*store_);
+  EXPECT_EQ(guard.view_generation(), pinned_gen);
+
+  ASSERT_TRUE(publish(make_new_pg()).ok());
+  EXPECT_EQ(guard.view_generation(), pinned_gen)
+      << "a pinned incarnation's generation must be stable";
+
+  SnapshotGuard newer(*store_);
+  EXPECT_EQ(newer.view_generation(), last_view_generation_);
+  EXPECT_NE(newer.view_generation(), guard.view_generation());
+}
+
+// 11. Slot index reuse (A-B-A) must not imply snapshot identity: a reused
+// slot carries the new generation, so generation comparison rejects the
+// stale pairing. Uses a 2-slot pool to force reuse.
+TEST_F(GraphSnapshotStoreConcurrencyTest, SlotReuseABAChangesGeneration) {
+  GraphSnapshotStore store(2, initial_pg_, /*initial_view_generation=*/10);
+
+  uint32_t first_gen;
+  {
+    SnapshotGuard first(store);
+    first_gen = first.view_generation();
+    ASSERT_EQ(first_gen, 10u);
+    // cur moves to slot 1 / gen 11 while `first` retains slot 0 / gen 10.
+    ASSERT_TRUE(
+        InstallPreparedSnapshotForTest(store, make_new_pg(), 11, 0).ok());
+  }  // release `first`: slot 0 is cleaned up and returned to the free list.
+
+  // Reuses slot 0 with a new generation.
+  ASSERT_TRUE(InstallPreparedSnapshotForTest(store, make_new_pg(), 12, 0).ok());
+  SnapshotGuard current(store);
+  EXPECT_EQ(current.view_generation(), 12u);
+  EXPECT_NE(current.view_generation(), first_gen)
+      << "generation comparison must distinguish reused slot incarnations";
+}
+
+// 12. Delayed-pin regression: a reader parked between the cur-index load and
+// its pin CAS must not resurrect a slot that was fully cleaned up meanwhile
+// (the old fetch_add algorithm temporarily bounced 0 -> 1 -> 0 and could
+// make cleanup miss the slot). Deterministic via the after_cur_slot_load
+// hook.
+TEST_F(GraphSnapshotStoreConcurrencyTest,
+       DelayedPinCannotResurrectCleanedSlot) {
+  std::promise<void> pin_loaded_cur;
+  std::promise<void> cleanup_done;
+  auto cleanup_done_future = cleanup_done.get_future();
+  std::atomic<bool> parked{false};
+  std::atomic<const PropertyGraph*> pinned_graph{nullptr};
+
+  g_concurrency_test_hooks.after_cur_slot_load = [&] {
+    if (!parked.exchange(true)) {
+      pin_loaded_cur.set_value();
+      // Park the reader between the cur-index load and the pin CAS.
+      cleanup_done_future.wait();
+    }
+  };
+
+  std::thread reader([&] {
+    SnapshotGuard guard(*store_);
+    pinned_graph.store(guard.graph());
+  });
+
+  pin_loaded_cur.get_future().wait();
+  // The reader has loaded cur = slot 0 but not yet CASed. Publishing moves
+  // cur away; slot 0 holds only its cur-pin, so releasing it cleans the slot
+  // up synchronously and returns it to the free list.
+  auto pg2 = make_new_pg();
+  ASSERT_TRUE(publish(pg2).ok());
+  cleanup_done.set_value();
+  reader.join();
+
+  // The delayed pin attempt must have retried onto the new cur instead of
+  // resurrecting slot 0.
+  EXPECT_EQ(pinned_graph.load(), pg2.get());
+
+  // Slot 0 must have been recycled: exhaust the rest of the pool.
+  for (int i = 0; i < kSlotNum - 2; ++i) {
+    ASSERT_TRUE(publish(make_new_pg()).ok())
+        << "publish " << i << " failed — delayed pin leaked a slot";
+  }
+}
+
+// 13. Schema generation (read-view publication protocol, Phase 5):
+// Prepared installation tags the slot with the given schema generation;
+// current_schema_generation() follows the current slot; a pinned old
+// incarnation keeps its own generation.
+TEST_F(GraphSnapshotStoreConcurrencyTest,
+       SchemaGenerationTaggedOnPublishAndTrackedPerSlot) {
+  // The fixture store starts with initial_schema_generation = 0.
+  EXPECT_EQ(store_->current_schema_generation(), 0u);
+
+  // DML-only publish: the schema generation is carried over unchanged.
+  ASSERT_TRUE(
+      InstallPreparedSnapshotForTest(*store_, make_new_pg(), 1, 0).ok());
+  EXPECT_EQ(store_->current_schema_generation(), 0u);
+
+  // DDL publish: the schema generation advances by one.
+  ASSERT_TRUE(
+      InstallPreparedSnapshotForTest(*store_, make_new_pg(), 2, 1).ok());
+  EXPECT_EQ(store_->current_schema_generation(), 1u);
+
+  // A reader pinning the new current slot observes the bumped generation.
+  SnapshotGuard guard(*store_);
+  EXPECT_EQ(guard.schema_generation(), 1u);
+  EXPECT_EQ(guard.view_generation(), 2u);
+}
+
+// 14. AdvanceCurrentSlotSchemaGeneration (EXCLUSIVE-only in-place bump for
+// AP schema mutations that publish no snapshot) advances the current
+// slot's schema generation without touching the view generation.
+TEST_F(GraphSnapshotStoreConcurrencyTest,
+       AdvanceCurrentSlotSchemaGenerationBumpsInPlace) {
+  EXPECT_EQ(store_->current_schema_generation(), 0u);
+
+  store_->AdvanceCurrentSlotSchemaGeneration();
+  EXPECT_EQ(store_->current_schema_generation(), 1u);
+
+  // New readers pinning the same (still current) slot observe the bump.
+  SnapshotGuard guard(*store_);
+  EXPECT_EQ(guard.schema_generation(), 1u);
+  EXPECT_EQ(guard.view_generation(), 0u)
+      << "an in-place schema bump must not touch the view generation";
+}
+
+TEST_F(GraphSnapshotStoreConcurrencyTest,
+       PreparedSnapshotIsInvisibleUntilInstalledAndRollsBackOnRelease) {
+  auto candidate = make_new_pg();
+  GraphSnapshotStore::PreparedSnapshot prepared;
+  ASSERT_TRUE(store_
+                  ->PrepareSnapshot(candidate, 91 /* view_generation */,
+                                    0 /* schema_generation */, prepared)
+                  .ok());
+  ASSERT_TRUE(prepared.valid());
+
+  // Reserving/building the slot must not alter the reader-visible current
+  // snapshot; this is the pre-WAL failure boundary.
+  SnapshotGuard before_install(*store_);
+  EXPECT_EQ(before_install.graph(), initial_pg_.get());
+  before_install.release();
+
+  prepared.reset();
+  ASSERT_TRUE(publish(candidate).ok())
+      << "abandoned preparation must return its slot to the free pool";
+}
+
+TEST_F(GraphSnapshotStoreConcurrencyTest,
+       PreparedSnapshotInstallsWithoutFurtherConstruction) {
+  auto candidate = make_new_pg();
+  GraphSnapshotStore::PreparedSnapshot prepared;
+  ASSERT_TRUE(store_->PrepareSnapshot(candidate, 92, 3, prepared).ok());
+  store_->InstallPreparedSnapshot(std::move(prepared));
+  EXPECT_FALSE(prepared.valid());
+
+  SnapshotGuard current(*store_);
+  EXPECT_EQ(current.graph(), candidate.get());
+  EXPECT_EQ(current.view_generation(), 92u);
+  EXPECT_EQ(current.schema_generation(), 3u);
+}
+
+TEST_F(GraphSnapshotStoreConcurrencyTest, GenerationOverflowFailsClosed) {
+  GraphSnapshotStore schema_max_store(2, initial_pg_, 0,
+                                      std::numeric_limits<uint32_t>::max());
+  EXPECT_THROW((void) schema_max_store.NextCurrentSchemaGeneration(),
+               std::exception);
 }
 
 }  // namespace neug

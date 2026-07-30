@@ -12,38 +12,20 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#pragma once
+
+#include "neug/transaction/transaction_utils.h"
 
 #include "neug/storages/graph_snapshot_store.h"
-#include "neug/utils/property/types.h"
-#include "neug/utils/serialization/in_archive.h"
+#include "neug/transaction/version_manager.h"
 
 namespace neug {
 
-class PropertyGraph;
-class IWalWriter;
-class IVersionManager;
-
-class CompactTransaction {
- public:
-  CompactTransaction(GraphSnapshotStore& snapshot_store, IWalWriter& logger,
-                     IVersionManager& vm, timestamp_t timestamp);
-  ~CompactTransaction();
-
-  timestamp_t timestamp() const;
-
-  bool Commit();
-
-  void Abort();
-
- private:
-  GraphSnapshotStore& snapshot_store_;
-  SnapshotGuard guard_;
-  IWalWriter& logger_;
-  IVersionManager& vm_;
-  timestamp_t timestamp_;
-
-  InArchive arc_;
-};
+void CompleteInPlaceCommit(IVersionManager& version_manager,
+                           GraphSnapshotStore& snapshot_store,
+                           uint32_t timestamp, uint32_t view_generation) {
+  snapshot_store.SetCurrentViewGeneration(view_generation);
+  version_manager.complete_write(timestamp, WriteCompletion::kInPlace,
+                                 view_generation);
+}
 
 }  // namespace neug

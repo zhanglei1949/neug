@@ -37,6 +37,7 @@
 #include "neug/storages/graph/property_graph.h"
 #include "neug/storages/graph/schema.h"
 #include "neug/storages/graph_snapshot_store.h"
+#include "neug/transaction/read_snapshot_lease.h"
 #include "neug/transaction/transaction_utils.h"
 #include "neug/utils/property/column.h"
 #include "neug/utils/property/table.h"
@@ -45,7 +46,6 @@
 namespace neug {
 
 class PropertyGraph;
-class IVersionManager;
 template <typename EDATA_T>
 class TypedMutableCsrBase;
 
@@ -53,8 +53,11 @@ class TypedMutableCsrBase;
  * @brief Read-only transaction for consistent snapshot access to graph data.
  *
  * ReadTransaction provides read access to graph data at a specific timestamp,
- * implementing snapshot isolation. It retains a graph snapshot guard together
- * with the version manager and snapshot timestamp.
+ * implementing snapshot isolation. It owns a generation-validated
+ * ReadSnapshotLease: the visibility timestamp, view generation, and pinned
+ * snapshot are acquired as ONE coherent object by
+ * ReadSnapshotLease::Acquire and can no longer be assembled from independent
+ * parts (read-view publication protocol, issue #793).
  *
  * **Implementation Details:**
  * - Stores const reference to PropertyGraph for read-only access
@@ -69,16 +72,14 @@ class TypedMutableCsrBase;
 class ReadTransaction {
  public:
   /**
-   * @brief Construct a ReadTransaction with a pinned SnapshotSlot.
+   * @brief Construct a ReadTransaction from a generation-validated lease.
    *
-   * @param guard SnapshotGuard managing the pinned SnapshotSlot.
-   * @param vm Reference to version manager.
-   * @param timestamp Snapshot timestamp for this transaction.
+   * The arbitrary (SnapshotGuard, timestamp) constructor is intentionally
+   * removed: only ReadSnapshotLease::Acquire may assemble a read view.
    *
-   * @since v0.1.0
+   * @param lease ReadSnapshotLease owning admission + pinned snapshot.
    */
-  ReadTransaction(SnapshotGuard guard, IVersionManager& vm,
-                  timestamp_t timestamp);
+  explicit ReadTransaction(ReadSnapshotLease lease);
 
   /**
    * @brief Destructor that calls release().
@@ -91,23 +92,26 @@ class ReadTransaction {
 
   timestamp_t timestamp() const;
 
+  /// Graph view generation of this transaction's read view.
+  uint32_t view_generation() const { return lease_.view_generation(); }
+  /// Schema generation of the pinned snapshot (query-cache key component).
+  uint32_t schema_generation() const { return lease_.schema_generation(); }
+
   bool Commit();
 
   void Abort();
 
-  const GraphView& view() const { return guard_.get().view(); }
+  const GraphView& view() const { return lease_.view(); }
 
   GraphStats statistic() const {
-    return GraphStats(*guard_.get().mutable_graph());
+    return GraphStats(*lease_.graph());
   }
 
   const Schema& schema() const;
 
  private:
   void release();
-  SnapshotGuard guard_;
-  IVersionManager& vm_;
-  timestamp_t timestamp_;
+  ReadSnapshotLease lease_;
 };
 
 }  // namespace neug

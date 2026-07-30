@@ -81,7 +81,7 @@ void create_person_schema(neug::NeugDB& db) {
 
 bool replayed_graph_matches(neug::NeugDB& db) {
   neug::SnapshotGuard guard(db.graph_snapshot_store());
-  neug::StorageReadInterface graph(guard.get().view(), neug::MAX_TIMESTAMP);
+  neug::StorageReadInterface graph(guard.view(), neug::MAX_TIMESTAMP);
   const auto person_label = graph.schema().get_vertex_label_id("person");
   const auto knows_label = graph.schema().get_edge_label_id("knows");
 
@@ -252,14 +252,19 @@ static void expect_compact_completes_timestamp_and_preserves_next_insert(
   const auto insert_ts = version_manager.acquire_insert_timestamp();
   version_manager.release_insert_timestamp(insert_ts);
 
-  const auto compact_ts = version_manager.acquire_compact_timestamp();
+  const auto compact_ts =
+      version_manager.acquire_write_timestamp(neug::WriteIntent::kCompact);
   if (commit) {
-    version_manager.release_compact_timestamp(compact_ts);
+    version_manager.complete_write(compact_ts,
+                                   neug::WriteCompletion::kNoSnapshot);
   } else {
-    version_manager.revert_compact_timestamp(compact_ts);
+    version_manager.complete_write(compact_ts,
+                                   neug::WriteCompletion::kNoSnapshot);
   }
 
-  const auto read_after_compact_ts = version_manager.acquire_read_timestamp();
+  version_manager.acquire_read_admission();
+  const auto read_after_compact_ts =
+      version_manager.load_published_read_view().visibility_ts;
   EXPECT_EQ(read_after_compact_ts, compact_ts)
       << "compaction timestamps must be marked complete so readers can advance";
   version_manager.release_read_timestamp();
@@ -270,7 +275,9 @@ static void expect_compact_completes_timestamp_and_preserves_next_insert(
          "replay cannot collide with pre-compaction insert records";
   version_manager.release_insert_timestamp(next_insert_ts);
 
-  const auto read_after_insert_ts = version_manager.acquire_read_timestamp();
+  version_manager.acquire_read_admission();
+  const auto read_after_insert_ts =
+      version_manager.load_published_read_view().visibility_ts;
   EXPECT_EQ(read_after_insert_ts, next_insert_ts)
       << "a compact timestamp gap must not block later insert visibility";
   version_manager.release_read_timestamp();

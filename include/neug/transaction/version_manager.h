@@ -24,6 +24,48 @@
 namespace neug {
 
 /**
+ * @brief The authoritative read-visible frontier: visibility timestamp +
+ * graph view generation, published and loaded as ONE 64-bit atomic value.
+ *
+ * Readers must never load the two fields from separate atomics. Encoding is
+ * centralized in Pack/UnpackPublishedReadView.
+ */
+struct PublishedReadView {
+  uint32_t visibility_ts;
+  uint32_t view_generation;
+};
+
+/**
+ * @brief The admission acquired for a write before it reaches commit.
+ *
+ * Update admission permits concurrent reads while the COW graph is built.
+ * Compact admission is exclusive from the start.  The distinction is a
+ * caller-visible workload choice; the admission phases used to implement it
+ * remain private to VersionManager.
+ */
+enum class WriteIntent : uint8_t {
+  kUpdate,
+  kCompact,
+};
+
+/** @brief The externally observable outcome of a write admission. */
+enum class WriteCompletion : uint8_t {
+  kSnapshot,
+  kInPlace,
+  kNoSnapshot,
+};
+
+inline uint64_t PackPublishedReadView(const PublishedReadView& view) {
+  return (static_cast<uint64_t>(view.view_generation) << 32) |
+         view.visibility_ts;
+}
+
+inline PublishedReadView UnpackPublishedReadView(uint64_t packed) {
+  return PublishedReadView{static_cast<uint32_t>(packed & 0xffffffffu),
+                           static_cast<uint32_t>(packed >> 32)};
+}
+
+/**
  * @brief Unified interface for transaction timestamp and concurrency control.
  *
  * IVersionManager defines the contract for managing timestamp acquisition,
@@ -32,9 +74,18 @@ namespace neug {
  * a timestamp and to coordinate exclusive/shared access with other
  * transaction types.
  *
- * The current implementation is VersionManager, which uses an atomic
- * admission state machine plus atomic counters for concurrency
- * control, replacing the earlier rw_mutex_-based design.
+ * The current implementation is VersionManager, which uses one packed
+ * OperationGateState atomic for phase and admission counters, replacing the
+ * earlier independent-counter design.
+ *
+ * Read-view publication:
+ * - published_read_view_ is the ONLY read-visible timestamp authority.
+ *   Readers register via acquire_read_admission() and obtain their
+ *   visibility timestamp exclusively from load_published_read_view(); they
+ *   never read a bare read frontier.
+ * - Writers express an intent, then a completion outcome.  VersionManager
+ *   owns all admission-phase transitions and reader draining; callers never
+ *   manipulate those implementation phases directly.
  *
  * @see VersionManager for the concrete implementation and its
  *      concurrency matrix.
@@ -47,20 +98,15 @@ class IVersionManager {
   // attempts so no already-waiting caller retains the previous runtime wait.
   virtual bool try_set_runtime_wait_if_quiescent(
       RuntimeWaitFn runtime_wait) noexcept = 0;
-  virtual uint32_t acquire_read_timestamp() = 0;
+  virtual void acquire_read_admission() = 0;
   virtual void release_read_timestamp() = 0;
+  virtual PublishedReadView load_published_read_view() const = 0;
   virtual uint32_t acquire_insert_timestamp() = 0;
   virtual void release_insert_timestamp(uint32_t ts) = 0;
-  virtual uint32_t acquire_update_timestamp() = 0;
-  virtual void begin_update_commit(uint32_t ts) = 0;
-  // May invoke the runtime waiter. Checkpoint callers must enter commit and
-  // drain readers before acquiring checkpoint-manager or other
-  // OS-thread-owned mutexes.
-  virtual void drain_readers() = 0;
-  virtual void release_update_timestamp(uint32_t ts) = 0;
-  virtual uint32_t acquire_compact_timestamp() = 0;
-  virtual void release_compact_timestamp(uint32_t ts) = 0;
-  virtual void revert_compact_timestamp(uint32_t ts) = 0;
+  virtual uint32_t acquire_write_timestamp(WriteIntent intent) = 0;
+  virtual void begin_write_commit(uint32_t ts, WriteCompletion completion) = 0;
+  virtual void complete_write(uint32_t ts, WriteCompletion completion,
+                              uint32_t new_view_generation = 0) = 0;
 
   virtual ~IVersionManager() {}
 };
@@ -68,9 +114,11 @@ class IVersionManager {
 /**
  * @brief VersionManager — concurrency control via atomic state machine.
  *
- * admission_state_ transitions:
- * - Update: open → inserts-blocked → all-blocked → open.
- * - Compact: open → all-blocked → open.
+ * OperationGateState is one 64-bit CAS word:
+ *   phase: 2 bits | active_readers: 31 bits | active_inserters: 31 bits.
+ * A reader/inserter admission and a writer gate transition therefore share
+ * one modification order; a transition cannot miss an already-admitted
+ * operation on weak-memory machines.
  *
  * Concurrency (new acquisitions; in-flight ops are not interrupted):
  *
@@ -88,15 +136,9 @@ class IVersionManager {
  *   Storage compaction may reset per-record visibility timestamps to zero, but
  *   transaction/WAL timestamps must never be reset within a WAL timeline.
  * - read_ts_: highest timestamp fully committed and visible to all readers.
- * - active_readers_/active_inserters_: atomic counters for in-flight ops.
- * - admission_state_: controls whether new readers and inserters may enter.
- *   Update execution blocks inserters; update commit and compaction block
- *   both readers and inserters.
- * - acquire_read_timestamp uses a double-check pattern (pre-check + increment
- *   + post-check) to prevent ABA races with begin_update_commit.
- * - begin_update_commit blocks new readers before snapshot publication.
- *   Readers already between the pre-check and post-check either roll back
- *   after observing the blocked state or complete as an existing reader.
+ * - operation_gate_state_: 0=normal, 1=update-exec (inserters drained),
+ *   2=publishing (new reads/inserts block; existing reads continue),
+ *   3=exclusive (readers+inserters drained before mutation).
  * - SpinLock lock_: serializes read_ts advancement (check-and-advance
  *   in complete_write_timestamp).
  * - TimestampWindow ts_window_: tracks completed timestamps for read_ts
@@ -111,41 +153,57 @@ class VersionManager : public IVersionManager {
   bool try_set_runtime_wait_if_quiescent(
       RuntimeWaitFn runtime_wait) noexcept override;
 
-  uint32_t acquire_read_timestamp() override;
+  void acquire_read_admission() override;
   void release_read_timestamp() override;
+  PublishedReadView load_published_read_view() const override;
   uint32_t acquire_insert_timestamp() override;
   void release_insert_timestamp(uint32_t ts) override;
-  uint32_t acquire_update_timestamp() override;
-  void begin_update_commit(uint32_t ts) override;
-  void drain_readers() override;
-  void release_update_timestamp(uint32_t ts) override;
-  uint32_t acquire_compact_timestamp() override;
-  void release_compact_timestamp(uint32_t ts) override;
-  void revert_compact_timestamp(uint32_t ts) override;
+  uint32_t acquire_write_timestamp(WriteIntent intent) override;
+  void begin_write_commit(uint32_t ts, WriteCompletion completion) override;
+  void complete_write(uint32_t ts, WriteCompletion completion,
+                      uint32_t new_view_generation = 0) override;
 
  private:
   friend struct VersionManagerTestPeer;
 
-  enum class AdmissionState { kOpen, kInsertsBlocked, kAllBlocked };
-
   int thread_num_;
-  uint32_t acquire_read_timestamp_slow();
-  uint32_t acquire_insert_timestamp_slow();
-  // These helpers may suspend the logical task. Callers must not hold an
-  // OS-thread-owned lock or retain an ordinary TLS pointer across the call.
-  void enter_exclusive_state(AdmissionState desired_state);
-  void wait_until_zero(const std::atomic<int>& counter);
+  enum class OperationGatePhase : uint8_t {
+    kNormal = 0,
+    kUpdateExecution = 1,
+    kPublishing = 2,
+    kExclusive = 3,
+  };
+
+  struct OperationGateState {
+    OperationGatePhase phase;
+    uint32_t readers;
+    uint32_t inserters;
+  };
+
+  static constexpr uint32_t kMaxAdmissionCount = 0x7fffffffu;
+  static uint64_t PackOperationGateState(OperationGateState state);
+  static OperationGateState UnpackOperationGateState(uint64_t packed);
+  static bool IsReaderAllowed(OperationGatePhase phase);
+  void wait_for_admission_change(uint64_t observed) const;
+  uint32_t allocate_write_timestamp();
+  void set_phase(OperationGatePhase expected, OperationGatePhase desired);
+  void drain_exclusive_admission();
   RuntimeWaitFn runtime_wait() const noexcept;
   void complete_write_timestamp(uint32_t ts);
   void advance_read_ts_locked();
 
   std::atomic<uint32_t> write_ts_{1};
+  // Internal migration aid: the contiguous committed frontier. Readers must
+  // NOT use it; the authoritative pair lives in published_read_view_.
   std::atomic<uint32_t> read_ts_{1};
+  // The single authoritative read view: {visibility_ts, view_generation}.
+  std::atomic<uint64_t> published_read_view_{0};
+  // Latest published view generation. Written only by the serialized update
+  // committer before complete_write_timestamp; read under lock_ or in the
+  // same commit path.
+  std::atomic<uint32_t> view_generation_{0};
 
-  std::atomic<int> active_readers_{0};
-  std::atomic<int> active_inserters_{0};
-
-  std::atomic<AdmissionState> admission_state_{AdmissionState::kOpen};
+  std::atomic<uint64_t> operation_gate_state_{0};
 
   TimestampWindow ts_window_;
 

@@ -506,7 +506,7 @@ TEST_F(ConnectionTemporaryCleanupTest, CloseRemovesTemporaryTypes) {
   CreateVertexTypeParamBuilder builder;
   {
     neug::SnapshotGuard guard(db_->graph_snapshot_store());
-    auto* pg = guard.get().mutable_graph();
+    auto* pg = guard.mutable_graph();
     EXPECT_TRUE(pg->CreateVertexType(builder.VertexLabel("temp_node")
                                          .AddProperty("id", Value::INT64(0))
                                          .AddProperty("val", Value::STRING(""))
@@ -519,7 +519,7 @@ TEST_F(ConnectionTemporaryCleanupTest, CloseRemovesTemporaryTypes) {
   // Verify temp type exists before close
   {
     neug::SnapshotGuard guard(db_->graph_snapshot_store());
-    auto* pg = guard.get().mutable_graph();
+    auto* pg = guard.mutable_graph();
     EXPECT_TRUE(pg->schema().is_vertex_label_valid("temp_node"));
     auto temp_labels = pg->schema().get_temporary_vertex_labels();
     EXPECT_EQ(temp_labels.size(), 1);
@@ -531,7 +531,7 @@ TEST_F(ConnectionTemporaryCleanupTest, CloseRemovesTemporaryTypes) {
   // Temp type should be cleaned up
   {
     neug::SnapshotGuard guard(db_->graph_snapshot_store());
-    auto* pg = guard.get().mutable_graph();
+    auto* pg = guard.mutable_graph();
     auto temp_labels = pg->schema().get_temporary_vertex_labels();
     EXPECT_TRUE(temp_labels.empty());
 
@@ -551,7 +551,7 @@ TEST_F(ConnectionTemporaryCleanupTest, CloseRemovesTemporaryEdges) {
   // Create temp vertex + temp edge via storage API
   {
     neug::SnapshotGuard guard(db_->graph_snapshot_store());
-    auto* pg = guard.get().mutable_graph();
+    auto* pg = guard.mutable_graph();
     CreateVertexTypeParamBuilder vbuilder;
     EXPECT_TRUE(pg->CreateVertexType(vbuilder.VertexLabel("temp_src")
                                          .AddProperty("id", Value::INT64(0))
@@ -572,7 +572,7 @@ TEST_F(ConnectionTemporaryCleanupTest, CloseRemovesTemporaryEdges) {
   // Verify both exist
   {
     neug::SnapshotGuard guard(db_->graph_snapshot_store());
-    auto* pg = guard.get().mutable_graph();
+    auto* pg = guard.mutable_graph();
     EXPECT_EQ(pg->schema().get_temporary_vertex_labels().size(), 1);
     EXPECT_EQ(pg->schema().get_temporary_edge_triplet_keys().size(), 1);
   }
@@ -606,7 +606,7 @@ TEST_F(ConnectionTemporaryCleanupTest, DoubleCloseIsIdempotent) {
   CreateVertexTypeParamBuilder builder;
   {
     neug::SnapshotGuard guard(db_->graph_snapshot_store());
-    auto* pg = guard.get().mutable_graph();
+    auto* pg = guard.mutable_graph();
     EXPECT_TRUE(pg->CreateVertexType(builder.VertexLabel("temp_x")
                                          .AddProperty("id", Value::INT64(0))
                                          .AddPrimaryKeyName("id")

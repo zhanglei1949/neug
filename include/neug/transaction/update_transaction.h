@@ -58,16 +58,16 @@ class Schema;
  * - Holds a shared_ptr to a COW-cloned PropertyGraph
  * - StorageTPUpdateInterface performs all DDL/DML modifications on the COW copy
  * - Commit flushes WAL and publishes the COW copy via
- * GraphSnapshotStore::PublishSnapshot()
+ * GraphSnapshotStore::PrepareSnapshot() / InstallPreparedSnapshot()
  * - Abort discards the COW copy (no effect on original)
  *
  * **Concurrency contract** (VersionManager state machine):
  * - Acquisition enters the update-exec phase: waits for in-flight inserts,
  *   blocks new inserts/updates, and lets reads continue on their pinned
  *   snapshots.
- * - Commit calls VersionManager::begin_update_commit to enter the update-commit
- *   phase: briefly blocks new reads and inserts while the COW snapshot is
- *   published. Existing reads continue unaffected.
+ * - Commit expresses a snapshot outcome through VersionManager's typed write
+ *   API. VersionManager briefly blocks new reads and inserts while the COW
+ *   snapshot is published; existing reads continue unaffected.
  *
  * @since v0.1.0
  */
@@ -103,6 +103,12 @@ class UpdateTransaction {
    * @since v0.1.0
    */
   timestamp_t timestamp() const;
+
+  /// Schema generation of the committed snapshot this transaction's COW
+  /// graph was cloned from (query-cache key component). Recorded at
+  /// construction under the update-exec admission, so it is stable for the
+  /// transaction's whole lifetime.
+  uint32_t schema_generation() const { return schema_generation_; }
 
   bool Commit();
 
@@ -166,6 +172,9 @@ class UpdateTransaction {
 
   std::shared_ptr<Checkpoint> ckp_;
   WalBuilder wal_builder_;
+  // Committed schema generation at construction time (the COW clone's
+  // schema). Commit bumps it by one iff the WAL changed the schema.
+  uint32_t schema_generation_;
 };
 
 class StorageTPUpdateInterface : public StorageUpdateInterface {

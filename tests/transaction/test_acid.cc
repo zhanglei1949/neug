@@ -1729,7 +1729,7 @@ size_t cc_count_persons(NeugDBService& svc) {
 // Each "*_via" helper reads through a held ReadTransaction's frozen GraphView
 // (`txn.view()`), so the observation reflects the snapshot pinned in the
 // GraphSnapshotStore slot — not the live PropertyGraph (which a concurrent
-// writer may have replaced via PublishSnapshot).
+// writer may have replaced via prepared snapshot installation).
 
 // Count visible vertices for a label via a held read snapshot.
 size_t cc_count_vertices_via(const ReadTransaction& txn, label_t label) {
@@ -1974,7 +1974,7 @@ TEST_F(NeugDBACIDTest, ConcurrentReadsAndInsertsDoNotInterfere) {
   constexpr int64_t kMaxInserts = 10000;
   {
     SnapshotGuard guard(db.graph_snapshot_store());
-    guard.get().mutable_graph()->EnsureCapacity(
+    guard.mutable_graph()->EnsureCapacity(
         db.schema().get_vertex_label_id("person"),
         kSeedVertices + static_cast<size_t>(kMaxInserts) + kInserterThreads);
   }
@@ -2967,11 +2967,12 @@ TEST_F(NeugDBACIDTest, CommitVisibilitySemantics) {
 // the per-row timestamp filter: a reader's observation depends on whether
 // its read_ts (allocated at GetReadTransaction time) is < or >= the writer's
 // write_ts (allocated at GetUpdateTransaction time, published at
-// release_update_timestamp time).
+// complete_write time).
 //
 // Empirically the reader nearly always wins, because the writer's path from
-// barrier release to release_update_timestamp includes WAL append +
-// PublishSnapshot, while the reader's path is just acquire_read_timestamp
+// barrier release to complete_write includes WAL append +
+// prepared snapshot installation, while the reader's path is just
+// read admission plus coherent read-view acquisition
 // (an atomic load). The pre-domination is a property of the path lengths,
 // not a bug. Both outcomes are CORRECT; we only assert no garbage.
 TEST_F(NeugDBACIDTest, ConcurrentReadsAndCommitsObserveConsistentValues) {

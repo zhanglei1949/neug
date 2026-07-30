@@ -251,8 +251,12 @@ class ExecutionSlot {
              wal_writer_ != nullptr);
   }
 
+  /// @param schema_generation Caller-visible committed schema generation
+  ///        (from the read lease / pinned snapshot); part of the plan
+  ///        cache correctness key.
   result<std::shared_ptr<execution::CacheValue>> prepareQuery(
-      const GraphStats& stats, const std::string& query, int32_t num_threads);
+      const GraphStats& stats, const std::string& query, int32_t num_threads,
+      uint32_t schema_generation);
 
   Status validatePlan(AccessMode mode,
                       const physical::ExecutionFlag& flags) const;

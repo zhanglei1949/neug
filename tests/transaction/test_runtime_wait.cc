@@ -113,20 +113,20 @@ TEST(VersionManagerWaitTest, UncontendedPathsDoNotInvokeBackoff) {
   InitManager(manager);
   ResetRuntimeWaitCalls();
 
-  const auto read_ts = manager.acquire_read_timestamp();
-  EXPECT_EQ(read_ts, 1U);
+  manager.acquire_read_admission();
+  EXPECT_EQ(manager.load_published_read_view().visibility_ts, 1U);
   manager.release_read_timestamp();
 
   const auto insert_ts = manager.acquire_insert_timestamp();
   manager.release_insert_timestamp(insert_ts);
 
-  const auto update_ts = manager.acquire_update_timestamp();
-  manager.begin_update_commit(update_ts);
-  manager.drain_readers();
-  manager.release_update_timestamp(update_ts);
+  const auto update_ts = manager.acquire_write_timestamp(WriteIntent::kUpdate);
+  manager.begin_write_commit(update_ts, WriteCompletion::kInPlace);
+  manager.complete_write(update_ts, WriteCompletion::kNoSnapshot);
 
-  const auto compact_ts = manager.acquire_compact_timestamp();
-  manager.release_compact_timestamp(compact_ts);
+  const auto compact_ts =
+      manager.acquire_write_timestamp(WriteIntent::kCompact);
+  manager.complete_write(compact_ts, WriteCompletion::kNoSnapshot);
 
   EXPECT_EQ(g_runtime_wait_calls.load(std::memory_order_relaxed), 0U);
 }
@@ -136,22 +136,28 @@ TEST(VersionManagerWaitTest, AllContendedPathsUseBackoff) {
   InitManager(manager);
   {
     SCOPED_TRACE("read slow path");
-    const auto update_ts = manager.acquire_update_timestamp();
-    manager.begin_update_commit(update_ts);
+    const auto update_ts =
+        manager.acquire_write_timestamp(WriteIntent::kUpdate);
+    manager.begin_write_commit(update_ts, WriteCompletion::kSnapshot);
     ExpectRuntimeWaitWhile(
         [&]() {
-          manager.acquire_read_timestamp();
+          manager.acquire_read_admission();
           manager.release_read_timestamp();
         },
-        [&]() { manager.release_update_timestamp(update_ts); });
+        [&]() {
+          manager.complete_write(update_ts, WriteCompletion::kNoSnapshot);
+        });
   }
   {
     SCOPED_TRACE("insert slow path");
-    const auto update_ts = manager.acquire_update_timestamp();
+    const auto update_ts =
+        manager.acquire_write_timestamp(WriteIntent::kUpdate);
     uint32_t insert_ts = 0;
     ExpectRuntimeWaitWhile(
         [&]() { insert_ts = manager.acquire_insert_timestamp(); },
-        [&]() { manager.release_update_timestamp(update_ts); });
+        [&]() {
+          manager.complete_write(update_ts, WriteCompletion::kNoSnapshot);
+        });
     manager.release_insert_timestamp(insert_ts);
   }
   {
@@ -159,50 +165,68 @@ TEST(VersionManagerWaitTest, AllContendedPathsUseBackoff) {
     const auto insert_ts = manager.acquire_insert_timestamp();
     uint32_t update_ts = 0;
     ExpectRuntimeWaitWhile(
-        [&]() { update_ts = manager.acquire_update_timestamp(); },
+        [&]() {
+          update_ts = manager.acquire_write_timestamp(WriteIntent::kUpdate);
+        },
         [&]() { manager.release_insert_timestamp(insert_ts); });
     uint32_t next_update_ts = 0;
     ExpectRuntimeWaitWhile(
-        [&]() { next_update_ts = manager.acquire_update_timestamp(); },
-        [&]() { manager.release_update_timestamp(update_ts); });
-    manager.release_update_timestamp(next_update_ts);
+        [&]() {
+          next_update_ts =
+              manager.acquire_write_timestamp(WriteIntent::kUpdate);
+        },
+        [&]() {
+          manager.complete_write(update_ts, WriteCompletion::kNoSnapshot);
+        });
+    manager.complete_write(next_update_ts, WriteCompletion::kNoSnapshot);
   }
   {
-    SCOPED_TRACE("explicit reader drain");
-    manager.acquire_read_timestamp();
-    const auto update_ts = manager.acquire_update_timestamp();
-    manager.begin_update_commit(update_ts);
-    ExpectRuntimeWaitWhile([&]() { manager.drain_readers(); },
-                           [&]() { manager.release_read_timestamp(); });
-    manager.release_update_timestamp(update_ts);
-    EXPECT_ANY_THROW(manager.drain_readers());
+    SCOPED_TRACE("in-place reader drain");
+    manager.acquire_read_admission();
+    const auto update_ts =
+        manager.acquire_write_timestamp(WriteIntent::kUpdate);
+    ExpectRuntimeWaitWhile(
+        [&]() {
+          manager.begin_write_commit(update_ts, WriteCompletion::kInPlace);
+        },
+        [&]() { manager.release_read_timestamp(); });
+    manager.complete_write(update_ts, WriteCompletion::kNoSnapshot);
   }
   {
     SCOPED_TRACE("compact CAS");
-    const auto update_ts = manager.acquire_update_timestamp();
+    const auto update_ts =
+        manager.acquire_write_timestamp(WriteIntent::kUpdate);
     uint32_t compact_ts = 0;
     ExpectRuntimeWaitWhile(
-        [&]() { compact_ts = manager.acquire_compact_timestamp(); },
-        [&]() { manager.release_update_timestamp(update_ts); });
-    manager.release_compact_timestamp(compact_ts);
+        [&]() {
+          compact_ts = manager.acquire_write_timestamp(WriteIntent::kCompact);
+        },
+        [&]() {
+          manager.complete_write(update_ts, WriteCompletion::kNoSnapshot);
+        });
+    manager.complete_write(compact_ts, WriteCompletion::kNoSnapshot);
   }
   {
     SCOPED_TRACE("compact inserter drain");
     const auto insert_ts = manager.acquire_insert_timestamp();
     uint32_t compact_ts = 0;
     ExpectRuntimeWaitWhile(
-        [&]() { compact_ts = manager.acquire_compact_timestamp(); },
+        [&]() {
+          compact_ts = manager.acquire_write_timestamp(WriteIntent::kCompact);
+        },
         [&]() { manager.release_insert_timestamp(insert_ts); });
-    manager.release_compact_timestamp(compact_ts);
+    manager.complete_write(compact_ts, WriteCompletion::kNoSnapshot);
   }
   {
     SCOPED_TRACE("compact reader drain");
-    manager.acquire_read_timestamp();
+    manager.acquire_read_admission();
     uint32_t compact_ts = 0;
     ExpectRuntimeWaitWhile(
-        [&]() { compact_ts = manager.acquire_compact_timestamp(); },
+        [&]() {
+          compact_ts = manager.acquire_write_timestamp(WriteIntent::kCompact);
+        },
         [&]() { manager.release_read_timestamp(); });
-    manager.release_compact_timestamp(compact_ts);
+    manager.complete_write(compact_ts, WriteCompletion::kNoSnapshot);
   }
 }
 
@@ -229,7 +253,7 @@ TEST(VersionManagerAdmissionTest,
 
   auto reader = [&]() {
     while (!stop.load(std::memory_order_acquire)) {
-      manager.acquire_read_timestamp();
+      manager.acquire_read_admission();
       observed_readers.fetch_add(1, std::memory_order_seq_cst);
       if (compact_active.load(std::memory_order_seq_cst)) {
         violations.fetch_add(1, std::memory_order_relaxed);
@@ -261,7 +285,7 @@ TEST(VersionManagerAdmissionTest,
   std::thread reader_thread(reader);
   std::thread inserter_thread(inserter);
   for (int i = 0; i < 1000; ++i) {
-    const auto ts = manager.acquire_compact_timestamp();
+    const auto ts = manager.acquire_write_timestamp(WriteIntent::kCompact);
     compact_active.store(true, std::memory_order_seq_cst);
     if (observed_readers.load(std::memory_order_seq_cst) != 0 ||
         observed_inserters.load(std::memory_order_seq_cst) != 0) {
@@ -269,7 +293,7 @@ TEST(VersionManagerAdmissionTest,
     }
     std::this_thread::yield();
     compact_active.store(false, std::memory_order_seq_cst);
-    manager.release_compact_timestamp(ts);
+    manager.complete_write(ts, WriteCompletion::kNoSnapshot);
   }
   stop.store(true, std::memory_order_release);
   reader_thread.join();
@@ -322,7 +346,7 @@ TEST(VersionManagerWaitTest, RuntimeWaitSwitchRequiresQuiescence) {
   EXPECT_FALSE(manager.try_set_runtime_wait_if_quiescent(nullptr));
   EXPECT_TRUE(manager.try_set_runtime_wait_if_quiescent(&CountingRuntimeWait));
 
-  manager.acquire_read_timestamp();
+  manager.acquire_read_admission();
   EXPECT_FALSE(manager.try_set_runtime_wait_if_quiescent(&NativeRuntimeWait));
   manager.release_read_timestamp();
 
@@ -330,13 +354,14 @@ TEST(VersionManagerWaitTest, RuntimeWaitSwitchRequiresQuiescence) {
   EXPECT_FALSE(manager.try_set_runtime_wait_if_quiescent(&NativeRuntimeWait));
   manager.release_insert_timestamp(insert_ts);
 
-  const auto update_ts = manager.acquire_update_timestamp();
+  const auto update_ts = manager.acquire_write_timestamp(WriteIntent::kUpdate);
   EXPECT_FALSE(manager.try_set_runtime_wait_if_quiescent(&NativeRuntimeWait));
-  manager.release_update_timestamp(update_ts);
+  manager.complete_write(update_ts, WriteCompletion::kNoSnapshot);
 
-  const auto compact_ts = manager.acquire_compact_timestamp();
+  const auto compact_ts =
+      manager.acquire_write_timestamp(WriteIntent::kCompact);
   EXPECT_FALSE(manager.try_set_runtime_wait_if_quiescent(&NativeRuntimeWait));
-  manager.release_compact_timestamp(compact_ts);
+  manager.complete_write(compact_ts, WriteCompletion::kNoSnapshot);
 
   VersionManagerTestPeer::lock_advancement(manager);
   EXPECT_FALSE(manager.try_set_runtime_wait_if_quiescent(&NativeRuntimeWait));
@@ -352,18 +377,18 @@ TEST(NativeRuntimeWaitTest, SleepPhaseCompletesContendedWait) {
   manager.init_ts(1, 4);
   ASSERT_TRUE(
       manager.try_set_runtime_wait_if_quiescent(&CountingNativeRuntimeWait));
-  const auto update_ts = manager.acquire_update_timestamp();
-  manager.begin_update_commit(update_ts);
+  const auto update_ts = manager.acquire_write_timestamp(WriteIntent::kUpdate);
+  manager.begin_write_commit(update_ts, WriteCompletion::kSnapshot);
 
   std::atomic<bool> completed{false};
   std::thread waiter([&]() {
-    manager.acquire_read_timestamp();
+    manager.acquire_read_admission();
     manager.release_read_timestamp();
     completed.store(true, std::memory_order_release);
   });
 
   const bool sleep_phase_observed = WaitForSleep();
-  manager.release_update_timestamp(update_ts);
+  manager.complete_write(update_ts, WriteCompletion::kNoSnapshot);
   waiter.join();
 
   EXPECT_TRUE(sleep_phase_observed);
@@ -385,7 +410,7 @@ struct ReaderState {
 void* WaitForReadTimestamp(void* arg) {
   auto& state = *static_cast<ReaderState*>(arg);
   state.started->fetch_add(1, std::memory_order_relaxed);
-  state.manager->acquire_read_timestamp();
+  state.manager->acquire_read_admission();
   state.manager->release_read_timestamp();
   return nullptr;
 }
@@ -402,8 +427,8 @@ TEST(BthreadRuntimeWaitTest, SleepPhaseLeavesWorkerAvailableForNewBthread) {
   manager.init_ts(1, 4);
   ASSERT_TRUE(
       manager.try_set_runtime_wait_if_quiescent(&CountingBthreadRuntimeWait));
-  const auto update_ts = manager.acquire_update_timestamp();
-  manager.begin_update_commit(update_ts);
+  const auto update_ts = manager.acquire_write_timestamp(WriteIntent::kUpdate);
+  manager.begin_write_commit(update_ts, WriteCompletion::kSnapshot);
 
   const int worker_count = std::max(2, bthread_getconcurrency());
   const int waiter_count = worker_count * 2;
@@ -419,7 +444,7 @@ TEST(BthreadRuntimeWaitTest, SleepPhaseLeavesWorkerAvailableForNewBthread) {
     }
   }
   if (started_waiters != waiter_count) {
-    manager.release_update_timestamp(update_ts);
+    manager.complete_write(update_ts, WriteCompletion::kNoSnapshot);
     for (int i = 0; i < started_waiters; ++i) {
       EXPECT_EQ(bthread_join(waiters[i], nullptr), 0);
     }
@@ -443,7 +468,7 @@ TEST(BthreadRuntimeWaitTest, SleepPhaseLeavesWorkerAvailableForNewBthread) {
         return probe_scheduled.load(std::memory_order_acquire);
       });
 
-  manager.release_update_timestamp(update_ts);
+  manager.complete_write(update_ts, WriteCompletion::kNoSnapshot);
   if (probe_start_result == 0) {
     EXPECT_EQ(bthread_join(probe, nullptr), 0);
   }

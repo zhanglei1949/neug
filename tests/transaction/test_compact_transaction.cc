@@ -313,7 +313,7 @@ static void AssertCompactBlocksAcquire(
   std::atomic<bool> worker_acquired{false};
 
   // Main thread: acquire compact timestamp (exclusive lock)
-  uint32_t compact_ts = vm.acquire_compact_timestamp();
+  uint32_t compact_ts = vm.acquire_write_timestamp(neug::WriteIntent::kCompact);
 
   // Worker thread: try to acquire another timestamp
   std::thread worker([&]() {
@@ -333,7 +333,7 @@ static void AssertCompactBlocksAcquire(
       << "Worker should be blocked while compact timestamp is held";
 
   // Release compact timestamp — worker should proceed
-  vm.release_compact_timestamp(compact_ts);
+  vm.complete_write(compact_ts, neug::WriteCompletion::kNoSnapshot);
 
   worker.join();
   EXPECT_TRUE(worker_acquired.load())
@@ -345,7 +345,7 @@ TEST_F(CompactTransactionTest, CompactBlocksRead) {
   vm.init_ts(0, 1);
 
   AssertCompactBlocksAcquire(
-      vm, [](neug::VersionManager& v) { v.acquire_read_timestamp(); },
+      vm, [](neug::VersionManager& v) { v.acquire_read_admission(); },
       [](neug::VersionManager& v, uint32_t) { v.release_read_timestamp(); });
 }
 
@@ -363,9 +363,12 @@ TEST_F(CompactTransactionTest, CompactBlocksUpdate) {
   neug::VersionManager vm;
   vm.init_ts(0, 1);
   AssertCompactBlocksAcquire(
-      vm, [](neug::VersionManager& v) { v.acquire_update_timestamp(); },
+      vm,
+      [](neug::VersionManager& v) {
+        v.acquire_write_timestamp(neug::WriteIntent::kUpdate);
+      },
       [](neug::VersionManager& v, uint32_t ts) {
-        v.release_update_timestamp(ts);
+        v.complete_write(ts, neug::WriteCompletion::kNoSnapshot);
       });
 }
 
@@ -373,8 +376,11 @@ TEST_F(CompactTransactionTest, CompactBlocksCompact) {
   neug::VersionManager vm;
   vm.init_ts(0, 1);
   AssertCompactBlocksAcquire(
-      vm, [](neug::VersionManager& v) { v.acquire_compact_timestamp(); },
+      vm,
+      [](neug::VersionManager& v) {
+        v.acquire_write_timestamp(neug::WriteIntent::kCompact);
+      },
       [](neug::VersionManager& v, uint32_t ts) {
-        v.release_compact_timestamp(ts);
+        v.complete_write(ts, neug::WriteCompletion::kNoSnapshot);
       });
 }

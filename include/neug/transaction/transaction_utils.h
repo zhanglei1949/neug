@@ -23,6 +23,17 @@
 
 namespace neug {
 
+class GraphSnapshotStore;
+class IVersionManager;
+
+/// Complete an exclusive in-place mutation in protocol order: advance the
+/// current slot generation, publish the matching read view, then reopen the
+/// operation gate. Keeping this transaction-level declaration here prevents
+/// GraphSnapshotStore from exposing its raw generation setter.
+void CompleteInPlaceCommit(IVersionManager& version_manager,
+                           GraphSnapshotStore& snapshot_store,
+                           uint32_t timestamp, uint32_t view_generation);
+
 enum class OpType : uint8_t {
   kCreateVertexType = 0,
   kCreateEdgeType = 1,

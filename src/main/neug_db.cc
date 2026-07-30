@@ -319,6 +319,14 @@ void NeugDB::PrepareForServing() {
   initQueryRuntime();
 }
 
+std::string NeugDB::QuiescentWalDirectoryForServiceInit() const {
+  return snapshot_store_->CurrentSnapshot().checkpoint().wal_dir();
+}
+
+GraphSnapshotStore& NeugDB::snapshotStoreForServiceInit() {
+  return *snapshot_store_;
+}
+
 void NeugDB::preprocessConfig() {
   if (config_.max_thread_num < 0) {
     THROW_INVALID_ARGUMENT_EXCEPTION(
@@ -420,9 +428,13 @@ void NeugDB::openGraphAndIngestWals() {
     auto wal_parser = WalParserFactory::CreateWalParser(ckp->wal_dir());
     ingestWals(*wal_parser, *graph);
 
-    // Create GraphSnapshotStore with the graph at timestamp 0
-    snapshot_store_ =
-        std::make_unique<GraphSnapshotStore>(config_.storage_slot_num, graph);
+    // Create GraphSnapshotStore with the recovered graph. The recovery
+    // frontier doubles as the initial view generation so slot 0's generation
+    // matches the VersionManager's initial published read view (both derive
+    // from last_ts_).
+    snapshot_store_ = std::make_unique<GraphSnapshotStore>(
+        config_.storage_slot_num, graph, last_ts_ /* initial_view_generation */,
+        0 /* initial_schema_generation */);
 
   } catch (const neug::exception::NoCheckpointException&) {
     throw;
@@ -516,7 +528,7 @@ void NeugDB::clearQueryRuntime() noexcept {
 std::shared_ptr<Checkpoint> NeugDB::consumeLiveGraphAndCommitCheckpoint(
     CheckpointSession& checkpoint_session) {
   SnapshotGuard guard(*snapshot_store_);
-  auto* live_graph = guard.get().mutable_graph();
+  auto* live_graph = guard.mutable_graph();
   // Compact rewrites only already-dirty tables (does not mark); dump then
   // publishes. ClearAllDirty runs only after a successful Commit.
   live_graph->Compact();
@@ -533,7 +545,7 @@ bool NeugDB::createCheckpointAndRefreshLiveGraph() {
   std::lock_guard<std::mutex> lock(mutex_);
   {
     SnapshotGuard guard(*snapshot_store_);
-    auto* live_graph = guard.get().mutable_graph();
+    auto* live_graph = guard.mutable_graph();
     if (!live_graph->IsModified()) {
       return false;
     }
@@ -564,8 +576,17 @@ bool NeugDB::createCheckpointAndRefreshLiveGraph() {
   try {
     auto reopened_graph = std::make_shared<PropertyGraph>();
     reopened_graph->Open(published_checkpoint, config_.memory_level);
+    // Preserve the schema generation across the store swap: the reopened
+    // graph carries the same committed schema, and the generation keys the
+    // query cache, so it must never regress (read-view publication
+    // protocol, Phase 5). The view generation resets to 0 together with
+    // the transaction timeline (last_ts_ = 0 below; initVersionManager
+    // then publishes {0, 0}).
+    const uint32_t committed_schema_generation =
+        snapshot_store_->current_schema_generation();
     snapshot_store_ = std::make_unique<GraphSnapshotStore>(
-        config_.storage_slot_num, std::move(reopened_graph));
+        config_.storage_slot_num, std::move(reopened_graph),
+        0 /* initial_view_generation */, committed_schema_generation);
     initAllocators(published_checkpoint->allocator_dir());
   } catch (...) {
     snapshot_store_.reset();
@@ -588,7 +609,7 @@ void NeugDB::createCheckpointOnClose() {
   std::lock_guard<std::mutex> lock(mutex_);
   {
     SnapshotGuard guard(*snapshot_store_);
-    auto* live_graph = guard.get().mutable_graph();
+    auto* live_graph = guard.mutable_graph();
     if (!live_graph->IsModified()) {
       return;
     }

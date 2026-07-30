@@ -21,6 +21,7 @@
 
 #include "neug/storages/graph/property_graph.h"
 #include "neug/storages/graph_snapshot_store.h"
+#include "neug/transaction/transaction_utils.h"
 #include "neug/transaction/version_manager.h"
 #include "neug/transaction/wal/wal.h"
 
@@ -29,7 +30,11 @@ namespace neug {
 CompactTransaction::CompactTransaction(GraphSnapshotStore& snapshot_store,
                                        IWalWriter& logger, IVersionManager& vm,
                                        timestamp_t timestamp)
-    : guard_(snapshot_store), logger_(logger), vm_(vm), timestamp_(timestamp) {
+    : snapshot_store_(snapshot_store),
+      guard_(snapshot_store),
+      logger_(logger),
+      vm_(vm),
+      timestamp_(timestamp) {
   arc_.Resize(sizeof(WalHeader));
 }
 
@@ -55,14 +60,13 @@ bool CompactTransaction::Commit() {
     {
       // In-place compact. Keep borrowed snapshot references scoped before the
       // timestamp lease is released.
-      auto& slot = guard_.get();
-      slot.mutable_graph()->Compact();
-      slot.mutable_view().Rebuild(*slot.mutable_graph());
+      guard_.mutable_graph()->Compact();
+      guard_.mutable_view().Rebuild(*guard_.mutable_graph());
     }
     LOG(INFO) << "after compact - " << timestamp_;
 
     guard_.release();
-    vm_.release_compact_timestamp(timestamp_);
+    CompleteInPlaceCommit(vm_, snapshot_store_, timestamp_, timestamp_);
     timestamp_ = INVALID_TIMESTAMP;
   }
   guard_.release();
@@ -73,7 +77,7 @@ void CompactTransaction::Abort() {
   if (timestamp_ != INVALID_TIMESTAMP) {
     arc_.Clear();
     guard_.release();
-    vm_.revert_compact_timestamp(timestamp_);
+    vm_.complete_write(timestamp_, WriteCompletion::kNoSnapshot);
     timestamp_ = INVALID_TIMESTAMP;
   }
   guard_.release();

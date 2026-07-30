@@ -60,9 +60,9 @@ class Schema;
  * is a correctness bug, not a performance optimization.
  *
  * **Concurrency contract** (VersionManager state machine):
- * - Insert requires admission_state_==kOpen; multiple concurrent inserts are
- *   allowed (active_inserters_ counter). Update/compact transitions the state
- *   away from kOpen, blocking new inserts.
+ * - Insert requires the packed operation gate's kNormal phase; multiple
+ *   concurrent inserts are tracked in that same atomic word. Update/compact
+ *   transitions the phase away from kNormal, blocking new inserts.
  * - Insert does NOT block readers, and readers do NOT block insert.
  * - The pinned slot's PropertyGraph is shared with all readers on that slot.
  *
@@ -80,8 +80,7 @@ class InsertTransaction {
   /**
    * @brief Construct an InsertTransaction with a pinned SnapshotSlot.
    *
-   * @param slot Reference to the pinned SnapshotSlot from PinCurrentSnapshot()
-   * @param snapshot_store Reference to GraphSnapshotStore for releasing slot
+   * @param guard Pinned snapshot guard owning the slot lifetime
    * @param alloc Reference to memory allocator
    * @param logger Reference to WAL writer
    * @param vm Reference to version manager
@@ -196,9 +195,12 @@ class InsertTransaction {
 
   const Schema& schema() const;
 
-  GraphStats statistic() const {
-    return GraphStats(*guard_.get().mutable_graph());
-  }
+  GraphStats statistic() const { return GraphStats(*guard_.graph()); }
+
+  /// Schema generation of the pinned snapshot (query-cache key component,
+  /// read-view publication protocol Phase 5). Stable while pinned; insert
+  /// transactions never change the schema.
+  uint32_t schema_generation() const { return guard_.schema_generation(); }
 
   bool GetVertexIndex(label_t label, const Value& oid, vid_t& lid) const;
 

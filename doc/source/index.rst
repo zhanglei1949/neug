@@ -73,6 +73,8 @@ NeuG documentation
    :caption: Transaction
 
    transaction/transaction.md
+   transaction/read_view_publication_protocol.md
+   ap-tp-divergence.md
 
 .. toctree::
    :maxdepth: 1

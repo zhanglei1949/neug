@@ -302,16 +302,48 @@ class NeugDB {
    */
   void PrepareForServing();
 
-  inline const PropertyGraph& graph() const {
+  /// Returns the WAL directory while the caller is establishing a service.
+  /// This is intentionally a value, not a live graph reference, so service
+  /// initialization has no reason to retain the raw snapshot-store API.
+  std::string QuiescentWalDirectoryForServiceInit() const;
+
+  /// Quiescent-only / update-lease-only access to the live graph.
+  ///
+  /// Concurrent service requests must NOT use these naked references:
+  /// they bypass the generation-validated ReadSnapshotLease and can pair
+  /// with a stale visibility timestamp (read-view publication protocol,
+  /// "API Boundaries"). Legitimate uses are restricted to:
+  /// - an update/exclusive lease (e.g. UpdateTransaction COW cloning);
+  /// - database initialization, recovery, or checkpoint paths under the
+  ///   database mutex; or
+  /// - documented quiescent-only callers (e.g. service init).
+  [[deprecated(
+      "Raw graph access is quiescent/update-only; concurrent reads "
+      "must use ExecutionSlot/ReadSnapshotLease")]] inline const PropertyGraph&
+  graph() const {
     return snapshot_store_->CurrentSnapshot();
   }
 
-  inline const Schema& schema() const {
+  /// @see graph() — same access restrictions apply.
+  [[deprecated(
+      "Raw schema access is quiescent/update-only; concurrent reads "
+      "must use ExecutionSlot::GetSchema or "
+      "ReadTransaction")]] inline const Schema&
+  schema() const {
     return snapshot_store_->CurrentSnapshot().schema();
   }
 
-  inline GraphSnapshotStore& graph_snapshot_store() { return *snapshot_store_; }
-  inline const GraphSnapshotStore& graph_snapshot_store() const {
+  [[deprecated(
+      "Raw snapshot-store access is internal/quiescent-only; use a "
+      "transaction lease for concurrent reads")]] inline GraphSnapshotStore&
+  graph_snapshot_store() {
+    return *snapshot_store_;
+  }
+  [
+      [deprecated("Raw snapshot-store access is internal/quiescent-only; use a "
+                  "transaction lease for concurrent "
+                  "reads")]] inline const GraphSnapshotStore&
+  graph_snapshot_store() const {
     return *snapshot_store_;
   }
 
@@ -336,6 +368,7 @@ class NeugDB {
   void initQueryRuntime();
   void clearQueryRuntime() noexcept;
   void closeAllConnections();
+  GraphSnapshotStore& snapshotStoreForServiceInit();
   std::unique_ptr<ExecutionSlot> createExecutionSlot(size_t slot_id);
   void initVersionManager();
   void cleanupTemporaryWorkspace() noexcept;
@@ -424,7 +457,6 @@ class NeugDB {
   // One transaction timeline per open database. ExecutionSlot objects borrow
   // this manager; it is not recreated when a service is recreated.
   std::unique_ptr<IVersionManager> version_manager_;
-
   std::shared_ptr<IGraphPlanner> planner_;
   std::unique_ptr<ConnectionManager> connection_manager_;
   std::shared_ptr<execution::GlobalQueryCache> global_query_cache_;

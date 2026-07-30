@@ -198,12 +198,13 @@ void InitializeBrpcServiceProtocols() {
 
 neug::result<std::string> UnifiedServiceImpl::GetSchemaImpl(
     brpc::Controller* cntl) {
-  const auto& schema = neug_db_.schema();
-  auto yaml = schema.to_yaml();
-  if (!yaml) {
-    RETURN_ERROR(yaml.error());
-  }
-  return neug::get_json_string_from_yaml(yaml.value());
+  // Route the schema endpoint through a generation-validated read lease
+  // (ExecutionSlot::GetSchema acquires a ReadSnapshotLease) instead of a
+  // naked NeugDB::schema() reference
+  // — see "API Boundaries" in doc/source/transaction/
+  // read_view_publication_protocol.md.
+  auto slot_lease = execution_slot_pool_.AcquireExecutionSlot();
+  return slot_lease->GetSchema();
 }
 
 neug::result<std::string> UnifiedServiceImpl::GetServiceStatusImpl(

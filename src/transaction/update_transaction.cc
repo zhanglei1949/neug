@@ -333,7 +333,8 @@ UpdateTransaction::UpdateTransaction(std::shared_ptr<PropertyGraph> cow_graph,
       snapshot_store_(snapshot_store),
       pipeline_cache_(cache),
       timestamp_(timestamp),
-      ckp_(cow_graph_->checkpoint_ptr()) {}
+      ckp_(cow_graph_->checkpoint_ptr()),
+      schema_generation_(snapshot_store.current_schema_generation()) {}
 
 UpdateTransaction::~UpdateTransaction() { Abort(); }
 
@@ -348,8 +349,21 @@ bool UpdateTransaction::Commit() {
     return true;
   }
 
-  if (!snapshot_store_.HasFreeSlot()) {
-    LOG(ERROR) << "GraphSnapshotStore slot exhausted; refusing to commit";
+  // Reserve capacity and construct GraphView before durability. After WAL
+  // append, only InstallPreparedSnapshot() (noexcept state transitions) may
+  // remain; a normal pool/allocation failure is therefore retryable and never
+  // leaves durable WAL without a live publication.
+  const uint32_t committed_schema_generation =
+      wal_builder_.schema_changed()
+          ? snapshot_store_.NextCurrentSchemaGeneration()
+          : snapshot_store_.current_schema_generation();
+  GraphSnapshotStore::PreparedSnapshot prepared_snapshot;
+  auto prepare_status = snapshot_store_.PrepareSnapshot(
+      cow_graph_, timestamp_ /* view_generation */, committed_schema_generation,
+      prepared_snapshot);
+  if (!prepare_status.ok()) {
+    LOG(ERROR) << "Failed to prepare graph snapshot: "
+               << prepare_status.ToString();
     Abort();
     return false;
   }
@@ -361,27 +375,36 @@ bool UpdateTransaction::Commit() {
     return false;
   }
 
-  vm_.begin_update_commit(timestamp_);
+  vm_.begin_write_commit(timestamp_, WriteCompletion::kSnapshot);
 
   if (wal_builder_.schema_changed()) {
     pipeline_cache_.clearGlobalCache();
   }
 
-  // PublishSnapshot MUST happen BEFORE release() which calls
-  // release_update_timestamp (advancing read_ts_). This ordering guarantees
-  // that any new reader observing the advanced read_ts will also see the new
-  // slot.
-  auto status = snapshot_store_.PublishSnapshot(cow_graph_);
-  if (!status.ok()) {
-    // We should never fail to publish the snapshot.
-    LOG(FATAL) << "Failed to publish snapshot: " << status.ToString();
-  }
+  // InstallPreparedSnapshot MUST happen BEFORE complete_write() which
+  // advances/publishes the visible read frontier. This ordering guarantees
+  // that any new reader observing the advanced frontier will also see the
+  // new slot. The update timestamp doubles as the new view generation (same
+  // overflow domain). The schema generation advances by one iff this
+  // transaction's WAL changed the schema; otherwise the new slot carries
+  // the current committed generation unchanged (the query-cache key
+  // component). The slot was fully prepared before WAL. Installation is
+  // bounded and noexcept; a post-WAL failure is therefore an invariant
+  // violation rather than a normal error path.
+  snapshot_store_.InstallPreparedSnapshot(std::move(prepared_snapshot));
 
   // The COW PG is now owned by the new slot. Drop our reference so this
   // transaction does not appear to still hold the snapshot. view_ wraps
   // cow_graph_, so reset it too to keep pg_ from dangling.
   view_ = GraphView();
-  release();
+
+  // Snapshot-commit completion: the new slot is already current, so publish
+  // the read frontier paired with THIS update's timestamp as the new view
+  // generation (visibility linearization point), then reopen admission.
+  wal_builder_.clear();
+  vm_.complete_write(timestamp_, WriteCompletion::kSnapshot, timestamp_);
+  timestamp_ = INVALID_TIMESTAMP;
+  cow_graph_.reset();
   return true;
 }
 
@@ -390,7 +413,9 @@ void UpdateTransaction::Abort() { release(); }
 void UpdateTransaction::release() {
   if (timestamp_ != INVALID_TIMESTAMP) {
     wal_builder_.clear();
-    vm_.release_update_timestamp(timestamp_);
+    // Abort / no-op commit: resolve the timestamp gap without publishing a
+    // new graph view (the view generation is left unchanged).
+    vm_.complete_write(timestamp_, WriteCompletion::kNoSnapshot);
     timestamp_ = INVALID_TIMESTAMP;
   }
   cow_graph_.reset();
