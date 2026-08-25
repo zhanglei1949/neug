@@ -187,6 +187,37 @@ void analyzeQueryPrefix(std::string_view query, QueryAnalysis& analysis) {
     analysis.admin = AdminRequest{AdminType::kCheckpoint, std::nullopt};
     return;
   }
+  analysis.copy = isKeyword(statement, "COPY");
+  if (analysis.explain_mode != ExplainMode::kNone) {
+    return;
+  }
+  if (isKeyword(statement, "BEGIN")) {
+    const auto transaction_keyword = nextKeyword(query, offset);
+    if (!isKeyword(transaction_keyword, "TRANSACTION")) {
+      return;
+    }
+    const auto modifier = nextKeyword(query, offset);
+    if (modifier.empty() && isStatementEnd(query, offset)) {
+      analysis.transaction_action = transaction::TransactionAction::BEGIN_WRITE;
+    } else if (isKeyword(modifier, "READ")) {
+      const auto only = nextKeyword(query, offset);
+      if (isKeyword(only, "ONLY") && isStatementEnd(query, offset)) {
+        analysis.transaction_action =
+            transaction::TransactionAction::BEGIN_READ;
+      }
+    }
+    return;
+  }
+  if (isStatementEnd(query, offset)) {
+    if (isKeyword(statement, "COMMIT")) {
+      analysis.transaction_action = transaction::TransactionAction::COMMIT;
+    } else if (isKeyword(statement, "ROLLBACK")) {
+      analysis.transaction_action = transaction::TransactionAction::ROLLBACK;
+    }
+    if (analysis.transaction()) {
+      return;
+    }
+  }
 
   extension::ExtensionAction action;
   AdminType type;
@@ -233,7 +264,7 @@ void analyzeQueryPrefix(std::string_view query, QueryAnalysis& analysis) {
 QueryAnalysis GOptPlanner::analyzeQuery(const std::string& query) const {
   QueryAnalysis analysis;
   analyzeQueryPrefix(query, analysis);
-  if (analysis.isAdmin()) {
+  if (analysis.isAdmin() || analysis.transaction()) {
     analysis.access_mode = AccessMode::kUpdate;
     return analysis;
   }
