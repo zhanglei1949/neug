@@ -109,8 +109,30 @@ bool isTokenEnd(char ch) {
 }
 
 void skipQueryWhitespace(std::string_view query, size_t& offset) {
-  while (offset < query.size() && common::StringUtils::isSpace(query[offset])) {
-    ++offset;
+  while (offset < query.size()) {
+    while (offset < query.size() &&
+           common::StringUtils::isSpace(query[offset])) {
+      ++offset;
+    }
+    if (offset + 1 >= query.size() || query[offset] != '/') {
+      return;
+    }
+    if (query[offset + 1] == '/') {
+      offset += 2;
+      while (offset < query.size() && query[offset] != '\n' &&
+             query[offset] != '\r') {
+        ++offset;
+      }
+      continue;
+    }
+    if (query[offset + 1] != '*') {
+      return;
+    }
+    const auto comment_end = query.find("*/", offset + 2);
+    if (comment_end == std::string_view::npos) {
+      return;
+    }
+    offset = comment_end + 2;
   }
 }
 
@@ -187,7 +209,7 @@ void analyzeQueryPrefix(std::string_view query, QueryAnalysis& analysis) {
     analysis.admin = AdminRequest{AdminType::kCheckpoint, std::nullopt};
     return;
   }
-  analysis.copy = isKeyword(statement, "COPY");
+  analysis.is_copy_statement = isKeyword(statement, "COPY");
   if (analysis.explain_mode != ExplainMode::kNone) {
     return;
   }
@@ -198,23 +220,22 @@ void analyzeQueryPrefix(std::string_view query, QueryAnalysis& analysis) {
     }
     const auto modifier = nextKeyword(query, offset);
     if (modifier.empty() && isStatementEnd(query, offset)) {
-      analysis.transaction_action = transaction::TransactionAction::BEGIN_WRITE;
+      analysis.kind = QueryKind::kTransactionControl;
     } else if (isKeyword(modifier, "READ")) {
       const auto only = nextKeyword(query, offset);
       if (isKeyword(only, "ONLY") && isStatementEnd(query, offset)) {
-        analysis.transaction_action =
-            transaction::TransactionAction::BEGIN_READ;
+        analysis.kind = QueryKind::kTransactionControl;
       }
     }
     return;
   }
   if (isStatementEnd(query, offset)) {
     if (isKeyword(statement, "COMMIT")) {
-      analysis.transaction_action = transaction::TransactionAction::COMMIT;
+      analysis.kind = QueryKind::kTransactionControl;
     } else if (isKeyword(statement, "ROLLBACK")) {
-      analysis.transaction_action = transaction::TransactionAction::ROLLBACK;
+      analysis.kind = QueryKind::kTransactionControl;
     }
-    if (analysis.transaction()) {
+    if (analysis.isTransactionControl()) {
       return;
     }
   }
@@ -264,7 +285,7 @@ void analyzeQueryPrefix(std::string_view query, QueryAnalysis& analysis) {
 QueryAnalysis GOptPlanner::analyzeQuery(const std::string& query) const {
   QueryAnalysis analysis;
   analyzeQueryPrefix(query, analysis);
-  if (analysis.isAdmin() || analysis.transaction()) {
+  if (analysis.isAdmin() || analysis.isTransactionControl()) {
     analysis.access_mode = AccessMode::kUpdate;
     return analysis;
   }

@@ -398,34 +398,35 @@ result<QueryResult> ExecutionSlot::ExecuteQueryInTransaction(
     const rapidjson::Value& parameters, int32_t num_threads,
     TransactionContext& transaction_context) {
   CHECK(transaction_context.IsActive());
-  const auto analysis = planner_->analyzeQuery(query_string);
-  if (analysis.transaction()) {
-    RETURN_ERROR(Status(StatusCode::ERR_NOT_SUPPORTED,
-                        "Transaction control statements are not supported by "
-                        "Connection::Query(); "
-                        "use BeginTransaction(), Commit(), or Rollback()."));
-  }
-  if (analysis.copy) {
-    transaction_context.AbortAndMarkRollbackOnly();
-    RETURN_ERROR(Status(StatusCode::ERR_NOT_SUPPORTED,
-                        "COPY is not supported in an explicit transaction."));
-  }
-
-  const auto requested_mode =
-      access_mode.empty() ? AccessMode::kUnKnown : ParseAccessMode(access_mode);
-  neug::QueryResponse response;
   try {
+    const auto analysis = planner_->analyzeQuery(query_string);
+    if (analysis.isTransactionControl()) {
+      RETURN_ERROR(Status(StatusCode::ERR_NOT_SUPPORTED,
+                          "Transaction control statements are not supported by "
+                          "Connection::Query(); "
+                          "use BeginTransaction(), Commit(), or Rollback()."));
+    }
+    if (analysis.is_copy_statement) {
+      transaction_context.AbortAndMarkRollbackOnly();
+      RETURN_ERROR(Status(StatusCode::ERR_NOT_SUPPORTED,
+                          "COPY is not supported in an explicit transaction."));
+    }
+
+    const auto requested_mode = access_mode.empty()
+                                    ? AccessMode::kUnKnown
+                                    : ParseAccessMode(access_mode);
+    neug::QueryResponse response;
     auto status = executeCore(query_string, requested_mode, parameters,
                               num_threads, response, &transaction_context);
     if (!status.ok()) {
       transaction_context.AbortAndMarkRollbackOnly();
       RETURN_ERROR(status);
     }
+    return QueryResult(std::move(response));
   } catch (...) {
     transaction_context.AbortAndMarkRollbackOnly();
     throw;
   }
-  return QueryResult(std::move(response));
 }
 
 Status ExecutionSlot::executeCore(const std::string& query,
@@ -435,7 +436,7 @@ Status ExecutionSlot::executeCore(const std::string& query,
                                   TransactionContext* transaction_context) {
   const auto start = std::chrono::high_resolution_clock::now();
   const auto analysis = planner_->analyzeQuery(query);
-  if (NEUG_UNLIKELY(analysis.transaction())) {
+  if (NEUG_UNLIKELY(analysis.isTransactionControl())) {
     return Status(StatusCode::ERR_NOT_SUPPORTED,
                   "Transaction control statements are not supported by "
                   "Connection::Query(); "

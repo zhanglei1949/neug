@@ -262,7 +262,21 @@ TEST_F(ConnectionTest,
   EXPECT_EQ(rolled_back.value().response().row_count(), 0);
 
   ASSERT_TRUE(conn->BeginTransaction(TransactionMode::kReadWrite).ok());
-  for (const auto* statement : {"BEGIN TRANSACTION;", "COMMIT;", "ROLLBACK;"}) {
+  EXPECT_THROW(
+      {
+        static_cast<void>(
+            conn->Query("MATCH (n:person) RETURN count(n);", "invalid"));
+      },
+      neug::exception::InvalidArgumentException);
+  EXPECT_TRUE(conn->HasActiveTransaction());
+  EXPECT_EQ(conn->Commit().error_code(), StatusCode::ERR_TX_STATE_CONFLICT);
+  ASSERT_TRUE(conn->Rollback().ok());
+
+  ASSERT_TRUE(conn->BeginTransaction(TransactionMode::kReadWrite).ok());
+  for (const auto* statement :
+       {"BEGIN TRANSACTION;", "BEGIN TRANSACTION READ ONLY;", "COMMIT;",
+        "ROLLBACK;", "/* comment */ BEGIN TRANSACTION;",
+        "COMMIT; /* comment */", "// comment\nROLLBACK;"}) {
     auto control = conn->Query(statement);
     ASSERT_FALSE(control);
     EXPECT_EQ(control.error().error_code(), StatusCode::ERR_NOT_SUPPORTED);

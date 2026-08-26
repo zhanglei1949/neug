@@ -20,7 +20,6 @@
 #include <vector>
 
 #include "neug/compiler/extension/extension_action.h"
-#include "neug/compiler/transaction/transaction_action.h"
 #include "neug/generated/proto/plan/physical.pb.h"
 #include "neug/storages/graph/graph_stats.h"
 #include "neug/storages/graph/schema.h"
@@ -38,6 +37,7 @@ enum class ExplainMode {
 enum class QueryKind {
   kRegular,
   kAdmin,
+  kTransactionControl,
 };
 
 enum class AdminType : uint8_t {
@@ -63,8 +63,7 @@ struct QueryAnalysis {
   ExplainMode explain_mode = ExplainMode::kNone;
   QueryKind kind = QueryKind::kRegular;
   std::optional<AdminRequest> admin;
-  std::optional<transaction::TransactionAction> transaction_action;
-  bool copy{false};
+  bool is_copy_statement{false};
 
   bool isAdmin() const {
     return kind == QueryKind::kAdmin && admin.has_value();
@@ -72,7 +71,9 @@ struct QueryAnalysis {
   bool checkpoint() const {
     return isAdmin() && admin->type == AdminType::kCheckpoint;
   }
-  bool transaction() const { return transaction_action.has_value(); }
+  bool isTransactionControl() const {
+    return kind == QueryKind::kTransactionControl;
+  }
 };
 
 /**
