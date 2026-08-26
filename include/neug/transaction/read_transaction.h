@@ -86,6 +86,11 @@ class ReadTransaction {
    */
   ~ReadTransaction();
 
+  ReadTransaction(ReadTransaction&&) noexcept = default;
+  ReadTransaction& operator=(ReadTransaction&&) noexcept = default;
+  ReadTransaction(const ReadTransaction&) = delete;
+  ReadTransaction& operator=(const ReadTransaction&) = delete;
+
   timestamp_t timestamp() const;
 
   bool Commit();
