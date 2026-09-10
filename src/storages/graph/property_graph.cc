@@ -1212,12 +1212,11 @@ bool PropertyGraph::DumpDirtyAndReopen(std::shared_ptr<Checkpoint> ckp,
     }
 
     if (previous.HasModule(EdgeTable::KeyOutCsr(src, edge, dst))) {
-      LOG(WARNING)
-          << "Incremental checkpoint rewrites edge table '" << src << "-"
-          << edge << "->" << dst << "' that already exists in checkpoint "
-          << ckp_->id()
-          << "; repeated bulk writes to the same table pay a full-table "
-             "rewrite on every seal - consider batching COPY statements";
+      VLOG(1) << "Incremental checkpoint rewrites edge table '" << src << "-"
+              << edge << "->" << dst << "' that already exists in checkpoint "
+              << ckp_->id()
+              << "; repeated bulk writes to the same table pay a full-table "
+                 "rewrite on every seal - consider batching COPY statements";
     }
     dirty_edges.push_back(index);
     {

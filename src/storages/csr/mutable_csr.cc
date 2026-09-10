@@ -36,6 +36,7 @@
 #include "neug/storages/container/file_mmap_container.h"
 #include "neug/utils/exception/exception.h"
 #include "neug/utils/io/file/file_utils.h"
+#include "neug/utils/load_profiler.h"
 #include "neug/utils/property/types.h"
 #include "neug/utils/spinlock.h"
 
@@ -110,6 +111,10 @@ bool is_nbr_list_unmodified(MD5_CTX& ctx, FileHeader& header,
 template <typename EDATA_T>
 void MutableCsr<EDATA_T>::Dump(Checkpoint& ckp, CheckpointManifest& meta,
                                const std::string& key) {
+  // Per-CSR dump wall-clock. Split below into md5_check (Pass 1, reuse probe)
+  // and nbr_write (Pass 2, actual rewrite) so we can tell how much of the dump
+  // the checksum scan costs during bulk load.
+  profiling::ScopedLoadTimer total_timer("csr_dump.total");
   ModuleDescriptor descriptor;
   descriptor.module_type = ModuleTypeName();
   descriptor.set("unsorted_since", std::to_string(unsorted_since_));
@@ -119,8 +124,11 @@ void MutableCsr<EDATA_T>::Dump(Checkpoint& ckp, CheckpointManifest& meta,
 
   // Each internal buffer's path is stored as a named entry in the
   // descriptor's typed paths_ map.
-  descriptor.set_path(ModuleDescriptor::kDegreeListPath,
-                      ckp.Commit(*degree_list_));
+  {
+    profiling::ScopedLoadTimer t("csr_dump.degree_commit");
+    descriptor.set_path(ModuleDescriptor::kDegreeListPath,
+                        ckp.Commit(*degree_list_));
+  }
 
   const nbr_t* const* adj_lists =
       reinterpret_cast<const nbr_t* const*>(adj_list_buffer_->GetData());
@@ -128,12 +136,22 @@ void MutableCsr<EDATA_T>::Dump(Checkpoint& ckp, CheckpointManifest& meta,
 
   MD5_CTX ctx;
   FileHeader header{};
-  if (is_nbr_list_unmodified(ctx, header, nbr_list_.get(), adj_lists, cap_arr,
-                             vnum)) {
+  // Pass 1: MD5 full-scan over the whole adjacency buffer (by capacity) to
+  // decide whether the existing file can be reused. During bulk load the CSR
+  // is always modified, so this scan is wasted work that force_rewrite skips.
+  bool unmodified;
+  {
+    profiling::ScopedLoadTimer t("csr_dump.md5_check");
+    unmodified = is_nbr_list_unmodified(ctx, header, nbr_list_.get(), adj_lists,
+                                        cap_arr, vnum);
+  }
+  if (unmodified) {
     // If the neighbor list is unmodified, we can reuse the existing file.
     descriptor.set_path(ModuleDescriptor::kNbrListPath,
                         ckp.MaterializeObject(nbr_list_->GetPath()));
   } else {
+    // Pass 2: write the whole adjacency buffer to a fresh runtime file.
+    profiling::ScopedLoadTimer t("csr_dump.nbr_write");
     std::string nbr_path_committed;
 
     auto runtime_file = ckp.CreateRuntimeFile();
@@ -155,8 +173,11 @@ void MutableCsr<EDATA_T>::Dump(Checkpoint& ckp, CheckpointManifest& meta,
     descriptor.set_path(ModuleDescriptor::kNbrListPath, nbr_path_committed);
   }
 
-  descriptor.set_path(ModuleDescriptor::kCapacityListPath,
-                      ckp.Commit(*cap_list_));
+  {
+    profiling::ScopedLoadTimer t("csr_dump.cap_commit");
+    descriptor.set_path(ModuleDescriptor::kCapacityListPath,
+                        ckp.Commit(*cap_list_));
+  }
   meta.SetModule(key, descriptor);
 }
 
