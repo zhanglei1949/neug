@@ -45,6 +45,7 @@
 #include "neug/utils/id_indexer.h"
 #include "neug/utils/io/file/file_utils.h"
 #include "neug/utils/likely.h"
+#include "neug/utils/load_profiler.h"
 #include "neug/utils/property/array_column.h"
 #include "neug/utils/property/column.h"
 #include "neug/utils/property/table.h"
@@ -1215,16 +1216,23 @@ Status BulkCowGraphStorage::CreateEdgeTypeImpl(
 
 result<std::vector<vid_t>> BulkCowGraphStorage::BatchAddVerticesImpl(
     label_t v_label_id, std::shared_ptr<IDataChunkSupplier> supplier) {
-  RETURN_STATUS_ERROR_IF_NOT_OK(detachVertexTableForInsert(v_label_id));
+  {
+    profiling::ScopedLoadTimer t("cow.vertex.detach_table");
+    RETURN_STATUS_ERROR_IF_NOT_OK(detachVertexTableForInsert(v_label_id));
+  }
   const auto old_capacity = graph_.get_vertex_table(v_label_id).Capacity();
-  GS_AUTO(indexes, graph_.mutable_index_manager().GetAllIndexes());
-  for (auto* index : indexes) {
-    if (index->GetMeta().schema.label_id == v_label_id) {
-      RETURN_STATUS_ERROR_IF_NOT_OK(detachIndex(*index));
+  {
+    profiling::ScopedLoadTimer t("cow.vertex.detach_indexes");
+    GS_AUTO(indexes, graph_.mutable_index_manager().GetAllIndexes());
+    for (auto* index : indexes) {
+      if (index->GetMeta().schema.label_id == v_label_id) {
+        RETURN_STATUS_ERROR_IF_NOT_OK(detachIndex(*index));
+      }
     }
   }
   auto new_vids = graph_.BatchAddVertices(v_label_id, std::move(supplier));
   if (graph_.get_vertex_table(v_label_id).Capacity() > old_capacity) {
+    profiling::ScopedLoadTimer t("cow.vertex.sync_incident_edge_capacity");
     RETURN_STATUS_ERROR_IF_NOT_OK(
         detachIncidentEdgeTablesForResize(v_label_id));
     RETURN_STATUS_ERROR_IF_NOT_OK(graph_.SyncIncidentEdgeCapacity(v_label_id));
@@ -1232,7 +1240,11 @@ result<std::vector<vid_t>> BulkCowGraphStorage::BatchAddVerticesImpl(
   if (!new_vids || new_vids->empty()) {
     return new_vids;
   }
-  auto status = AddBatchVertexIndexData(graph_, v_label_id, new_vids.value());
+  auto status = Status::OK();
+  {
+    profiling::ScopedLoadTimer t("cow.vertex.update_indexes");
+    status = AddBatchVertexIndexData(graph_, v_label_id, new_vids.value());
+  }
   if (!status.ok()) {
     return tl::unexpected(std::move(status));
   }
@@ -1251,7 +1263,10 @@ Status BulkCowGraphStorage::BatchAddEdgesImpl(
     std::shared_ptr<IDataChunkSupplier> supplier) {
   const uint32_t edge_triplet_id =
       graph_.schema().generate_edge_label(src_label, dst_label, edge_label);
-  RETURN_IF_NOT_OK(detachEdgeTableForInsert(edge_triplet_id));
+  {
+    profiling::ScopedLoadTimer t("cow.edge.detach_table");
+    RETURN_IF_NOT_OK(detachEdgeTableForInsert(edge_triplet_id));
+  }
   RETURN_IF_NOT_OK(graph_.BatchAddEdges(src_label, dst_label, edge_label,
                                         std::move(supplier)));
   if (graph_.schema().is_edge_triplet_temporary(src_label, dst_label,

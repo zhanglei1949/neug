@@ -19,6 +19,7 @@
 #include <utility>
 
 #include "neug/storages/graph/property_graph.h"
+#include "neug/utils/load_profiler.h"
 
 namespace neug {
 
@@ -51,6 +52,7 @@ void CowGraphWorkspace::MarkBulkEdgeTableForCheckpoint(
 void CowGraphWorkspace::FinalizeBulkTablesForCheckpoint() {
   auto& graph = *cow_graph_;
   for (label_t vertex_label : bulk_vertex_tables_for_checkpoint_) {
+    profiling::ScopedLoadTimer t("checkpoint.finalize.vertex_compact");
     graph.get_vertex_table(vertex_label).Compact();
   }
   for (uint32_t edge_triplet_id : bulk_edge_tables_for_checkpoint_) {
@@ -58,6 +60,7 @@ void CowGraphWorkspace::FinalizeBulkTablesForCheckpoint() {
         graph.schema().parse_edge_label(edge_triplet_id);
     const auto& sort_key =
         graph.schema().get_sort_key_for_nbr(src_label, dst_label, edge_label);
+    profiling::ScopedLoadTimer t("checkpoint.finalize.edge_compact");
     graph.get_edge_table_by_index(edge_triplet_id).Compact(sort_key);
   }
 }

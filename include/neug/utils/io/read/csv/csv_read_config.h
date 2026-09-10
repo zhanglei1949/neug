@@ -35,6 +35,10 @@ struct CsvReadConfig {
   int64_t skip_rows = 0;
   int64_t chunk_size = 4096;
   bool use_threads = true;
+  // Exact row counts are only a pre-allocation hint. Readers that consume all
+  // chunks without consulting IDataChunkSupplier::RowNum() can disable the
+  // extra full-file counting pass.
+  bool count_rows = true;
 
   /// All column names in the physical file (in order).
   std::vector<std::string> column_names;

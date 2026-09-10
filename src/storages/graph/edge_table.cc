@@ -853,8 +853,9 @@ void EdgeTable::BatchAddEdges(const IndexerType& src_indexer,
   std::vector<std::string> dangling_edge_samples;
   dangling_edge_samples.reserve(kMaxDanglingEdgeSamples);
   while (true) {
-    // Fetching the next chunk includes CSV parsing / producer-queue wait, so a
-    // large value here points at the parse pipeline rather than storage.
+    // Measure supplier delivery separately from storage work. SQL COPY normally
+    // supplies already-materialized Context chunks; direct loaders may parse
+    // CSV here, which is reported independently by the csv.* phases.
     std::shared_ptr<DataChunk> chunk;
     {
       profiling::ScopedLoadTimer t("edge.get_next_chunk");
@@ -1023,13 +1024,17 @@ void EdgeTable::BatchAddEdges(
 }
 
 void EdgeTable::Compact(const std::optional<std::string>& sort_key_for_nbr) {
-  out_csr_->compact();
-  in_csr_->compact();
+  {
+    profiling::ScopedLoadTimer t("edge.compact.csr");
+    out_csr_->compact();
+    in_csr_->compact();
+  }
   if (sort_key_for_nbr.has_value()) {
     if (!meta_->is_bundled()) {
       THROW_INVALID_ARGUMENT_EXCEPTION(
           "sort key is not supported for unbundled edge table currently");
     }
+    profiling::ScopedLoadTimer t("edge.compact.sort");
     out_csr_->batch_sort_by_edge_data(1);
     in_csr_->batch_sort_by_edge_data(1);
   }

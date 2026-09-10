@@ -48,6 +48,7 @@
 #include "neug/compiler/common/case_insensitive_map.h"
 #include "neug/utils/datetime_parsers.h"
 #include "neug/utils/exception/exception.h"
+#include "neug/utils/load_profiler.h"
 #include "neug/utils/property/column.h"
 #include "neug/utils/string_utils.h"
 
@@ -880,14 +881,19 @@ struct CsvSupplierRuntime {
     if (selected_column_indices_.empty()) {
       THROW_SCHEMA_MISMATCH("No columns selected for CSV file: " + file_path_);
     }
-    row_num_ = CsvRowCountCounter(file_path, config.quoting, config.quote_char,
-                                  config.double_quote, config.delimiter,
-                                  config.use_threads, stream_factory_)
-                   .count();
+    if (config.count_rows) {
+      profiling::ScopedLoadTimer t("csv.row_count");
+      row_num_ =
+          CsvRowCountCounter(file_path, config.quoting, config.quote_char,
+                             config.double_quote, config.delimiter,
+                             config.use_threads, stream_factory_)
+              .count();
+    }
     reset_reader();
   }
 
   std::shared_ptr<DataChunk> get_next_chunk() {
+    profiling::ScopedLoadTimer load_profile("csv.parse_and_convert_chunk");
     if (!reader_) {
       return nullptr;
     }
@@ -993,7 +999,7 @@ struct CsvSupplierRuntime {
   bool escaping_ = false;
   char escape_char_ = '\\';
   io::InputStreamFactory stream_factory_;
-  int64_t row_num_ = 0;
+  int64_t row_num_ = -1;
   int64_t current_row_number_ = 0;
   std::unique_ptr<csv::CSVReader> reader_;
 };

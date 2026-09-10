@@ -29,6 +29,7 @@
 #include "neug/transaction/current_cow_write_transaction.h"
 #include "neug/transaction/timestamp_lease.h"
 #include "neug/utils/exception/exception.h"
+#include "neug/utils/load_profiler.h"
 
 namespace neug {
 
@@ -132,6 +133,7 @@ Status CheckpointCoordinator::CommitCowWrite(
     return Status::OK();
   }
 
+  profiling::ScopedLoadTimer commit_profile("checkpoint.commit.total");
   bool consuming_checkpoint_started = false;
   try {
     if (workspace.base_planning_generation() ==
@@ -154,14 +156,20 @@ Status CheckpointCoordinator::CommitCowWrite(
     // tail; edge COPY needs compaction only when it has a neighbor sort key.
     // Keeping the target sets transaction-local avoids compacting unrelated
     // dirty tables inherited by the private COW graph.
-    workspace.FinalizeBulkTablesForCheckpoint();
+    {
+      profiling::ScopedLoadTimer t("checkpoint.finalize_bulk_tables");
+      workspace.FinalizeBulkTablesForCheckpoint();
+    }
 
     // This is intentionally not the in-place checkpoint path in execute().
     // `graph` belongs exclusively to this COW transaction, so it can be
     // reopened before publication without changing the live snapshot. Only
     // replaceCurrentSnapshot() below makes the bulk statement visible.
     auto staging_checkpoint = checkpoint_manager_.CreateStaging();
-    graph.DetachDirtyModulesForCheckpoint(workspace.detach_state());
+    {
+      profiling::ScopedLoadTimer t("checkpoint.detach_dirty_modules");
+      graph.DetachDirtyModulesForCheckpoint(workspace.detach_state());
+    }
     // DumpDirtyAndReopen() consumes dirty containers. Most modules have been
     // detached into this private graph, but VecColumn payload buffers are still
     // shared intentionally by VecColumn::Detach(). Once consumption starts, a
@@ -173,7 +181,13 @@ Status CheckpointCoordinator::CommitCowWrite(
                              transaction.timestamp());
     workspace.view().Rebuild(graph);
 
-    auto published_checkpoint = staging_checkpoint.Publish();
+    std::shared_ptr<Checkpoint> published_checkpoint;
+    {
+      // Includes object/WAL-directory fsync, manifest persistence, and the
+      // durable CURRENT replacement.
+      profiling::ScopedLoadTimer t("checkpoint.publish");
+      published_checkpoint = staging_checkpoint.Publish();
+    }
 
     transaction.replaceCurrentSnapshot(committed_planning_generation);
     invokeWalEpochActivationHandler(published_checkpoint->wal_dir());
@@ -185,7 +199,10 @@ Status CheckpointCoordinator::CommitCowWrite(
     // GC scans and fsyncs checkpoint directories. It is best-effort and does
     // not participate in the durable decision, so do not keep AP admission
     // exclusive while it runs.
-    cleanup_retired_checkpoints(checkpoint_manager_);
+    {
+      profiling::ScopedLoadTimer t("checkpoint.gc");
+      cleanup_retired_checkpoints(checkpoint_manager_);
+    }
     return Status::OK();
   } catch (const exception::IOException& e) {
     if (consuming_checkpoint_started) {

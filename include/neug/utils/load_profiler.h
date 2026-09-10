@@ -14,8 +14,6 @@
  */
 #pragma once
 
-#include <glog/logging.h>
-
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -40,9 +38,8 @@ namespace profiling {
 /// the empty string or "0" enables it). When disabled, instrumentation is a
 /// no-op and costs a single cached bool check per scope.
 ///
-/// The summary is printed once at process exit (registered via atexit) to both
-/// stderr and LOG(INFO), so it is visible whether the run tails the glog file
-/// or captures stderr.
+/// The summary is printed once to stderr at process exit (registered via
+/// atexit).
 class LoadProfiler {
  public:
   /// Leak-on-purpose singleton: the instance lives until the process dies, so
@@ -86,6 +83,7 @@ class LoadProfiler {
     }
     std::ostringstream oss;
     oss << "\n==== NeuG Load Profile Summary (NEUG_LOAD_PROFILE) ====\n";
+    oss << "  Times are hierarchical; do not sum parent and child phases.\n";
     // std::map keeps phases sorted by name, which groups them by their
     // "vertex." / "edge." / "opr." logical prefix.
     for (const auto& kv : stats_) {
@@ -103,7 +101,6 @@ class LoadProfiler {
     const std::string out = oss.str();
     // stderr is unbuffered and the most reliable channel at exit.
     std::fwrite(out.data(), 1, out.size(), stderr);
-    LOG(INFO) << out;
   }
 
  private:

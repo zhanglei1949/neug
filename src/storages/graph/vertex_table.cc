@@ -78,8 +78,9 @@ std::vector<vid_t> VertexTable::insert_vertices(
     EnsureCapacity(cap);
   }
   while (true) {
-    // Fetching the next chunk includes CSV parsing / producer-queue wait, so a
-    // large value here points at the parse pipeline rather than storage.
+    // Measure supplier delivery separately from storage work. SQL COPY normally
+    // supplies already-materialized Context chunks; direct loaders may parse
+    // CSV here, which is reported independently by the csv.* phases.
     std::shared_ptr<DataChunk> chunk;
     {
       profiling::ScopedLoadTimer t("vertex.get_next_chunk");

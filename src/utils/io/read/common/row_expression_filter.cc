@@ -27,6 +27,7 @@
 #include "neug/storages/loader/loader_utils.h"
 #include "neug/utils/exception/exception.h"
 #include "neug/utils/io/read/common/type_converter.h"
+#include "neug/utils/load_profiler.h"
 
 namespace neug {
 namespace reader {
@@ -171,6 +172,7 @@ DataChunk read_all_chunks(
       chunks.push_back(std::move(chunk));
     }
   }
+  profiling::ScopedLoadTimer load_profile("reader.merge_chunks");
   return merge_chunks(std::move(chunks));
 }
 

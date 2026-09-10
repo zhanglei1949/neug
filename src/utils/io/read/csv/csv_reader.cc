@@ -38,6 +38,7 @@
 #include "neug/utils/io/read/common/row_expression_filter.h"
 #include "neug/utils/io/read/common/schema.h"
 #include "neug/utils/io/read/common/type_converter.h"
+#include "neug/utils/load_profiler.h"
 #include "neug/utils/result.h"
 
 namespace neug {
@@ -61,6 +62,7 @@ CsvReader::~CsvReader() = default;
 
 void CsvReader::read(std::shared_ptr<ReadLocalState> /*localState*/,
                      execution::Context& ctx) {
+  profiling::ScopedLoadTimer load_profile("csv.read.total");
   if (!sharedState_) {
     THROW_INVALID_ARGUMENT_EXCEPTION("SharedState is null");
   }
@@ -78,6 +80,10 @@ void CsvReader::read(std::shared_ptr<ReadLocalState> /*localState*/,
   const bool use_batch_read = readOpts.batch_read.get(fileSchema.options);
 
   auto read_config = read_config_for_supplier(config);
+  // CsvReader consumes every chunk directly and never consults RowNum(). The
+  // materialized Context provides an exact row count to downstream operators,
+  // so a separate full-file counting pass would be redundant.
+  read_config.count_rows = false;
   if (sharedState_->skipRows) {
     // Need all columns to evaluate row-filter expression;
     // full_read will project afterwards.
@@ -159,6 +165,7 @@ void CsvReader::batch_read(
 }
 
 result<std::shared_ptr<EntrySchema>> CsvReader::inferSchema() {
+  profiling::ScopedLoadTimer load_profile("csv.sniff.total");
   if (!sharedState_) {
     RETURN_STATUS_ERROR(neug::StatusCode::ERR_INVALID_ARGUMENT,
                         "SharedState is null");
@@ -224,6 +231,8 @@ result<std::shared_ptr<EntrySchema>> CsvReader::inferSchema() {
   }
 
   CsvReadConfig sniff_config = config;
+  // Schema inference reads one sample chunk and does not use RowNum().
+  sniff_config.count_rows = false;
   sniff_config.include_columns = config.column_names;
   for (const auto& name : config.column_names) {
     sniff_config.column_types[name] = DataType(DataTypeId::kVarchar);

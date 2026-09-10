@@ -45,6 +45,7 @@
 #include "neug/transaction/wal/wal.h"
 #include "neug/utils/exception/exception.h"
 #include "neug/utils/likely.h"
+#include "neug/utils/load_profiler.h"
 #include "neug/utils/pb_utils.h"
 #include "neug/utils/yaml_utils.h"
 
@@ -531,6 +532,14 @@ Status ExecutionSlot::executeAutoCommitQuery(const std::string& query,
                                              QueryResponse& response) {
   const auto start = std::chrono::high_resolution_clock::now();
   const auto analysis = planner_->analyzeQuery(query);
+  std::unique_ptr<profiling::ScopedLoadTimer> copy_profile;
+  if (analysis.is_copy_statement &&
+      analysis.explain_mode != ExplainMode::kExplain) {
+    // Starts immediately after lightweight statement analysis and covers query
+    // preparation, bulk execution, checkpoint publication, and checkpoint GC.
+    copy_profile =
+        std::make_unique<profiling::ScopedLoadTimer>("copy.statement.total");
+  }
   const auto access_mode = requested_mode == AccessMode::kUnKnown
                                ? analysis.access_mode
                                : requested_mode;
