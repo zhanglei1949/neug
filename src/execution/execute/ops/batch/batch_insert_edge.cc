@@ -18,6 +18,7 @@
 #include "neug/execution/execute/ops/batch/batch_update_utils.h"
 #include "neug/storages/graph/graph_interface.h"
 #include "neug/utils/exception/exception.h"
+#include "neug/utils/load_profiler.h"
 #include "neug/utils/result.h"
 
 #include <glog/logging.h>
@@ -120,6 +121,10 @@ neug::result<Context> BatchInsertEdgeOpr::Eval(
     OprTimer* timer) {
   (void) params;
   (void) timer;
+  // Operator-level wall-clock for the whole edge COPY (triplet resolution +
+  // supplier build + BatchAddEdges). Aggregated across all edge triplets; the
+  // finer-grained breakdown lives in EdgeTable::BatchAddEdges.
+  profiling::ScopedLoadTimer load_profile("opr.batch_insert_edge.eval");
   auto& graph = dynamic_cast<StorageUpdateInterface&>(graph_interface);
   label_t edge_label_id = 0;
   label_t src_label_id = 0;

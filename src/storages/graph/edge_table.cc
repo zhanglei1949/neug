@@ -40,6 +40,7 @@
 #include "neug/storages/module/type_name.h"
 #include "neug/storages/module_descriptor.h"
 #include "neug/utils/io/file/file_utils.h"
+#include "neug/utils/load_profiler.h"
 #include "neug/utils/property/types.h"
 
 namespace neug {
@@ -821,11 +822,17 @@ std::pair<int32_t, const void*> EdgeTable::AddEdge(
 void EdgeTable::BatchAddEdges(const IndexerType& src_indexer,
                               const IndexerType& dst_indexer,
                               std::shared_ptr<IDataChunkSupplier> supplier) {
+  // Whole-of-load wall-clock for one edge-triplet COPY. The global profiler
+  // aggregates this across all triplets; the sub-phases below split the total.
+  profiling::ScopedLoadTimer total_timer("edge.batch_add_edges.total");
   // Preserve the vertex tables' reserved capacity. Shrinking the CSR to the
   // current vertex count would leave subsequently inserted vertices without
   // adjacency slots until the vertex table itself needs to grow again.
-  in_csr_->resize(dst_indexer.capacity());
-  out_csr_->resize(src_indexer.capacity());
+  {
+    profiling::ScopedLoadTimer t("edge.resize_csr");
+    in_csr_->resize(dst_indexer.capacity());
+    out_csr_->resize(src_indexer.capacity());
+  }
   std::vector<vid_t> src_lid, dst_lid;
   // Pre-reserve capacity to reduce vector reallocation on large graphs.
   auto total_rows = supplier->RowNum();
@@ -846,7 +853,13 @@ void EdgeTable::BatchAddEdges(const IndexerType& src_indexer,
   std::vector<std::string> dangling_edge_samples;
   dangling_edge_samples.reserve(kMaxDanglingEdgeSamples);
   while (true) {
-    auto chunk = supplier->GetNextChunk();
+    // Fetching the next chunk includes CSV parsing / producer-queue wait, so a
+    // large value here points at the parse pipeline rather than storage.
+    std::shared_ptr<DataChunk> chunk;
+    {
+      profiling::ScopedLoadTimer t("edge.get_next_chunk");
+      chunk = supplier->GetNextChunk();
+    }
     if (chunk == nullptr) {
       break;
     }
@@ -854,8 +867,12 @@ void EdgeTable::BatchAddEdges(const IndexerType& src_indexer,
     auto dst_col = chunk->get(1);
     size_t src_offset = src_lid.size();
     size_t dst_offset = dst_lid.size();
-    src_indexer.get_index(*src_col, src_lid);
-    dst_indexer.get_index(*dst_col, dst_lid);
+    // Resolve external src/dst IDs to internal lids via the vertex indexers.
+    {
+      profiling::ScopedLoadTimer t("edge.resolve_endpoint_ids");
+      src_indexer.get_index(*src_col, src_lid);
+      dst_indexer.get_index(*dst_col, dst_lid);
+    }
     // Both indexers must resolve the same chunk row count; otherwise the
     // paired scan below would index out of bounds.
     CHECK(src_lid.size() - src_offset == dst_lid.size() - dst_offset)
@@ -863,48 +880,59 @@ void EdgeTable::BatchAddEdges(const IndexerType& src_indexer,
         << meta_->src_label_name << "]-[" << meta_->edge_label_name << "]->["
         << meta_->dst_label_name << "]";
     size_t chunk_rows = src_lid.size() - src_offset;
-    for (size_t i = 0; i < chunk_rows; ++i) {
-      bool src_missing =
-          src_lid[src_offset + i] == std::numeric_limits<vid_t>::max();
-      bool dst_missing =
-          dst_lid[dst_offset + i] == std::numeric_limits<vid_t>::max();
-      if (!src_missing && !dst_missing) {
-        continue;
-      }
-      ++dangling_edge_count;
-      if (dangling_edge_samples.size() < kMaxDanglingEdgeSamples) {
-        std::ostringstream oss;
-        oss << "(src=" << src_col->get_elem(i).to_string()
-            << ", dst=" << dst_col->get_elem(i).to_string() << ") missing ";
-        if (src_missing && dst_missing) {
-          oss << "both src and dst vertices";
-        } else if (src_missing) {
-          oss << "src vertex";
-        } else {
-          oss << "dst vertex";
+    // Scan resolved lids to count/sample edges referencing missing vertices.
+    {
+      profiling::ScopedLoadTimer t("edge.detect_dangling");
+      for (size_t i = 0; i < chunk_rows; ++i) {
+        bool src_missing =
+            src_lid[src_offset + i] == std::numeric_limits<vid_t>::max();
+        bool dst_missing =
+            dst_lid[dst_offset + i] == std::numeric_limits<vid_t>::max();
+        if (!src_missing && !dst_missing) {
+          continue;
         }
-        dangling_edge_samples.push_back(oss.str());
+        ++dangling_edge_count;
+        if (dangling_edge_samples.size() < kMaxDanglingEdgeSamples) {
+          std::ostringstream oss;
+          oss << "(src=" << src_col->get_elem(i).to_string()
+              << ", dst=" << dst_col->get_elem(i).to_string() << ") missing ";
+          if (src_missing && dst_missing) {
+            oss << "both src and dst vertices";
+          } else if (src_missing) {
+            oss << "src vertex";
+          } else {
+            oss << "dst vertex";
+          }
+          dangling_edge_samples.push_back(oss.str());
+        }
       }
     }
-    if (chunk->col_num() > 2) {
-      if (meta_->is_bundled()) {
-        // Bundled: only one property column (index 2).
-        bundled_data_cols.push_back(chunk->get(2));
-      } else {
-        // Unbundled: collect remaining columns as a DataChunk.
-        auto prop_chunk = std::make_shared<DataChunk>();
-        for (size_t i = 2; i < chunk->col_num(); ++i) {
-          auto c = chunk->get(static_cast<int>(i));
-          if (c) {
-            prop_chunk->set(static_cast<int>(i - 2), c);
+    // Stash property columns for the deferred CSR/property insert below.
+    {
+      profiling::ScopedLoadTimer t("edge.collect_property_cols");
+      if (chunk->col_num() > 2) {
+        if (meta_->is_bundled()) {
+          // Bundled: only one property column (index 2).
+          bundled_data_cols.push_back(chunk->get(2));
+        } else {
+          // Unbundled: collect remaining columns as a DataChunk.
+          auto prop_chunk = std::make_shared<DataChunk>();
+          for (size_t i = 2; i < chunk->col_num(); ++i) {
+            auto c = chunk->get(static_cast<int>(i));
+            if (c) {
+              prop_chunk->set(static_cast<int>(i - 2), c);
+            }
           }
+          unbundled_data_chunks.push_back(prop_chunk);
         }
-        unbundled_data_chunks.push_back(prop_chunk);
       }
     }
   }
   std::vector<bool> valid_flags;
-  filterInvalidEdges(src_lid, dst_lid, valid_flags);
+  {
+    profiling::ScopedLoadTimer t("edge.filter_invalid_edges");
+    filterInvalidEdges(src_lid, dst_lid, valid_flags);
+  }
   if (dangling_edge_count > 0) {
     std::ostringstream oss;
     oss << "COPY into edge table [" << meta_->src_label_name << "]-["
@@ -932,18 +960,24 @@ void EdgeTable::BatchAddEdges(const IndexerType& src_indexer,
     while (new_size >= new_cap) {
       new_cap = new_cap < 4096 ? 4096 : new_cap + (new_cap + 4) / 5;
     }
+    profiling::ScopedLoadTimer t("edge.ensure_capacity");
     EnsureCapacity(new_cap);
   }
-  if (meta_->is_bundled()) {
-    batch_add_bundled_edges_impl(out_csr_.get(), in_csr_.get(), meta_, src_lid,
-                                 dst_lid, bundled_data_cols, valid_flags);
-  } else {
-    auto oe_csr = dynamic_cast<TypedCsrBase<uint64_t>*>(out_csr_.get());
-    auto ie_csr = dynamic_cast<TypedCsrBase<uint64_t>*>(in_csr_.get());
-    assert(oe_csr != nullptr && ie_csr != nullptr);
-    batch_add_unbundled_edges_impl(
-        src_lid, dst_lid, oe_csr, ie_csr, table_.get(), table_idx_, capacity_,
-        meta_->properties, unbundled_data_chunks, valid_flags);
+  // Actual CSR adjacency insertion (+ property-table write for unbundled).
+  {
+    profiling::ScopedLoadTimer t("edge.insert_csr_and_props");
+    if (meta_->is_bundled()) {
+      batch_add_bundled_edges_impl(out_csr_.get(), in_csr_.get(), meta_,
+                                   src_lid, dst_lid, bundled_data_cols,
+                                   valid_flags);
+    } else {
+      auto oe_csr = dynamic_cast<TypedCsrBase<uint64_t>*>(out_csr_.get());
+      auto ie_csr = dynamic_cast<TypedCsrBase<uint64_t>*>(in_csr_.get());
+      assert(oe_csr != nullptr && ie_csr != nullptr);
+      batch_add_unbundled_edges_impl(
+          src_lid, dst_lid, oe_csr, ie_csr, table_.get(), table_idx_, capacity_,
+          meta_->properties, unbundled_data_chunks, valid_flags);
+    }
   }
 }
 

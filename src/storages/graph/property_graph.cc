@@ -35,6 +35,7 @@
 #include "neug/utils/exception/exception.h"
 #include "neug/utils/indexers.h"
 #include "neug/utils/io/file/file_utils.h"
+#include "neug/utils/load_profiler.h"
 #include "neug/utils/property/column.h"
 #include "neug/utils/property/types.h"
 #include "neug/utils/result.h"
@@ -1137,6 +1138,10 @@ void PropertyGraph::DumpAndClear(std::shared_ptr<Checkpoint> ckp) {
 
 bool PropertyGraph::DumpDirtyAndReopen(std::shared_ptr<Checkpoint> ckp,
                                        timestamp_t base_timestamp) {
+  // Whole-of-incremental-checkpoint wall-clock. The global profiler aggregates
+  // this across all seals; the sub-phases below split disassemble / dump /
+  // reopen so the summary shows where checkpoint time goes.
+  profiling::ScopedLoadTimer total_timer("checkpoint.incremental.total");
   CHECK(ckp_ != nullptr);
   CHECK(ckp != nullptr);
   CHECK_GT(ckp->id(), ckp_->id());
@@ -1147,7 +1152,6 @@ bool PropertyGraph::DumpDirtyAndReopen(std::shared_ptr<Checkpoint> ckp,
   }
   const bool planning_changed =
       dirty_.IsSchemaDirty() || index_manager_->HasCatalogChanges();
-  LOG(INFO) << "Creating incremental checkpoint at " << ckp->manifest_path();
 
   CheckpointManifest meta(base_timestamp);
   ModuleBroker modules_to_dump;
@@ -1176,7 +1180,10 @@ bool PropertyGraph::DumpDirtyAndReopen(std::shared_ptr<Checkpoint> ckp,
              "rewrite on every seal - consider batching COPY statements";
     }
     dirty_vertices.push_back(static_cast<label_t>(i));
-    table.DisassembleTo(modules_to_dump, meta, *ckp);
+    {
+      profiling::ScopedLoadTimer t("checkpoint.disassemble");
+      table.DisassembleTo(modules_to_dump, meta, *ckp);
+    }
     reopen_keys.push_back(VertexTable::KeyKeys(label));
     reopen_keys.push_back(VertexTable::KeyIndices(label));
     reopen_keys.push_back(VertexTable::KeyVertexTimestamp(label));
@@ -1213,7 +1220,10 @@ bool PropertyGraph::DumpDirtyAndReopen(std::shared_ptr<Checkpoint> ckp,
              "rewrite on every seal - consider batching COPY statements";
     }
     dirty_edges.push_back(index);
-    table.DisassembleTo(modules_to_dump, meta, *ckp);
+    {
+      profiling::ScopedLoadTimer t("checkpoint.disassemble");
+      table.DisassembleTo(modules_to_dump, meta, *ckp);
+    }
     reopen_keys.push_back(EdgeTable::KeyOutCsr(src, edge, dst));
     reopen_keys.push_back(EdgeTable::KeyInCsr(src, edge, dst));
     if (!edge_schema->is_bundled()) {
@@ -1226,7 +1236,10 @@ bool PropertyGraph::DumpDirtyAndReopen(std::shared_ptr<Checkpoint> ckp,
 
   index_manager_->StageIncrementalModules(modules_to_dump, meta);
 
-  modules_to_dump.Dump(*ckp, meta);
+  {
+    profiling::ScopedLoadTimer t("checkpoint.module_dump");
+    modules_to_dump.Dump(*ckp, meta);
+  }
   auto index_reopen_manifest =
       index_manager_->BuildIncrementalReopenManifest(meta);
   auto checkpoint_schema = schema_.StripTemporary();
@@ -1234,24 +1247,28 @@ bool PropertyGraph::DumpDirtyAndReopen(std::shared_ptr<Checkpoint> ckp,
   meta.SetSchema(std::move(checkpoint_schema));
   ckp->SetManifest(std::move(meta));
 
-  CheckpointManifest reopen_manifest;
-  for (const auto& key : reopen_keys) {
-    reopen_manifest.ReuseModuleClosureFrom(ckp->manifest(), key);
-  }
-  ModuleBroker reopened_modules;
-  reopened_modules.Open(*ckp, reopen_manifest, memory_level_);
-  for (label_t label : dirty_vertices) {
-    vertex_tables_[label] =
-        VertexTable::OpenFrom(ckp, schema_.get_vertex_schema(label),
+  // Reopen the freshly dumped modules so the live graph reads from checkpoint.
+  {
+    profiling::ScopedLoadTimer t("checkpoint.reopen");
+    CheckpointManifest reopen_manifest;
+    for (const auto& key : reopen_keys) {
+      reopen_manifest.ReuseModuleClosureFrom(ckp->manifest(), key);
+    }
+    ModuleBroker reopened_modules;
+    reopened_modules.Open(*ckp, reopen_manifest, memory_level_);
+    for (label_t label : dirty_vertices) {
+      vertex_tables_[label] = VertexTable::OpenFrom(
+          ckp, schema_.get_vertex_schema(label), reopened_modules,
+          ckp->manifest(), memory_level_);
+    }
+    for (uint32_t index : dirty_edges) {
+      const auto [src, dst, edge] = schema_.parse_edge_label(index);
+      edge_tables_.at(index) =
+          EdgeTable::OpenFrom(ckp, schema_.get_edge_schema(src, dst, edge),
                               reopened_modules, ckp->manifest(), memory_level_);
+    }
+    index_manager_->InstallIncrementalCheckpoint(ckp, index_reopen_manifest);
   }
-  for (uint32_t index : dirty_edges) {
-    const auto [src, dst, edge] = schema_.parse_edge_label(index);
-    edge_tables_.at(index) =
-        EdgeTable::OpenFrom(ckp, schema_.get_edge_schema(src, dst, edge),
-                            reopened_modules, ckp->manifest(), memory_level_);
-  }
-  index_manager_->InstallIncrementalCheckpoint(ckp, index_reopen_manifest);
 
   uncompacted_modules_.MergeFrom(dirty_);
   for (auto& table : vertex_tables_) {

@@ -222,7 +222,6 @@ void CheckpointManifest::Save(const std::string& file_path) const {
         "CheckpointManifest::Save: manifest replacement is commit-unknown: " +
         file_path);
   }
-  LOG(INFO) << "CheckpointManifest::Save: wrote " << file_path;
 }
 
 const Schema& CheckpointManifest::GetSchema() const { return schema_; }

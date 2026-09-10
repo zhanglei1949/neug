@@ -18,6 +18,7 @@
 #include "neug/execution/execute/ops/batch/batch_update_utils.h"
 #include "neug/storages/graph/graph_interface.h"
 #include "neug/utils/exception/exception.h"
+#include "neug/utils/load_profiler.h"
 #include "neug/utils/result.h"
 
 #include <glog/logging.h>
@@ -56,6 +57,10 @@ neug::result<Context> BatchInsertVertexOpr::Eval(
     OprTimer* timer) {
   (void) params;
   (void) timer;
+  // Operator-level wall-clock for the whole vertex COPY (supplier build +
+  // BatchAddVertices). Aggregated across all vertex labels; the finer-grained
+  // breakdown lives in VertexTable::insert_vertices.
+  profiling::ScopedLoadTimer load_profile("opr.batch_insert_vertex.eval");
   auto& graph = dynamic_cast<StorageUpdateInterface&>(graph_interface);
   label_t vertex_label_id = 0;
   switch (vertex_type_.item_case()) {

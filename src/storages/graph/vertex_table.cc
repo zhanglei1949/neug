@@ -22,6 +22,7 @@
 #include "neug/storages/module_descriptor.h"
 #include "neug/utils/io/file/file_utils.h"
 #include "neug/utils/likely.h"
+#include "neug/utils/load_profiler.h"
 #include "neug/utils/property/array_column.h"
 #include "neug/utils/property/vec_column.h"
 
@@ -54,6 +55,10 @@ void VertexTable::Init(std::shared_ptr<Checkpoint> ckp, MemoryLevel level) {
 
 std::vector<vid_t> VertexTable::insert_vertices(
     std::shared_ptr<IDataChunkSupplier> supplier) {
+  // Whole-of-load wall-clock for one vertex COPY. The global profiler
+  // aggregates this across all labels; the sub-phases below split the total so
+  // the summary shows which logical step dominates.
+  profiling::ScopedLoadTimer total_timer("vertex.insert_vertices.total");
   std::vector<vid_t> new_vids;
   auto row_nums = supplier->RowNum();
   if (row_nums < 0) {
@@ -68,10 +73,18 @@ std::vector<vid_t> VertexTable::insert_vertices(
     while (new_size >= cap) {
       cap = cap < 4096 ? 4096 : cap + cap / 4;
     }
+    // One-shot up-front growth based on the supplier's reported row count.
+    profiling::ScopedLoadTimer t("vertex.pre_reserve");
     EnsureCapacity(cap);
   }
   while (true) {
-    auto chunk = supplier->GetNextChunk();
+    // Fetching the next chunk includes CSV parsing / producer-queue wait, so a
+    // large value here points at the parse pipeline rather than storage.
+    std::shared_ptr<DataChunk> chunk;
+    {
+      profiling::ScopedLoadTimer t("vertex.get_next_chunk");
+      chunk = supplier->GetNextChunk();
+    }
     if (chunk == nullptr) {
       break;
     }
@@ -101,10 +114,16 @@ std::vector<vid_t> VertexTable::insert_vertices(
       while (new_size >= cap) {
         cap = cap < 4096 ? 4096 : cap + cap / 4;
       }
+      profiling::ScopedLoadTimer t("vertex.ensure_capacity");
       EnsureCapacity(cap);
     }
 
-    auto vids = insert_primary_keys(pk_col);
+    // PK de-dup + lid allocation (indexer get_or_insert + timestamp insert).
+    std::vector<vid_t> vids;
+    {
+      profiling::ScopedLoadTimer t("vertex.insert_primary_keys");
+      vids = insert_primary_keys(pk_col);
+    }
 
     for (auto vid : vids) {
       if (vid != std::numeric_limits<vid_t>::max()) {
@@ -112,9 +131,13 @@ std::vector<vid_t> VertexTable::insert_vertices(
       }
     }
 
-    for (size_t i = 0; i < prop_cols.size(); ++i) {
-      auto col = table_->get_column_by_id(i);
-      set_properties_from_context_column(col, prop_cols[i], vids);
+    // Column-wise write of non-PK properties into the property table.
+    {
+      profiling::ScopedLoadTimer t("vertex.set_properties");
+      for (size_t i = 0; i < prop_cols.size(); ++i) {
+        auto col = table_->get_column_by_id(i);
+        set_properties_from_context_column(col, prop_cols[i], vids);
+      }
     }
     VLOG(10) << "Inserted " << chunk_rows
              << " vertices, current vertex num: " << VertexNum();
@@ -124,6 +147,7 @@ std::vector<vid_t> VertexTable::insert_vertices(
   // `>` so an exact fit can be consumed safely before growing here.
   if (indexer_->size() == indexer_->capacity()) {
     const size_t capacity = indexer_->capacity();
+    profiling::ScopedLoadTimer t("vertex.final_headroom");
     EnsureCapacity(capacity < 4096 ? 4096 : capacity + capacity / 4);
   }
   return new_vids;

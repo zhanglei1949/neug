@@ -161,7 +161,6 @@ Status CheckpointCoordinator::CommitCowWrite(
     // reopened before publication without changing the live snapshot. Only
     // replaceCurrentSnapshot() below makes the bulk statement visible.
     auto staging_checkpoint = checkpoint_manager_.CreateStaging();
-    LOG(INFO) << "Committing private bulk COW graph with checkpoint";
     graph.DetachDirtyModulesForCheckpoint(workspace.detach_state());
     // DumpDirtyAndReopen() consumes dirty containers. Most modules have been
     // detached into this private graph, but VecColumn payload buffers are still
