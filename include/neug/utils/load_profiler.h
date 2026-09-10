@@ -94,8 +94,11 @@ class LoadProfiler {
       } else {
         oss << ' ';
       }
+      const double average = kv.second.calls == 0
+                                 ? 0.0
+                                 : kv.second.total_seconds / kv.second.calls;
       oss << kv.second.total_seconds << " s  (" << kv.second.calls
-          << " calls)\n";
+          << " calls, avg " << average << " s)\n";
     }
     oss << "=======================================================\n";
     const std::string out = oss.str();

@@ -17,8 +17,10 @@
 #include <glog/logging.h>
 
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include <rapidjson/document.h>
@@ -169,6 +171,22 @@ class NEUG_API Connection {
    * transactions or read-to-write upgrades.
    */
   Status BeginTransaction(TransactionMode mode = TransactionMode::kReadWrite);
+
+  /** Begin an exclusive session that commits persistent COPY statements with
+   * one checkpoint. */
+  Status BeginBulkLoad();
+
+  /** Execute one persistent COPY FROM in the active bulk-load session. */
+  result<QueryResult> ExecuteBulkLoadQuery(
+      const std::string& query_string, const std::string& access_mode = "",
+      const rapidjson::Value& parameters = rapidjson::Value{
+          rapidjson::kObjectType});
+
+  /** Publish all COPY statements in the active bulk-load session. */
+  Status CommitBulkLoad();
+
+  /** Discard all COPY statements in the active bulk-load session. */
+  Status RollbackBulkLoad();
   /**
    * @brief Commit the active explicit transaction.
    *
@@ -194,7 +212,11 @@ class NEUG_API Connection {
    * Commit() or Rollback() returns the Connection to idle.
    */
   bool HasActiveTransaction() const noexcept {
-    return transaction_context_.HasActiveTransaction();
+    return transaction_context_.HasOwner() && !transaction_context_.IsBulkLoad();
+  }
+
+  bool HasActiveBulkLoad() const noexcept {
+    return transaction_context_.IsBulkLoad();
   }
 
   /**
@@ -256,9 +278,12 @@ class NEUG_API Connection {
   bool IsClosed() const { return is_closed_.load(); }
 
  private:
+  void FinishBulkLoadProfile() noexcept;
+
   std::unique_ptr<ExecutionSlot> execution_slot_;
   CloseCallback on_close_;
   TransactionContext transaction_context_;
+  std::optional<std::chrono::steady_clock::time_point> bulk_load_started_at_;
 
   std::atomic<bool> is_closed_{false};
 };

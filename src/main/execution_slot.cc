@@ -525,6 +525,95 @@ result<QueryResult> ExecutionSlot::ExecuteQueryInTransaction(
   }
 }
 
+result<QueryResult> ExecutionSlot::ExecuteBulkLoadQuery(
+    const std::string& query_string, AccessMode requested_mode,
+    const rapidjson::Value& parameters, int32_t num_threads,
+    TransactionContext& transaction_context) {
+  CHECK(transaction_context.IsActive() && transaction_context.IsBulkLoad());
+  profiling::ScopedLoadTimer statement_profile("bulk_load.statement.total");
+  try {
+    const auto start = std::chrono::high_resolution_clock::now();
+    const auto analysis = planner_->analyzeQuery(query_string);
+    if (analysis.explain_mode == ExplainMode::kExplain ||
+        !analysis.is_copy_statement || analysis.isAdmin()) {
+      transaction_context.AbortAndMarkRollbackOnly();
+      RETURN_ERROR(Status(
+          StatusCode::ERR_NOT_SUPPORTED,
+          "Only persistent COPY FROM is allowed in a bulk-load session."));
+    }
+
+    const auto resolved_mode = requested_mode == AccessMode::kUnKnown
+                                   ? analysis.access_mode
+                                   : requested_mode;
+    const AnalyzedQuery query{query_string, analysis, resolved_mode, parameters,
+                              num_threads};
+    auto& transaction =
+        std::get<CurrentCowWriteTransaction>(transaction_context.transaction_);
+    const auto cache_mode = transaction.PlanningChanged()
+                                ? QueryCacheMode::kBypassShared
+                                : QueryCacheMode::kShared;
+    auto prepared = prepareQuery(transaction.statistic(), query.text,
+                                 query.num_threads, cache_mode);
+    if (NEUG_UNLIKELY(!prepared)) {
+      transaction_context.AbortAndMarkRollbackOnly();
+      RETURN_ERROR(prepared.error());
+    }
+    auto prepared_query = std::move(prepared).value();
+    const auto& flags = prepared_query->flags;
+    if (!flags.copy_from() || flags.create_temp_table() || flags.checkpoint() ||
+        flags.procedure_call()) {
+      transaction_context.AbortAndMarkRollbackOnly();
+      RETURN_ERROR(
+          Status(StatusCode::ERR_NOT_SUPPORTED,
+                 flags.create_temp_table()
+                     ? "COPY TEMP is not supported in a bulk-load session."
+                     : "Only persistent COPY FROM is allowed in a bulk-load "
+                       "session."));
+    }
+
+    auto storage = transaction.OpenBulkStorage();
+    QueryResponse response;
+    auto status =
+        executePreparedQuery(storage, query, *prepared_query, response);
+    if (status.ok()) {
+      const auto& workspace = transaction.workspace_;
+      const auto& logical_redo = workspace.logical_redo();
+      if (workspace.HasTransientMutation() || logical_redo.op_num() != 0 ||
+          logical_redo.content_size() != 0) {
+        status = Status::InternalError(
+            "Bulk-load COPY produced a non-checkpoint mutation.");
+      }
+    }
+    if (!status.ok()) {
+      transaction_context.AbortAndMarkRollbackOnly();
+      RETURN_ERROR(status);
+    }
+
+    const auto end = std::chrono::high_resolution_clock::now();
+    eval_duration_.fetch_add(
+        std::chrono::duration_cast<std::chrono::microseconds>(end - start)
+            .count());
+    ++query_num_;
+    return QueryResult(std::move(response));
+  } catch (...) {
+    transaction_context.AbortAndMarkRollbackOnly();
+    throw;
+  }
+}
+
+Status ExecutionSlot::CommitBulkLoad(TransactionContext& transaction_context) {
+  CHECK(transaction_context.IsActive() && transaction_context.IsBulkLoad());
+  auto& transaction =
+      std::get<CurrentCowWriteTransaction>(transaction_context.transaction_);
+  auto status = checkpoint_coordinator_.CommitCowWrite(transaction);
+  if (status.ok()) {
+    transaction_context.ResetToIdle();
+  } else {
+    transaction_context.AbortAndMarkRollbackOnly();
+  }
+  return status;
+}
+
 Status ExecutionSlot::executeAutoCommitQuery(const std::string& query,
                                              AccessMode requested_mode,
                                              const rapidjson::Value& parameters,

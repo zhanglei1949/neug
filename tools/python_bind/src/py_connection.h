@@ -40,6 +40,10 @@ class PyConnection : public std::enable_shared_from_this<PyConnection> {
   void commit();
   void rollback();
   bool has_active_transaction() const;
+  void begin_bulk_load();
+  void commit_bulk_load();
+  void rollback_bulk_load();
+  bool has_active_bulk_load() const;
 
   PyConnection(const PyConnection& other)
       : db_(other.db_), conn_(other.conn_) {}
@@ -56,9 +60,16 @@ class PyConnection : public std::enable_shared_from_this<PyConnection> {
       const std::string& query_string, const std::string& access_mode = "",
       const pybind11::dict& parameters = pybind11::dict());
 
+  std::unique_ptr<PyQueryResult> execute_bulk_load(
+      const std::string& query_string, const std::string& access_mode = "",
+      const pybind11::dict& parameters = pybind11::dict());
+
   std::string get_schema() const;
 
  private:
+  rapidjson::Document serialize_parameters(
+      const pybind11::dict& parameters) const;
+
   NeugDB& db_;
   std::shared_ptr<Connection> conn_;
 };

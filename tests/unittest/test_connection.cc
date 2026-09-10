@@ -516,6 +516,205 @@ TEST_F(ConnectionTest,
   EXPECT_FALSE(std::filesystem::exists(export_path));
 }
 
+TEST_F(ConnectionTest, BulkLoadSessionCommitsMultipleCopiesWithOneCheckpoint) {
+  const auto people_a = std::filesystem::path(DB_DIR) / "bulk-people-a.csv";
+  const auto people_b = std::filesystem::path(DB_DIR) / "bulk-people-b.csv";
+  {
+    std::ofstream out(people_a);
+    out << "id,name\n1,Alice\n";
+  }
+  {
+    std::ofstream out(people_b);
+    out << "id,name\n2,Bob\n";
+  }
+
+  NeugDBConfig config;
+  config.data_dir = DB_DIR;
+  config.mode = DBMode::READ_WRITE;
+  config.checkpoint_on_close = false;
+  {
+    NeugDB db;
+    ASSERT_TRUE(db.Open(config));
+    auto conn = db.Connect();
+    ASSERT_TRUE(conn->Query(
+        "CREATE NODE TABLE BulkPerson(id INT64, name STRING, PRIMARY KEY(id));",
+        "schema"));
+    const auto checkpoint_before = db.graph().checkpoint().id();
+
+    ASSERT_TRUE(conn->BeginBulkLoad().ok());
+    EXPECT_TRUE(conn->HasActiveBulkLoad());
+    EXPECT_FALSE(conn->HasActiveTransaction());
+    EXPECT_EQ(conn->BeginTransaction().error_code(),
+              StatusCode::ERR_TX_STATE_CONFLICT);
+    EXPECT_EQ(conn->Commit().error_code(), StatusCode::ERR_TX_STATE_CONFLICT);
+    EXPECT_EQ(conn->Rollback().error_code(), StatusCode::ERR_TX_STATE_CONFLICT);
+
+    auto first = conn->ExecuteBulkLoadQuery("COPY BulkPerson FROM '" +
+                                            people_a.string() +
+                                            "' (HEADER=true, DELIMITER=',');");
+    ASSERT_TRUE(first) << first.error().ToString();
+    auto wrong_api = conn->Query("COPY BulkPerson FROM '" + people_b.string() +
+                                 "' (HEADER=true, DELIMITER=',');");
+    ASSERT_FALSE(wrong_api);
+    EXPECT_EQ(wrong_api.error().error_code(),
+              StatusCode::ERR_TX_STATE_CONFLICT);
+    auto second = conn->ExecuteBulkLoadQuery("COPY BulkPerson FROM '" +
+                                             people_b.string() +
+                                             "' (HEADER=true, DELIMITER=',');");
+    ASSERT_TRUE(second) << second.error().ToString();
+    EXPECT_EQ(db.graph().checkpoint().id(), checkpoint_before)
+        << "COPY statements must not publish before bulk commit.";
+
+    ASSERT_TRUE(conn->CommitBulkLoad().ok());
+    EXPECT_FALSE(conn->HasActiveBulkLoad());
+    EXPECT_EQ(db.graph().checkpoint().id(), checkpoint_before + 1);
+    EXPECT_FALSE(conn->ExecuteBulkLoadQuery("COPY BulkPerson FROM '" +
+                                            people_a.string() +
+                                            "' (HEADER=true, DELIMITER=',');"));
+    ASSERT_TRUE(conn->BeginTransaction(TransactionMode::kReadOnly).ok());
+    EXPECT_EQ(conn->BeginBulkLoad().error_code(),
+              StatusCode::ERR_TX_STATE_CONFLICT);
+    ASSERT_TRUE(conn->Rollback().ok());
+    auto rows =
+        conn->Query("MATCH (n:BulkPerson) RETURN n.id ORDER BY n.id;", "read");
+    ASSERT_TRUE(rows) << rows.error().ToString();
+    EXPECT_EQ(rows.value().response().row_count(), 2);
+    conn->Close();
+    db.Close();
+  }
+
+  {
+    NeugDB db;
+    ASSERT_TRUE(db.Open(config));
+    auto conn = db.Connect();
+    auto rows =
+        conn->Query("MATCH (n:BulkPerson) RETURN n.id ORDER BY n.id;", "read");
+    ASSERT_TRUE(rows) << rows.error().ToString();
+    EXPECT_EQ(rows.value().response().row_count(), 2);
+  }
+}
+
+TEST_F(ConnectionTest, BulkLoadSessionSeesVerticesBeforeCopyingEdges) {
+  const auto people = std::filesystem::path(DB_DIR) / "bulk-nodes.csv";
+  const auto knows = std::filesystem::path(DB_DIR) / "bulk-edges.csv";
+  {
+    std::ofstream out(people);
+    out << "id\n1\n2\n";
+  }
+  {
+    std::ofstream out(knows);
+    out << "from,to\n1,2\n";
+  }
+
+  NeugDB db;
+  NeugDBConfig config;
+  config.data_dir = DB_DIR;
+  config.mode = DBMode::READ_WRITE;
+  config.checkpoint_on_close = false;
+  ASSERT_TRUE(db.Open(config));
+  auto conn = db.Connect();
+  ASSERT_TRUE(conn->Query(
+      "CREATE NODE TABLE BulkNode(id INT64, PRIMARY KEY(id));", "schema"));
+  ASSERT_TRUE(conn->Query(
+      "CREATE REL TABLE BulkKnows(FROM BulkNode TO BulkNode);", "schema"));
+
+  const auto checkpoint_before = db.graph().checkpoint().id();
+  ASSERT_TRUE(conn->BeginBulkLoad().ok());
+  auto nodes =
+      conn->ExecuteBulkLoadQuery("COPY BulkNode FROM '" + people.string() +
+                                 "' (HEADER=true, DELIMITER=',');");
+  ASSERT_TRUE(nodes) << nodes.error().ToString();
+  auto edges = conn->ExecuteBulkLoadQuery(
+      "COPY BulkKnows FROM '" + knows.string() +
+      "' (FROM='BulkNode', TO='BulkNode', HEADER=true, DELIMITER=',');");
+  ASSERT_TRUE(edges) << edges.error().ToString();
+  ASSERT_TRUE(conn->CommitBulkLoad().ok());
+  EXPECT_EQ(db.graph().checkpoint().id(), checkpoint_before + 1);
+
+  auto rows = conn->Query(
+      "MATCH (a:BulkNode)-[:BulkKnows]->(b:BulkNode) RETURN a.id, b.id;",
+      "read");
+  ASSERT_TRUE(rows) << rows.error().ToString();
+  EXPECT_EQ(rows.value().response().row_count(), 1);
+
+  conn->Close();
+  db.Close();
+  NeugDB reopened_db;
+  ASSERT_TRUE(reopened_db.Open(config));
+  auto reopened_conn = reopened_db.Connect();
+  rows = reopened_conn->Query(
+      "MATCH (a:BulkNode)-[:BulkKnows]->(b:BulkNode) RETURN a.id, b.id;",
+      "read");
+  ASSERT_TRUE(rows) << rows.error().ToString();
+  EXPECT_EQ(rows.value().response().row_count(), 1);
+}
+
+TEST_F(ConnectionTest, BulkLoadFailureAndRollbackPublishNothing) {
+  const auto people = std::filesystem::path(DB_DIR) / "bulk-rollback.csv";
+  {
+    std::ofstream out(people);
+    out << "id\n1\n";
+  }
+
+  NeugDB db;
+  NeugDBConfig config;
+  config.data_dir = DB_DIR;
+  config.mode = DBMode::READ_WRITE;
+  config.checkpoint_on_close = false;
+  ASSERT_TRUE(db.Open(config));
+  auto conn = db.Connect();
+  ASSERT_TRUE(conn->Query(
+      "CREATE NODE TABLE BulkRollback(id INT64, PRIMARY KEY(id));", "schema"));
+  const auto checkpoint_before = db.graph().checkpoint().id();
+
+  ASSERT_TRUE(conn->BeginBulkLoad().ok());
+  ASSERT_TRUE(conn->ExecuteBulkLoadQuery("COPY BulkRollback FROM '" +
+                                         people.string() +
+                                         "' (HEADER=true, DELIMITER=',');"));
+  auto invalid =
+      conn->ExecuteBulkLoadQuery("MATCH (n:BulkRollback) RETURN n.id;", "read");
+  ASSERT_FALSE(invalid);
+  EXPECT_EQ(invalid.error().error_code(), StatusCode::ERR_NOT_SUPPORTED);
+  EXPECT_TRUE(conn->HasActiveBulkLoad());
+  EXPECT_FALSE(conn->HasActiveTransaction());
+  const auto bulk_commit = conn->CommitBulkLoad();
+  EXPECT_EQ(bulk_commit.error_code(), StatusCode::ERR_TX_STATE_CONFLICT);
+  EXPECT_NE(bulk_commit.error_message().find("RollbackBulkLoad"),
+            std::string::npos);
+  const auto ordinary_commit = conn->Commit();
+  EXPECT_EQ(ordinary_commit.error_code(), StatusCode::ERR_TX_STATE_CONFLICT);
+  EXPECT_NE(ordinary_commit.error_message().find("RollbackBulkLoad"),
+            std::string::npos);
+  try {
+    static_cast<void>(conn->GetSchema());
+    FAIL() << "GetSchema must reject a failed bulk-load session";
+  } catch (const neug::exception::TxStateConflictException& e) {
+    EXPECT_NE(std::string(e.what()).find("RollbackBulkLoad"),
+              std::string::npos);
+  }
+  ASSERT_TRUE(conn->RollbackBulkLoad().ok());
+  EXPECT_FALSE(conn->HasActiveBulkLoad());
+  EXPECT_EQ(db.graph().checkpoint().id(), checkpoint_before);
+  auto rows = conn->Query("MATCH (n:BulkRollback) RETURN n.id;", "read");
+  ASSERT_TRUE(rows) << rows.error().ToString();
+  EXPECT_EQ(rows.value().response().row_count(), 0);
+
+  ASSERT_TRUE(conn->BeginBulkLoad().ok());
+  ASSERT_TRUE(conn->CommitBulkLoad().ok());
+  EXPECT_EQ(db.graph().checkpoint().id(), checkpoint_before)
+      << "An empty bulk-load session must not create a checkpoint.";
+
+  ASSERT_TRUE(conn->BeginBulkLoad().ok());
+  ASSERT_TRUE(conn->ExecuteBulkLoadQuery("COPY BulkRollback FROM '" +
+                                         people.string() +
+                                         "' (HEADER=true, DELIMITER=',');"));
+  conn->Close();
+  auto reopened = db.Connect();
+  rows = reopened->Query("MATCH (n:BulkRollback) RETURN n.id;", "read");
+  ASSERT_TRUE(rows) << rows.error().ToString();
+  EXPECT_EQ(rows.value().response().row_count(), 0);
+}
+
 TEST_F(ConnectionTest, TestReadOnlyConnections) {
   NeugDB db;
   NeugDBConfig config;
@@ -548,6 +747,8 @@ TEST_F(ConnectionTest, TestReadOnlyConnections) {
   auto begin_write =
       connections[0]->BeginTransaction(TransactionMode::kReadWrite);
   EXPECT_EQ(begin_write.error_code(), StatusCode::ERR_INVALID_ARGUMENT);
+  auto begin_bulk = connections[0]->BeginBulkLoad();
+  EXPECT_EQ(begin_bulk.error_code(), StatusCode::ERR_INVALID_ARGUMENT);
 }
 
 TEST_F(ConnectionTest, ReadOnlyConnectionsExecuteConcurrently) {

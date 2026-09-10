@@ -250,6 +250,7 @@ os.environ["NEUG_EXTENSION_HOME_PYENV"] = _extension_home
 logger.info("Extension home: %s", os.environ["NEUG_EXTENSION_HOME_PYENV"])
 
 from neug.async_connection import AsyncConnection
+from neug.bulk_load_session import BulkLoadSession
 from neug.connection import Connection
 from neug.database import Database
 from neug.query_result import QueryResult

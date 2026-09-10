@@ -36,17 +36,17 @@ enum class TransactionMode : uint8_t {
 };
 
 /**
- * @brief Explicit transaction state and its concrete owner.
+ * @brief Connection-owned transaction or bulk-load state and concrete owner.
  *
  * ExecutionSlot constructs the concrete owner. A Connection or service session
  * keeps it across statements without introducing a common transaction
  * interface. A failed statement aborts the concrete owner and leaves this
- * context rollback-only; after that failure, only Rollback() returns it to
- * idle.
+ * context rollback-only; after that failure, the matching rollback operation
+ * returns it to idle.
  */
 class TransactionContext {
  public:
-  /** Explicit transaction lifecycle; rollback-only is still unfinished. */
+  /** Owner lifecycle; rollback-only is still unfinished. */
   enum class State : uint8_t {
     /** No owner is present and auto-commit queries may execute. */
     kIdle,
@@ -58,6 +58,12 @@ class TransactionContext {
   };
 
  private:
+  enum class OwnerKind : uint8_t {
+    kReadOnly,
+    kReadWrite,
+    kBulkLoad,
+  };
+
   template <typename Func>
   decltype(auto) VisitCowWriteOwner(Func&& func) {
     CHECK(IsActive() && !IsReadOnly());
@@ -81,23 +87,32 @@ class TransactionContext {
   }
 
  public:
-  bool HasActiveTransaction() const noexcept { return state_ != State::kIdle; }
+  bool HasOwner() const noexcept { return state_ != State::kIdle; }
   bool IsActive() const noexcept { return state_ == State::kActive; }
   bool IsRollbackOnly() const noexcept {
     return state_ == State::kRollbackOnly;
   }
   bool IsReadOnly() const noexcept {
-    return mode_ == TransactionMode::kReadOnly;
+    return owner_kind_ == OwnerKind::kReadOnly;
+  }
+  bool IsBulkLoad() const noexcept {
+    return state_ != State::kIdle && owner_kind_ == OwnerKind::kBulkLoad;
   }
   void Begin(SnapshotReadTransaction transaction) {
     transaction_.emplace<SnapshotReadTransaction>(std::move(transaction));
-    mode_ = TransactionMode::kReadOnly;
+    owner_kind_ = OwnerKind::kReadOnly;
     state_ = State::kActive;
   }
 
   void Begin(CurrentCowWriteTransaction transaction) {
     transaction_.emplace<CurrentCowWriteTransaction>(std::move(transaction));
-    mode_ = TransactionMode::kReadWrite;
+    owner_kind_ = OwnerKind::kReadWrite;
+    state_ = State::kActive;
+  }
+
+  void BeginBulkLoad(CurrentCowWriteTransaction transaction) {
+    transaction_.emplace<CurrentCowWriteTransaction>(std::move(transaction));
+    owner_kind_ = OwnerKind::kBulkLoad;
     state_ = State::kActive;
   }
 
@@ -107,7 +122,7 @@ class TransactionContext {
 
   void Begin(SnapshotCowWriteTransaction transaction) {
     transaction_.emplace<SnapshotCowWriteTransaction>(std::move(transaction));
-    mode_ = TransactionMode::kReadWrite;
+    owner_kind_ = OwnerKind::kReadWrite;
     state_ = State::kActive;
   }
 
@@ -120,6 +135,10 @@ class TransactionContext {
 
  public:
   Status Commit() {
+    if (IsBulkLoad()) {
+      return Status(StatusCode::ERR_TX_STATE_CONFLICT,
+                    "Bulk-load sessions must use CommitBulkLoad().");
+    }
     if (IsReadOnly()) {
       if (!ReadTransactionOwner().Commit()) {
         AbortAndMarkRollbackOnly();
@@ -200,7 +219,7 @@ class TransactionContext {
   }
 
   State state_{State::kIdle};
-  TransactionMode mode_{TransactionMode::kReadOnly};
+  OwnerKind owner_kind_{OwnerKind::kReadOnly};
   std::variant<std::monostate, SnapshotReadTransaction,
                CurrentCowWriteTransaction, SnapshotCowWriteTransaction>
       transaction_;

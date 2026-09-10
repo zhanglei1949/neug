@@ -45,6 +45,19 @@ void PyConnection::initialize(pybind11::handle& m) {
       .def_property_readonly("has_active_transaction",
                              &PyConnection::has_active_transaction,
                              "Whether an explicit transaction is active.\n")
+      .def("begin_bulk_load", &PyConnection::begin_bulk_load,
+           "Begin an exclusive persistent COPY session.\n")
+      .def("commit_bulk_load", &PyConnection::commit_bulk_load,
+           "Commit the active bulk-load session with one checkpoint.\n")
+      .def("rollback_bulk_load", &PyConnection::rollback_bulk_load,
+           "Roll back the active bulk-load session.\n")
+      .def_property_readonly("has_active_bulk_load",
+                             &PyConnection::has_active_bulk_load,
+                             "Whether a bulk-load session is active.\n")
+      .def("execute_bulk_load", &PyConnection::execute_bulk_load,
+           pybind11::arg("query_string"), pybind11::arg("access_mode") = "",
+           pybind11::arg("parameters") = pybind11::dict(),
+           "Execute one persistent COPY FROM in a bulk-load session.\n")
       .def("execute", &PyConnection::execute, pybind11::arg("query_string"),
            pybind11::arg("access_mode") = "",
            pybind11::arg("parameters") = pybind11::dict(),
@@ -113,9 +126,33 @@ bool PyConnection::has_active_transaction() const {
   return conn_->HasActiveTransaction();
 }
 
-std::unique_ptr<PyQueryResult> PyConnection::execute(
-    const std::string& query_string, const std::string& access_mode,
-    const pybind11::dict& parameters) {
+void PyConnection::begin_bulk_load() {
+  const auto status = conn_->BeginBulkLoad();
+  if (!status.ok()) {
+    THROW_RUNTIME_ERROR(status.ToString());
+  }
+}
+
+void PyConnection::commit_bulk_load() {
+  const auto status = conn_->CommitBulkLoad();
+  if (!status.ok()) {
+    THROW_RUNTIME_ERROR(status.ToString());
+  }
+}
+
+void PyConnection::rollback_bulk_load() {
+  const auto status = conn_->RollbackBulkLoad();
+  if (!status.ok()) {
+    THROW_RUNTIME_ERROR(status.ToString());
+  }
+}
+
+bool PyConnection::has_active_bulk_load() const {
+  return conn_->HasActiveBulkLoad();
+}
+
+rapidjson::Document PyConnection::serialize_parameters(
+    const pybind11::dict& parameters) const {
   rapidjson::Document params_json(rapidjson::kObjectType);
   for (auto item : parameters) {
     std::string key = pybind11::cast<std::string>(item.first);
@@ -123,9 +160,28 @@ std::unique_ptr<PyQueryResult> PyConnection::execute(
         pybind11::reinterpret_borrow<pybind11::object>(item.second);
     PyParameterSerializer::SerializeParameter(params_json, key, value);
   }
+  return params_json;
+}
+
+std::unique_ptr<PyQueryResult> PyConnection::execute(
+    const std::string& query_string, const std::string& access_mode,
+    const pybind11::dict& parameters) {
+  auto params_json = serialize_parameters(parameters);
   // Python has always forwarded an empty access mode, explicitly selecting
   // query-text inference instead of depending on the C++ API's default.
   auto query_result = conn_->Query(query_string, access_mode, params_json);
+  if (!query_result) {
+    return std::make_unique<PyQueryResult>(query_result.error());
+  }
+  return std::make_unique<PyQueryResult>(std::move(query_result.value()));
+}
+
+std::unique_ptr<PyQueryResult> PyConnection::execute_bulk_load(
+    const std::string& query_string, const std::string& access_mode,
+    const pybind11::dict& parameters) {
+  auto params_json = serialize_parameters(parameters);
+  auto query_result =
+      conn_->ExecuteBulkLoadQuery(query_string, access_mode, params_json);
   if (!query_result) {
     return std::make_unique<PyQueryResult>(query_result.error());
   }

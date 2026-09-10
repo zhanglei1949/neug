@@ -153,7 +153,8 @@ Status CheckpointCoordinator::CommitCowWrite(
 
     // Finalize only persistent COPY targets before checkpoint consumption,
     // while ordinary rollback remains safe. Vertex COPY has a timestamp-zero
-    // tail; edge COPY needs compaction only when it has a neighbor sort key.
+    // tail. Edge COPY writes timestamp-zero CSR entries, so it needs compaction
+    // only for a neighbor sort key or pre-existing DML timestamps/tombstones.
     // Keeping the target sets transaction-local avoids compacting unrelated
     // dirty tables inherited by the private COW graph.
     {

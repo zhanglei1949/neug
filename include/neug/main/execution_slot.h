@@ -297,6 +297,13 @@ class ExecutionSlot {
       const rapidjson::Value& parameters, int32_t num_threads,
       TransactionContext& transaction_context);
 
+  result<QueryResult> ExecuteBulkLoadQuery(
+      const std::string& query_string, AccessMode requested_mode,
+      const rapidjson::Value& parameters, int32_t num_threads,
+      TransactionContext& transaction_context);
+
+  Status CommitBulkLoad(TransactionContext& transaction_context);
+
   Status validatePlan(AccessMode mode, const physical::ExecutionFlag& flags,
                       bool is_explain) const;
 

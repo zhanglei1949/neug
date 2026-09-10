@@ -995,6 +995,8 @@ TEST_F(EdgeTableTest, TestEdgeTableCompaction) {
     this->edge_table->AddEdge(src_lids[i], dst_lids[i], edge_data[i], 0,
                               allocator, false);
   }
+  EXPECT_FALSE(this->edge_table->NeedsCompaction(std::nullopt));
+  EXPECT_TRUE(this->edge_table->NeedsCompaction(std::string("data")));
   this->ExpectBundledStats(edge_num);
   auto oe_view = this->edge_table->get_outgoing_view(neug::MAX_TIMESTAMP);
   auto ie_view = this->edge_table->get_incoming_view(neug::MAX_TIMESTAMP);
@@ -1020,8 +1022,10 @@ TEST_F(EdgeTableTest, TestEdgeTableCompaction) {
       delete_count++;
     }
   }
+  EXPECT_TRUE(this->edge_table->NeedsCompaction(std::nullopt));
   this->ExpectBundledStats(edge_num - delete_count);
   this->edge_table->Compact(std::nullopt);
+  EXPECT_FALSE(this->edge_table->NeedsCompaction(std::nullopt));
   this->ExpectBundledStats(edge_num - delete_count);
   size_t edge_count = 0;
   for (size_t i = 0; i < dst_lids.size(); ++i) {

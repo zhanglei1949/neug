@@ -22,12 +22,14 @@
 #include <utility>
 
 #include "neug/transaction/wal/wal.h"
+#include "neug/utils/load_profiler.h"
 
 namespace neug {
 
 CurrentCowWriteTransaction CurrentCowWriteTransaction::Begin(
     CurrentGraphWriteGuard guard, Allocator& alloc,
     GraphSnapshotStore& snapshot_store, IWalWriter& wal_writer) {
+  profiling::ScopedLoadTimer clone_profile("cow.workspace.clone");
   auto& base = guard.Snapshot();
   auto cow_graph = base.graph().Clone();
   return CurrentCowWriteTransaction(

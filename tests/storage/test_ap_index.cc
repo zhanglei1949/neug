@@ -960,10 +960,16 @@ TEST_F(APIndexTest, BatchLoadFinalizesVertexTimestampAndEdgeOrder) {
   EXPECT_EQ(
       graph_->get_vertex_table(item).get_vertex_timestamp().InitVertexNum(), 0);
   EXPECT_EQ(plain_edge_count(0), 1);
+  EXPECT_TRUE(
+      graph_->get_edge_table(item, item, plain).NeedsCompaction(std::nullopt));
+  EXPECT_TRUE(graph_->get_edge_table(item, item, weighted)
+                  .NeedsCompaction(std::string("weight")));
 
   // CommitCowWrite finalizes the recorded COPY targets right before the
   // checkpoint consumes the private graph; drive the same code path here.
   workspace_->FinalizeBulkTablesForCheckpoint();
+  EXPECT_FALSE(
+      graph_->get_edge_table(item, item, plain).NeedsCompaction(std::nullopt));
   expect_finalized();
   CheckpointDirtyAndReopen();
   expect_finalized();

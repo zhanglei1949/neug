@@ -474,6 +474,7 @@ EdgeTable::EdgeTable(EdgeTable&& edge_table)
   table_ = std::move(edge_table.table_);
   table_idx_ = edge_table.table_idx_.load();
   capacity_ = edge_table.capacity_.load();
+  needs_csr_compaction_ = edge_table.needs_csr_compaction_.load();
 }
 
 EdgeTable& EdgeTable::operator=(EdgeTable&& other) noexcept {
@@ -486,6 +487,7 @@ EdgeTable& EdgeTable::operator=(EdgeTable&& other) noexcept {
     table_ = std::move(other.table_);
     table_idx_ = other.table_idx_.load();
     capacity_ = other.capacity_.load();
+    needs_csr_compaction_ = other.needs_csr_compaction_.load();
   }
   return *this;
 }
@@ -503,6 +505,9 @@ void EdgeTable::Swap(EdgeTable& edge_table) {
   auto cap = capacity_.load();
   capacity_.store(edge_table.capacity_.load());
   edge_table.capacity_.store(cap);
+  auto needs_compaction = needs_csr_compaction_.load();
+  needs_csr_compaction_.store(edge_table.needs_csr_compaction_.load());
+  edge_table.needs_csr_compaction_.store(needs_compaction);
 }
 
 EdgeTable EdgeTable::Clone() const {
@@ -520,6 +525,7 @@ EdgeTable EdgeTable::Clone() const {
 
   cow_clone.table_idx_ = table_idx_.load();
   cow_clone.capacity_ = capacity_.load();
+  cow_clone.needs_csr_compaction_ = needs_csr_compaction_.load();
   return cow_clone;
 }
 
@@ -559,12 +565,18 @@ void EdgeTable::SortByEdgeData(timestamp_t ts) {
 
 void EdgeTable::BatchDeleteVertices(const std::set<vid_t>& src_set,
                                     const std::set<vid_t>& dst_set) {
+  if (!src_set.empty() || !dst_set.empty()) {
+    needs_csr_compaction_.store(true);
+  }
   out_csr_->batch_delete_vertices(src_set, dst_set);
   in_csr_->batch_delete_vertices(dst_set, src_set);
 }
 
 void EdgeTable::BatchDeleteEdges(const std::vector<vid_t>& src_list,
                                  const std::vector<vid_t>& dst_list) {
+  if (!src_list.empty()) {
+    needs_csr_compaction_.store(true);
+  }
   out_csr_->batch_delete_edges(src_list, dst_list);
   in_csr_->batch_delete_edges(dst_list, src_list);
 }
@@ -572,12 +584,16 @@ void EdgeTable::BatchDeleteEdges(const std::vector<vid_t>& src_list,
 void EdgeTable::BatchDeleteEdges(
     const std::vector<std::pair<vid_t, int32_t>>& oe_edges,
     const std::vector<std::pair<vid_t, int32_t>>& ie_edges) {
+  if (!oe_edges.empty() || !ie_edges.empty()) {
+    needs_csr_compaction_.store(true);
+  }
   out_csr_->batch_delete_edges(oe_edges);
   in_csr_->batch_delete_edges(ie_edges);
 }
 
 void EdgeTable::DeleteEdge(vid_t src_lid, vid_t dst_lid, int32_t oe_offset,
                            int32_t ie_offset, timestamp_t ts) {
+  needs_csr_compaction_.store(true);
   out_csr_->delete_edge(src_lid, oe_offset, ts);
   in_csr_->delete_edge(dst_lid, ie_offset, ts);
 }
@@ -654,6 +670,9 @@ void EdgeTable::UpdateEdgeProperty(vid_t src_lid, vid_t dst_lid,
                                    int32_t oe_offset, int32_t ie_offset,
                                    int32_t col_id, const Value& prop,
                                    timestamp_t ts) {
+  if (ts != 0) {
+    needs_csr_compaction_.store(true);
+  }
   auto accessor = get_edge_data_accessor(col_id);
   auto oe_edges = out_csr_->get_generic_view(ts).get_edges(src_lid);
   auto oe_iter = oe_edges.begin();
@@ -814,6 +833,9 @@ void EdgeTable::DeleteProperties(Checkpoint& ckp,
 std::pair<int32_t, const void*> EdgeTable::AddEdge(
     vid_t src_lid, vid_t dst_lid, const std::vector<Value>& edge_data,
     timestamp_t ts, Allocator& alloc, bool insert_safe) {
+  if (ts != 0) {
+    needs_csr_compaction_.store(true);
+  }
   return internal::insert_edge_into_csr_internal(
       *out_csr_, *in_csr_, *table_.get(), table_idx_, *meta_, src_lid, dst_lid,
       edge_data, ts, alloc, insert_safe);
@@ -1024,6 +1046,9 @@ void EdgeTable::BatchAddEdges(
 }
 
 void EdgeTable::Compact(const std::optional<std::string>& sort_key_for_nbr) {
+  if (!NeedsCompaction(sort_key_for_nbr)) {
+    return;
+  }
   {
     profiling::ScopedLoadTimer t("edge.compact.csr");
     out_csr_->compact();
@@ -1038,6 +1063,7 @@ void EdgeTable::Compact(const std::optional<std::string>& sort_key_for_nbr) {
     out_csr_->batch_sort_by_edge_data(1);
     in_csr_->batch_sort_by_edge_data(1);
   }
+  needs_csr_compaction_.store(false);
 }
 
 size_t EdgeTable::PropTableSize() const {
@@ -1263,6 +1289,10 @@ EdgeTable EdgeTable::OpenFrom(std::shared_ptr<Checkpoint> ckp,
   et.SetCapacity(
       meta.GetScalarAs<uint64_t>(ScalarKey(src, edge, dst, "capacity"))
           .value_or(0));
+  et.needs_csr_compaction_.store(
+      meta.GetScalarAs<uint64_t>(
+              ScalarKey(src, edge, dst, "needs_csr_compaction"))
+          .value_or(meta.base_timestamp() == 0 ? 0 : 1) != 0);
   return et;
 }
 
@@ -1288,6 +1318,8 @@ void EdgeTable::DisassembleTo(ModuleBroker& store, CheckpointManifest& meta,
   }
   meta.SetScalar(ScalarKey(src, edge, dst, "capacity"),
                  std::to_string(GetCapacity()));
+  meta.SetScalar(ScalarKey(src, edge, dst, "needs_csr_compaction"),
+                 needs_csr_compaction_.load() ? "1" : "0");
 }
 
 void EdgeTable::ReuseCheckpointModules(Checkpoint& ckp,
@@ -1310,6 +1342,7 @@ void EdgeTable::ReuseCheckpointModules(Checkpoint& ckp,
     meta.CopyScalarFrom(prev, ScalarKey(src, edge, dst, "table_idx"));
   }
   meta.CopyScalarFrom(prev, ScalarKey(src, edge, dst, "capacity"));
+  meta.CopyScalarFrom(prev, ScalarKey(src, edge, dst, "needs_csr_compaction"));
 }
 
 }  // namespace neug

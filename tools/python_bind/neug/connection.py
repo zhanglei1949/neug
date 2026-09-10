@@ -34,6 +34,7 @@ except ImportError as e:
         # re-raise the import error if building documentation
         raise e
 
+from neug.bulk_load_session import BulkLoadSession
 from neug.proto.error_pb2 import ERR_CONNECTION_CLOSED
 from neug.proto.error_pb2 import OK
 from neug.proto.error_pb2 import Code
@@ -97,7 +98,8 @@ class Connection(object):
 
     def close(self):
         """
-        Close the connection. An active explicit transaction is rolled back.
+        Close the connection. An active explicit transaction or bulk-load
+        session is rolled back.
         """
         if self._is_open:
             self._py_connection.close()
@@ -132,6 +134,25 @@ class Connection(object):
                 f"Error code: {ERR_CONNECTION_CLOSED}"
             )
         self._py_connection.begin_transaction(read_only)
+
+    @property
+    def has_active_bulk_load(self) -> bool:
+        """Whether this connection owns an unfinished bulk-load session."""
+        return self._is_open and self._py_connection.has_active_bulk_load
+
+    def begin_bulk_load(self) -> BulkLoadSession:
+        """Begin an exclusive session for persistent ``COPY FROM`` queries."""
+        if not self._is_open:
+            raise RuntimeError(
+                "Connection is closed. Please open the connection before "
+                f"beginning a bulk load. Error code: {ERR_CONNECTION_CLOSED}"
+            )
+        self._py_connection.begin_bulk_load()
+        return BulkLoadSession(self)
+
+    def bulk_load(self) -> BulkLoadSession:
+        """Return a context-managed bulk-load session."""
+        return self.begin_bulk_load()
 
     def commit(self):
         """Commit the active explicit transaction.
@@ -223,10 +244,40 @@ class Connection(object):
         query_result : QueryResult
             The result of the query.
         """
+        return self._execute(query, access_mode, parameters, bulk_load=False)
+
+    def _execute_bulk_load(
+        self, query: str, access_mode="", parameters: Optional[Dict[str, Any]] = None
+    ) -> QueryResult:
+        return self._execute(query, access_mode, parameters, bulk_load=True)
+
+    def _commit_bulk_load(self):
         if not self._is_open:
             raise RuntimeError(
-                f"Connection is closed. Please open the connection before executing queries."
-                f"Error code: {ERR_CONNECTION_CLOSED}"
+                "Connection is closed. Please open the connection before "
+                f"committing a bulk load. Error code: {ERR_CONNECTION_CLOSED}"
+            )
+        self._py_connection.commit_bulk_load()
+
+    def _rollback_bulk_load(self):
+        if not self._is_open:
+            raise RuntimeError(
+                "Connection is closed. Please open the connection before "
+                f"rolling back a bulk load. Error code: {ERR_CONNECTION_CLOSED}"
+            )
+        self._py_connection.rollback_bulk_load()
+
+    def _execute(
+        self,
+        query: str,
+        access_mode: str,
+        parameters: Optional[Dict[str, Any]],
+        bulk_load: bool,
+    ) -> QueryResult:
+        if not self._is_open:
+            raise RuntimeError(
+                "Connection is closed. Please open the connection before "
+                f"executing queries. Error code: {ERR_CONNECTION_CLOSED}"
             )
         if access_mode != "" and access_mode.lower() not in [
             "read",
@@ -242,9 +293,12 @@ class Connection(object):
                 f"Invalid access_mode: {access_mode}. Supported access modes are "
                 f"{valid_access_modes}."
             )
-        ret = QueryResult(
-            self._py_connection.execute(query, access_mode, parameters or {})
+        execute = (
+            self._py_connection.execute_bulk_load
+            if bulk_load
+            else self._py_connection.execute
         )
+        ret = QueryResult(execute(query, access_mode, parameters or {}))
         status_code = ret._result.status_code()
         try:
             msg = ret._result.status_message()
