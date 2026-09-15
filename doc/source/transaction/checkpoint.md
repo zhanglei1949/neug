@@ -121,6 +121,16 @@ When `CURRENT` is absent, the first read-write open automatically upgrades the n
 
 The old directories are not changed before the new `CURRENT` is durably published. A crash before publication leaves the legacy checkpoint usable and the next read-write open retries. After the database has opened and recovered successfully, normal garbage collection removes the old `checkpoint-N` and `checkpoint-N.next` directories, making the upgrade one-way. A legacy-only database cannot be opened read-only: open it once in read-write mode to perform the upgrade. Legacy `meta` versions other than v1 are rejected rather than guessed.
 
+### Chunked property column storage
+
+Fixed-length vertex and edge property columns are stored as a chunked column: the column is split into power-of-two row chunks, each sized so its payload reaches a 256 KiB floor. Reads are an O(1) flat index (`chunk = row >> shift`, `slot = row & mask`), and mutation uses chunk-granular copy-on-write, so a sparse update copies one chunk rather than the whole column.
+
+Chunk payloads are packed into immutable objects of up to 64 MiB. Each column persists one self-contained directory object holding an object-path table plus one slice per chunk (object index, byte offset, length, and crc32c). On reopen, each unique object is opened once and every chunk is located at its slice offset; each chunk's crc32c is verified before use.
+
+Because the directory records each chunk's location, an incremental checkpoint re-commits only the chunks written since the last checkpoint and reuses the existing object slices for clean chunks. Repeated bulk loads into the same table therefore write proportionally to the changed chunks, not the whole column. Garbage collection parses chunk directories, so an object referenced only inside a directory (never in a module descriptor's own paths) is retained rather than reclaimed.
+
+Variable-length (`VARCHAR`) and composite (`ARRAY`, `LIST`) properties keep their existing column types, and a checkpoint written before this format reopens with its original `TypedColumn` modules; a legacy typed column is converted to the chunked layout through the `ChunkedColumn::FromLegacy` migration hook.
+
 ## What a checkpoint does
 
 A manual `CHECKPOINT` first takes exclusive checkpoint maintenance control and waits for in-flight work to finish (see [Concurrency](#concurrency)). It preserves the existing full-checkpoint behavior: compact the live graph, destructively dump it, publish a complete manifest, and reopen the graph and allocators. Only dirty graph and index modules need new immutable objects; clean module descriptors may continue to reference existing objects. The manifest and its WAL epoch are made durable before `CURRENT` is atomically replaced.
