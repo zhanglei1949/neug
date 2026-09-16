@@ -427,7 +427,15 @@ std::string DataType::ToString() const {
   }
 }
 
-InArchive& operator<<(InArchive& in_archive, const DataType& type) {
+namespace {
+
+constexpr size_t kMaxDataTypeNestingDepth = 64;
+
+void SerializeDataType(InArchive& in_archive, const DataType& type,
+                       size_t depth) {
+  if (depth >= kMaxDataTypeNestingDepth)
+    THROW_INVALID_ARGUMENT_EXCEPTION("Archive nesting exceeds 64");
+
   auto id = type.id();
   in_archive << id;
   auto type_info = type.getExtraTypeInfo();
@@ -435,17 +443,18 @@ InArchive& operator<<(InArchive& in_archive, const DataType& type) {
     in_archive << (char) 1;
     if (id == DataTypeId::kList) {
       const auto& list_type_info = type_info->Cast<ListTypeInfo>();
-      in_archive << list_type_info.child_type;
+      SerializeDataType(in_archive, list_type_info.child_type, depth + 1);
     } else if (id == DataTypeId::kStruct) {
       const auto& struct_type_info = type_info->Cast<StructTypeInfo>();
       const auto& child_types = struct_type_info.child_types;
       in_archive << (size_t) child_types.size();
       for (const auto& child_type : child_types) {
-        in_archive << child_type;
+        SerializeDataType(in_archive, child_type, depth + 1);
       }
     } else if (id == DataTypeId::kArray) {
       const auto& array_type_info = type_info->Cast<ArrayTypeInfo>();
-      in_archive << array_type_info.child_type << array_type_info.num_elements;
+      SerializeDataType(in_archive, array_type_info.child_type, depth + 1);
+      in_archive << array_type_info.num_elements;
     } else if (id == DataTypeId::kVarchar) {
       const auto& varchar_type_info = type_info->Cast<StringTypeInfo>();
       in_archive << varchar_type_info.max_length;
@@ -456,32 +465,41 @@ InArchive& operator<<(InArchive& in_archive, const DataType& type) {
   } else {
     in_archive << (char) 0;  // indicate no extra type info
   }
-  return in_archive;
 }
 
-OutArchive& operator>>(OutArchive& out_archive, DataType& type) {
+void DeserializeDataType(OutArchive& out_archive, DataType& type,
+                         size_t depth) {
+  if (depth >= kMaxDataTypeNestingDepth)
+    THROW_IO_EXCEPTION("Archive nesting exceeds 64");
+
   DataTypeId id;
   out_archive >> id;
 
   char has_extra_type_info;
   out_archive >> has_extra_type_info;
+  if (has_extra_type_info != 0 && has_extra_type_info != 1)
+    THROW_IO_EXCEPTION("Invalid type information flag");
   if (has_extra_type_info) {
     if (id == DataTypeId::kList) {
       DataType child_type;
-      out_archive >> child_type;
+      DeserializeDataType(out_archive, child_type, depth + 1);
       type = DataType::List(child_type);
     } else if (id == DataTypeId::kStruct) {
       size_t child_types_size;
       out_archive >> child_types_size;
-      std::vector<DataType> child_types(child_types_size);
+      out_archive.RequireCount(child_types_size, sizeof(DataTypeId) + 1);
+      std::vector<DataType> child_types;
       for (size_t i = 0; i < child_types_size; ++i) {
-        out_archive >> child_types[i];
+        DataType child_type;
+        DeserializeDataType(out_archive, child_type, depth + 1);
+        child_types.push_back(std::move(child_type));
       }
       type = DataType::Struct(child_types);
     } else if (id == DataTypeId::kArray) {
       DataType child_type;
       uint64_t array_size;
-      out_archive >> child_type >> array_size;
+      DeserializeDataType(out_archive, child_type, depth + 1);
+      out_archive >> array_size;
       type = DataType::Array(child_type, array_size);
     } else if (id == DataTypeId::kVarchar) {
       size_t max_length;
@@ -492,9 +510,46 @@ OutArchive& operator>>(OutArchive& out_archive, DataType& type) {
           "unsupported data type with extra type info - " + std::to_string(id));
     }
   } else {
+    switch (id) {
+    case DataTypeId::kBoolean:
+    case DataTypeId::kInt8:
+    case DataTypeId::kInt16:
+    case DataTypeId::kInt32:
+    case DataTypeId::kInt64:
+    case DataTypeId::kUInt8:
+    case DataTypeId::kUInt16:
+    case DataTypeId::kUInt32:
+    case DataTypeId::kUInt64:
+    case DataTypeId::kFloat:
+    case DataTypeId::kDouble:
+    case DataTypeId::kDate:
+    case DataTypeId::kTimestampMs:
+    case DataTypeId::kInterval:
+    case DataTypeId::kVarchar:
+    case DataTypeId::kEmpty:
+    case DataTypeId::kNull:
+    case DataTypeId::kUnknown:
+    case DataTypeId::kInternalId:
+    case DataTypeId::kVertex:
+    case DataTypeId::kEdge:
+    case DataTypeId::kPath:
+      break;
+    default:
+      THROW_IO_EXCEPTION("Unknown or incomplete archive DataType");
+    }
     type = DataType(id);
   }
+}
 
+}  // namespace
+
+InArchive& operator<<(InArchive& in_archive, const DataType& type) {
+  SerializeDataType(in_archive, type, 0);
+  return in_archive;
+}
+
+OutArchive& operator>>(OutArchive& out_archive, DataType& type) {
+  DeserializeDataType(out_archive, type, 0);
   return out_archive;
 }
 

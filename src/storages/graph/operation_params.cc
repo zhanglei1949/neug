@@ -41,6 +41,7 @@ CreateVertexTypeParam CreateVertexTypeParam::Deserialize(OutArchive& arc) {
   builder.VertexLabel(vertex_type);
   uint32_t prop_size;
   arc >> prop_size;
+  arc.RequireCount(prop_size);
   for (size_t i = 0; i < prop_size; ++i) {
     DataType type;
     std::string name;
@@ -50,6 +51,7 @@ CreateVertexTypeParam CreateVertexTypeParam::Deserialize(OutArchive& arc) {
   }
   uint32_t key_size;
   arc >> key_size;
+  arc.RequireCount(key_size, sizeof(size_t));
   for (size_t i = 0; i < key_size; ++i) {
     std::string key;
     arc >> key;
@@ -81,6 +83,7 @@ CreateEdgeTypeParam CreateEdgeTypeParam::Deserialize(OutArchive& arc) {
   builder.SrcLabel(src_label).DstLabel(dst_label).EdgeLabel(edge_label);
   uint32_t prop_size;
   arc >> prop_size;
+  arc.RequireCount(prop_size);
   for (size_t i = 0; i < prop_size; ++i) {
     DataType type;
     std::string name;
@@ -90,9 +93,18 @@ CreateEdgeTypeParam CreateEdgeTypeParam::Deserialize(OutArchive& arc) {
   }
   EdgeStrategy oe_edge_strategy, ie_edge_strategy;
   arc >> oe_edge_strategy >> ie_edge_strategy;
+  auto valid_strategy = [](EdgeStrategy strategy) {
+    return strategy == EdgeStrategy::kNone ||
+           strategy == EdgeStrategy::kSingle ||
+           strategy == EdgeStrategy::kMultiple;
+  };
+  if (!valid_strategy(oe_edge_strategy) || !valid_strategy(ie_edge_strategy))
+    THROW_IO_EXCEPTION("Invalid edge strategy in WAL payload");
   builder.OEEdgeStrategy(oe_edge_strategy).IEEdgeStrategy(ie_edge_strategy);
   uint8_t has_sort_key;
   arc >> has_sort_key;
+  if (has_sort_key > 1)
+    THROW_IO_EXCEPTION("Invalid sort key flag");
   if (has_sort_key) {
     std::string sort_key;
     arc >> sort_key;
@@ -113,6 +125,7 @@ AddVertexPropertiesParam AddVertexPropertiesParam::Deserialize(
   AddVertexPropertiesParamBuilder builder;
   uint32_t prop_size;
   arc >> prop_size;
+  arc.RequireCount(prop_size);
   for (size_t i = 0; i < prop_size; ++i) {
     DataType type;
     std::string name;
@@ -134,6 +147,7 @@ AddEdgePropertiesParam AddEdgePropertiesParam::Deserialize(OutArchive& arc) {
   AddEdgePropertiesParamBuilder builder;
   uint32_t prop_size;
   arc >> prop_size;
+  arc.RequireCount(prop_size);
   for (size_t i = 0; i < prop_size; ++i) {
     DataType type;
     std::string name;
@@ -156,6 +170,7 @@ RenameVertexPropertiesParam RenameVertexPropertiesParam::Deserialize(
   RenameVertexPropertiesParamBuilder builder;
   uint32_t prop_size;
   arc >> prop_size;
+  arc.RequireCount(prop_size);
   for (size_t i = 0; i < prop_size; ++i) {
     std::string old_name;
     std::string new_name;
@@ -177,6 +192,7 @@ RenameEdgePropertiesParam RenameEdgePropertiesParam::Deserialize(
   RenameEdgePropertiesParamBuilder builder;
   uint32_t prop_size;
   arc >> prop_size;
+  arc.RequireCount(prop_size);
   for (size_t i = 0; i < prop_size; ++i) {
     std::string old_name;
     std::string new_name;
@@ -198,6 +214,7 @@ DeleteVertexPropertiesParam DeleteVertexPropertiesParam::Deserialize(
   DeleteVertexPropertiesParamBuilder builder;
   uint32_t prop_size;
   arc >> prop_size;
+  arc.RequireCount(prop_size);
   for (size_t i = 0; i < prop_size; ++i) {
     std::string prop_name;
     arc >> prop_name;
@@ -218,6 +235,7 @@ DeleteEdgePropertiesParam DeleteEdgePropertiesParam::Deserialize(
   DeleteEdgePropertiesParamBuilder builder;
   uint32_t prop_size;
   arc >> prop_size;
+  arc.RequireCount(prop_size);
   for (size_t i = 0; i < prop_size; ++i) {
     std::string prop_name;
     arc >> prop_name;

@@ -86,7 +86,8 @@ Status SnapshotCowWriteTransaction::PrepareCommit() {
     Abort();
     return prepared_result.error();
   }
-  logical_redo.finalize(timestamp());
+  ValidateWalFrameArguments(timestamp(), WalRecordKind::kCowRedo,
+                            logical_redo.data(), logical_redo.size());
   prepared_snapshot_.emplace(std::move(prepared_result).value());
   return Status::OK();
 }
@@ -102,26 +103,19 @@ bool SnapshotCowWriteTransaction::CommitPrepared() {
   }
 
   auto& logical_redo = workspace_.logical_redo();
-  // append() does not distinguish a pre-write failure from a partial append.
-  // Until W1 framing makes recovery able to discard incomplete records, do not
-  // report a normal rollback after starting the durability boundary.
+  // Once append begins, a failure has an uncertain durable outcome.
   try {
-    if (!wal_writer_.append(logical_redo.data(), logical_redo.size())) {
-      LOG(FATAL) << "TP WAL append failed after commit append began; "
-                    "terminating before snapshot publication";
-    }
+    if (!wal_writer_.append_frame(timestamp(), WalRecordKind::kCowRedo,
+                                  logical_redo.data(), logical_redo.size()))
+      LOG(FATAL) << "TP WAL append failed";
+    timestamp_lease_.BeginCommit();
+    const uint32_t snapshot_generation =
+        std::move(*prepared_snapshot_).Publish();
+    prepared_snapshot_.reset();
+    release(snapshot_generation);
   } catch (const std::exception& e) {
-    LOG(FATAL) << "TP WAL append failed after commit append began: " << e.what()
-               << "; terminating before snapshot publication";
-  } catch (...) {
-    LOG(FATAL) << "TP WAL append failed after commit append began; "
-                  "terminating before snapshot publication";
-  }
-
-  timestamp_lease_.BeginCommit();
-  const uint32_t snapshot_generation = std::move(*prepared_snapshot_).Publish();
-  prepared_snapshot_.reset();
-  release(snapshot_generation);
+    LOG(FATAL) << "TP commit failed after WAL append began: " << e.what();
+  } catch (...) { LOG(FATAL) << "TP commit failed after WAL append began"; }
   return true;
 }
 

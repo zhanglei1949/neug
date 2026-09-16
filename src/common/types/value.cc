@@ -962,7 +962,14 @@ Value performCastToString(const Value& input) {
   return Value::STRING(ret);
 }
 
-InArchive& operator<<(InArchive& in_archive, const Value& value) {
+namespace {
+
+constexpr size_t kMaxValueNestingDepth = 64;
+
+void SerializeValue(InArchive& in_archive, const Value& value, size_t depth) {
+  if (depth >= kMaxValueNestingDepth)
+    THROW_INVALID_ARGUMENT_EXCEPTION("Archive nesting exceeds 64");
+
   auto type_id = value.type().id();
   if (value.IsNull()) {
     in_archive << DataTypeId::kEmpty;
@@ -997,17 +1004,19 @@ InArchive& operator<<(InArchive& in_archive, const Value& value) {
                                : ArrayValue::GetChildren(value);
     in_archive << static_cast<uint32_t>(children.size());
     for (const auto& child : children) {
-      in_archive << child;
+      SerializeValue(in_archive, child, depth + 1);
     }
   } else {
     THROW_NOT_SUPPORTED_EXCEPTION(
         std::string("Value serialization not supported for type: ") +
         std::to_string(static_cast<int>(type_id)));
   }
-  return in_archive;
 }
 
-OutArchive& operator>>(OutArchive& out_archive, Value& value) {
+void DeserializeValue(OutArchive& out_archive, Value& value, size_t depth) {
+  if (depth >= kMaxValueNestingDepth)
+    THROW_IO_EXCEPTION("Archive nesting exceeds 64");
+
   DataTypeId type_id;
   out_archive >> type_id;
   if (type_id == DataTypeId::kEmpty) {
@@ -1063,12 +1072,24 @@ OutArchive& operator>>(OutArchive& out_archive, Value& value) {
     out_archive >> dt;
     uint32_t num_children;
     out_archive >> num_children;
+    if (dt.id() != type_id)
+      THROW_IO_EXCEPTION("Nested value/type mismatch");
+    if (type_id == DataTypeId::kArray &&
+        ArrayType::GetNumElements(dt) != num_children)
+      THROW_IO_EXCEPTION("ARRAY child count mismatch");
     std::vector<Value> children;
-    children.reserve(num_children);
+    out_archive.RequireCount(num_children, sizeof(DataTypeId));
     for (uint32_t i = 0; i < num_children; ++i) {
       Value child;
-      out_archive >> child;
+      DeserializeValue(out_archive, child, depth + 1);
       children.push_back(std::move(child));
+    }
+    const auto& child_type = type_id == DataTypeId::kList
+                                 ? ListType::GetChildType(dt)
+                                 : ArrayType::GetChildType(dt);
+    for (const auto& child : children) {
+      if (!child.IsNull() && child.type() != child_type)
+        THROW_IO_EXCEPTION("Nested value child type mismatch");
     }
     if (type_id == DataTypeId::kList) {
       value = Value::LIST(ListType::GetChildType(dt), std::move(children));
@@ -1080,6 +1101,17 @@ OutArchive& operator>>(OutArchive& out_archive, Value& value) {
         std::string("Value deserialization not supported for type: ") +
         std::to_string(static_cast<int>(type_id)));
   }
+}
+
+}  // namespace
+
+InArchive& operator<<(InArchive& in_archive, const Value& value) {
+  SerializeValue(in_archive, value, 0);
+  return in_archive;
+}
+
+OutArchive& operator>>(OutArchive& out_archive, Value& value) {
+  DeserializeValue(out_archive, value, 0);
   return out_archive;
 }
 

@@ -134,7 +134,8 @@ void CheckpointManifest::Load(const std::string& file_path) {
         "CheckpointManifest::Load: missing or non-integer 'v' in " + file_path);
   }
   int file_version = doc["v"].GetInt();
-  if (file_version != kFormatVersion) {
+  format_version_ = file_version;
+  if (file_version != 2 && file_version != kFormatVersion) {
     THROW_NOT_SUPPORTED_EXCEPTION(
         "CheckpointManifest::Load: incompatible manifest version " +
         std::to_string(file_version) + " (expected " +

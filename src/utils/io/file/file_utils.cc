@@ -19,6 +19,7 @@
 
 #include <fcntl.h>
 #include <atomic>
+#include <cerrno>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -743,7 +744,11 @@ bool fsync_directory(const std::string& dir_path) {
   if (dir_fd < 0) {
     return false;
   }
-  bool ok = (::fsync(dir_fd) == 0);
+  int sync_result;
+  do {
+    sync_result = ::fsync(dir_fd);
+  } while (sync_result != 0 && errno == EINTR);
+  bool ok = sync_result == 0;
   ::close(dir_fd);
   return ok;
 #endif

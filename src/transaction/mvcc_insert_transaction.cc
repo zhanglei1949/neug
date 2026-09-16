@@ -43,9 +43,7 @@ MvccInsertTransaction::MvccInsertTransaction(SnapshotGuard guard,
       alloc_(alloc),
       wal_writer_(wal_writer),
       vm_(vm),
-      timestamp_(timestamp) {
-  arc_.Resize(sizeof(WalHeader));
-}
+      timestamp_(timestamp) {}
 
 MvccInsertTransaction::~MvccInsertTransaction() { Abort(); }
 
@@ -161,32 +159,30 @@ bool MvccInsertTransaction::Commit() {
   if (timestamp_ == INVALID_TIMESTAMP) {
     return true;
   }
-  if (arc_.GetSize() == sizeof(WalHeader)) {
+  if (arc_.Empty()) {
     view_ = nullptr;
     guard_.release();
     vm_.release_insert_timestamp(timestamp_);
     clear();
     return true;
   }
-  auto* header = reinterpret_cast<WalHeader*>(arc_.GetBuffer());
-  header->length = arc_.GetSize() - sizeof(WalHeader);
-  header->type = 0;
-  header->timestamp = timestamp_;
-
-  if (!wal_writer_.append(arc_.GetBuffer(), arc_.GetSize())) {
-    LOG(ERROR) << "Failed to append wal log";
-    Abort();
-    return false;
+  ValidateWalFrameArguments(timestamp_, WalRecordKind::kInsert,
+                            arc_.GetBuffer(), arc_.GetSize());
+  try {
+    if (!wal_writer_.append_frame(timestamp_, WalRecordKind::kInsert,
+                                  arc_.GetBuffer(), arc_.GetSize()))
+      LOG(FATAL) << "MVCC insert WAL append failed";
+    IngestWal(*view_, timestamp_, arc_.GetBuffer(), arc_.GetSize(), alloc_);
+    view_ = nullptr;
+    guard_.release();
+    vm_.release_insert_timestamp(timestamp_);
+    clear();
+  } catch (const std::exception& e) {
+    LOG(FATAL) << "MVCC insert commit failed after WAL append began: "
+               << e.what();
+  } catch (...) {
+    LOG(FATAL) << "MVCC insert commit failed after WAL append began";
   }
-  // Apply WAL operations through the writable view. Capacity is assumed
-  // to be sufficient; the strict insert path will throw if exhausted.
-  IngestWal(*view_, timestamp_, arc_.GetBuffer() + sizeof(WalHeader),
-            header->length, alloc_);
-
-  view_ = nullptr;
-  guard_.release();
-  vm_.release_insert_timestamp(timestamp_);
-  clear();
   return true;
 }
 
@@ -203,7 +199,7 @@ void MvccInsertTransaction::Abort() {
 timestamp_t MvccInsertTransaction::timestamp() const { return timestamp_; }
 
 void MvccInsertTransaction::IngestWal(GraphView& view, uint32_t timestamp,
-                                      char* data, size_t length,
+                                      const char* data, size_t length,
                                       Allocator& alloc) {
   OutArchive arc;
   arc.SetSlice(data, length);
@@ -232,8 +228,10 @@ void MvccInsertTransaction::IngestWal(GraphView& view, uint32_t timestamp,
       const auto& dst = redo.dst;
       const auto& properties = redo.properties;
       vid_t src_lid, dst_lid;
-      CHECK(view.get_lid(src_label, src, src_lid, timestamp));
-      CHECK(view.get_lid(dst_label, dst, dst_lid, timestamp));
+      if (!(view.get_lid(src_label, src, src_lid, timestamp)))
+        THROW_IO_EXCEPTION("Missing vertex during WAL replay");
+      if (!(view.get_lid(dst_label, dst, dst_lid, timestamp)))
+        THROW_IO_EXCEPTION("Missing vertex during WAL replay");
       int32_t oe_offset_unused = 0;
       const void* prop_unused = nullptr;
       auto ret = view.AddEdge(src_label, src_lid, dst_label, dst_lid,

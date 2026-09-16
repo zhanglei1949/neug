@@ -322,8 +322,9 @@ TEST_F(CopyTempTest, CleanupOnClose) {
     conn->Close();
   }
   EXPECT_EQ(db_->graph().checkpoint().id(), initial_checkpoint_id);
-  LocalWalParser parser(db_->graph().checkpoint().wal_dir());
-  EXPECT_TRUE(parser.get_update_wals().empty());
+  LocalWalParser parser(db_->graph().checkpoint().wal_dir(),
+                        db_->graph().checkpoint().id());
+  EXPECT_TRUE(parser.replay_units().empty());
   {
     db_->Close();
     db_.reset();
@@ -419,8 +420,9 @@ TEST_F(CopyTempTest, TempMutationsDoNotDestabilizePersistentWalReplay) {
     ASSERT_TRUE(insert) << insert.error().ToString();
     auto update = conn->Query("MATCH (n:TempFirst {id: 1}) SET n.age = 31;");
     ASSERT_TRUE(update) << update.error().ToString();
-    LocalWalParser parser(db_->graph().checkpoint().wal_dir());
-    EXPECT_TRUE(parser.get_update_wals().empty())
+    LocalWalParser parser(db_->graph().checkpoint().wal_dir(),
+                          db_->graph().checkpoint().id());
+    EXPECT_TRUE(parser.replay_units().empty())
         << "temporary mutations must not enter durable WAL";
 
     auto create = conn->Query(

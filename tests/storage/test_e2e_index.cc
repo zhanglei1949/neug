@@ -246,11 +246,12 @@ TEST(E2EIndexReopenSubprocess, PreparePendingMutationWal) {
   wal.LogInsertVertex("Entity", Value::INT64(2),
                       {Value::ARRAY(DataType::Array(DataType::FLOAT, 2),
                                     {Value::FLOAT(3.0f), Value::FLOAT(4.0f)})});
-  wal.finalize(1);
   auto wal_writer =
       WalWriterFactory::CreateWalWriter(db.graph().checkpoint().wal_dir(), 0);
-  wal_writer->open(db.graph().checkpoint().wal_dir());
-  ASSERT_TRUE(wal_writer->append(wal.data(), wal.size()));
+  wal_writer->open(db.graph().checkpoint().wal_dir(),
+                   db.graph().checkpoint().id());
+  ASSERT_TRUE(wal_writer->append_frame(1, WalRecordKind::kCowRedo, wal.data(),
+                                       wal.size()));
 
   _exit(0);
 }

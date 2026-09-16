@@ -53,11 +53,14 @@ namespace {
 class CapturingWalWriter : public IWalWriter {
  public:
   std::string type() const override { return "capturing"; }
-  void open(const std::string&) override {}
+  void open(const std::string&, uint64_t) override {}
   void close() override {}
 
-  bool append(const char* data, size_t length) override {
-    records.emplace_back(data, data + length);
+  bool append_frame(uint32_t timestamp, WalRecordKind kind, const char* data,
+                    size_t length) override {
+    const auto encoded = EncodeWalFrameHeader(timestamp, kind, data, length);
+    records.emplace_back(encoded.begin(), encoded.end());
+    records.back().insert(records.back().end(), data, data + length);
     return true;
   }
 
@@ -433,11 +436,13 @@ TEST_F(TPIndexTest, CreateAndDropIndexCommitThroughCowTransaction) {
   ASSERT_EQ(wal_writer_.records.size(), 2);
 
   for (const auto& wal : wal_writer_.records) {
-    ASSERT_GT(wal.size(), sizeof(WalHeader));
-    const auto* header = reinterpret_cast<const WalHeader*>(wal.data());
+    ASSERT_GT(wal.size(), kWalFrameHeaderSize);
+    const auto decoded = DecodeWalFrameHeader(
+        reinterpret_cast<const uint8_t*>(wal.data()), wal.size());
+    const auto* header = &decoded;
     ReplayCowGraphWal(*replay_graph, header->timestamp,
-                      const_cast<char*>(wal.data() + sizeof(WalHeader)),
-                      header->length, allocator_);
+                      const_cast<char*>(wal.data() + kWalFrameHeaderSize),
+                      header->payload_length, allocator_);
   }
   EXPECT_FALSE(replay_graph->index_manager().GetIndexByName("idx_person_age"));
 }
@@ -504,11 +509,13 @@ TEST_F(TPIndexTest, WalReplayRestoresCreateDropAndActivateIndexOperations) {
   ASSERT_EQ(wal_writer_.records.size(), 2);
 
   for (const auto& wal : wal_writer_.records) {
-    ASSERT_GT(wal.size(), sizeof(WalHeader));
-    const auto* header = reinterpret_cast<const WalHeader*>(wal.data());
+    ASSERT_GT(wal.size(), kWalFrameHeaderSize);
+    const auto decoded = DecodeWalFrameHeader(
+        reinterpret_cast<const uint8_t*>(wal.data()), wal.size());
+    const auto* header = &decoded;
     ReplayCowGraphWal(*replay_graph, header->timestamp,
-                      const_cast<char*>(wal.data() + sizeof(WalHeader)),
-                      header->length, allocator_);
+                      const_cast<char*>(wal.data() + kWalFrameHeaderSize),
+                      header->payload_length, allocator_);
   }
   EXPECT_FALSE(replay_graph->index_manager().GetIndexByName("idx_person_age"));
 }
@@ -889,10 +896,12 @@ TEST_F(TPIndexTest, WalReplayRestoresIndexData) {
   }
   ASSERT_EQ(wal_writer_.records.size(), 1);
   const auto& wal = wal_writer_.records.back();
-  ASSERT_GT(wal.size(), sizeof(WalHeader));
-  const auto* header = reinterpret_cast<const WalHeader*>(wal.data());
-  ASSERT_EQ(static_cast<size_t>(header->length),
-            wal.size() - sizeof(WalHeader));
+  ASSERT_GT(wal.size(), kWalFrameHeaderSize);
+  const auto decoded = DecodeWalFrameHeader(
+      reinterpret_cast<const uint8_t*>(wal.data()), wal.size());
+  const auto* header = &decoded;
+  ASSERT_EQ(static_cast<size_t>(header->payload_length),
+            wal.size() - kWalFrameHeaderSize);
 
   {
     GraphView before_replay_view(*replay_graph);
@@ -905,8 +914,8 @@ TEST_F(TPIndexTest, WalReplayRestoresIndexData) {
   }
 
   ReplayCowGraphWal(*replay_graph, header->timestamp,
-                    const_cast<char*>(wal.data() + sizeof(WalHeader)),
-                    header->length, allocator_);
+                    const_cast<char*>(wal.data() + kWalFrameHeaderSize),
+                    header->payload_length, allocator_);
   GraphView replay_view(*replay_graph);
   StorageReadInterface replay_reader(replay_view, header->timestamp);
 

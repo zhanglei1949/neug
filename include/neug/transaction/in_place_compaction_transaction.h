@@ -42,8 +42,6 @@ class InPlaceCompactionTransaction {
   IWalWriter& wal_writer_;
   IVersionManager& vm_;
   timestamp_t timestamp_;
-
-  InArchive arc_;
 };
 
 }  // namespace neug

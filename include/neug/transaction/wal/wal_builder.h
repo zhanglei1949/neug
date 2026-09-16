@@ -29,6 +29,7 @@ namespace neug {
 
 /// Accumulates WAL operations for a single update transaction.
 ///
+/// Framing, checksums and synchronization belong to IWalWriter.
 /// Each LogXxx method serializes the corresponding redo entry into an internal
 /// buffer and increments the operation count. DDL Log methods additionally set
 /// schema_changed_ = true.
@@ -94,13 +95,10 @@ class WalBuilder {
   int op_num() const { return op_num_; }
   bool schema_changed() const { return schema_changed_; }
 
-  /// Size of the WAL content excluding its header.
-  size_t content_size() const { return arc_.GetSize() - sizeof(WalHeader); }
+  /// Size of the redo payload.
+  size_t content_size() const { return arc_.GetSize(); }
 
-  /// Finalize the WAL header. Call only when op_num() > 0.
-  void finalize(timestamp_t timestamp);
-
-  /// Full buffer (header + content) after finalize().
+  /// Redo payload, without framing metadata.
   char* data() { return arc_.GetBuffer(); }
   size_t size() const { return arc_.GetSize(); }
 

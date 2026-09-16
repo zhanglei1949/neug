@@ -14,11 +14,15 @@ limitations under the License.
 */
 #pragma once
 
+#include <cstring>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <tuple>
 #include <type_traits>
+#include <utility>
 #include <vector>
+#include "neug/utils/exception/exception.h"
 
 #include "neug/utils/property/types.h"
 
@@ -67,7 +71,9 @@ class OutArchive {
   inline void SetSlice(char* buffer, size_t size) {
     buffer_.clear();
     begin_ = buffer;
-    end_ = begin_ + size;
+    if (!buffer && size)
+      THROW_INVALID_ARGUMENT_EXCEPTION("Null archive slice");
+    end_ = size ? begin_ + size : begin_;
   }
 
   inline void SetSlice(const char* buffer, size_t size) {
@@ -78,13 +84,17 @@ class OutArchive {
 
   inline const char* GetBuffer() const { return begin_; }
 
-  inline size_t GetSize() const { return end_ - begin_; }
+  inline size_t GetSize() const {
+    return begin_ ? static_cast<size_t>(end_ - begin_) : 0;
+  }
 
   inline bool Empty() const { return begin_ == end_; }
 
   inline void* GetBytes(size_t size) {
+    RequireBytes(size);
     char* ret = begin_;
-    begin_ += size;
+    if (size)
+      begin_ += size;
     return ret;
   }
 
@@ -93,6 +103,15 @@ class OutArchive {
     char* old_begin = begin_;
     *this >> value;
     begin_ = old_begin;
+  }
+
+  void RequireBytes(size_t size) const {
+    if (size > GetSize())
+      THROW_IO_EXCEPTION("Truncated archive payload");
+  }
+  void RequireCount(size_t count, size_t minimum_bytes = 1) const {
+    if (minimum_bytes == 0 || count > GetSize() / minimum_bytes)
+      THROW_IO_EXCEPTION("Invalid archive container count");
   }
 
  private:
@@ -104,7 +123,15 @@ class OutArchive {
 template <typename T,
           typename std::enable_if<std::is_pod<T>::value, T>::type* = nullptr>
 inline OutArchive& operator>>(OutArchive& out_archive, T& u) {
-  u = *reinterpret_cast<T*>(out_archive.GetBytes(sizeof(T)));
+  if constexpr (std::is_same_v<T, bool>) {
+    unsigned char byte;
+    std::memcpy(&byte, out_archive.GetBytes(1), 1);
+    if (byte > 1)
+      THROW_IO_EXCEPTION("Invalid archive boolean");
+    u = byte != 0;
+  } else {
+    std::memcpy(&u, out_archive.GetBytes(sizeof(T)), sizeof(T));
+  }
   return out_archive;
 }
 
@@ -115,8 +142,10 @@ inline OutArchive& operator>>(OutArchive& out_archive, EmptyType&) {
 inline OutArchive& operator>>(OutArchive& out_archive, std::string& s) {
   size_t size;
   out_archive >> size;
+  out_archive.RequireBytes(size);
   s.resize(size);
-  memcpy(&s[0], out_archive.GetBytes(size), size);
+  if (size)
+    memcpy(s.data(), out_archive.GetBytes(size), size);
   return out_archive;
 }
 
@@ -133,12 +162,14 @@ template <typename T,
 inline OutArchive& operator>>(OutArchive& out_archive, std::vector<T>& vec) {
   size_t size;
   out_archive >> size;
+  out_archive.RequireCount(size, sizeof(T));
   vec.resize(size);
   if (size > 0) {
     if constexpr (std::is_same_v<T, bool>) {
       // Special handling for vector<bool>
       for (size_t i = 0; i < size; ++i) {
-        bool val = *reinterpret_cast<bool*>(out_archive.GetBytes(sizeof(bool)));
+        bool val;
+        out_archive >> val;
         vec[i] = val;
       }
       return out_archive;
@@ -154,10 +185,17 @@ template <typename T,
 inline OutArchive& operator>>(OutArchive& out_archive, std::vector<T>& vec) {
   size_t size;
   out_archive >> size;
-  vec.resize(size);
+  out_archive.RequireCount(size);
+  // Variable-size elements can be much larger in memory than their shortest
+  // serialized form. Decode incrementally so a malformed count cannot reserve
+  // the whole container before its first element is checked.
+  std::vector<T> decoded;
   for (size_t i = 0; i < size; ++i) {
-    out_archive >> vec[i];
+    T value;
+    out_archive >> value;
+    decoded.push_back(std::move(value));
   }
+  vec = std::move(decoded);
   return out_archive;
 }
 

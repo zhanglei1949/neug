@@ -32,9 +32,7 @@ InPlaceCompactionTransaction::InPlaceCompactionTransaction(
     : guard_(snapshot_store),
       wal_writer_(wal_writer),
       vm_(vm),
-      timestamp_(timestamp) {
-  arc_.Resize(sizeof(WalHeader));
-}
+      timestamp_(timestamp) {}
 
 InPlaceCompactionTransaction::~InPlaceCompactionTransaction() { Abort(); }
 
@@ -44,31 +42,23 @@ timestamp_t InPlaceCompactionTransaction::timestamp() const {
 
 bool InPlaceCompactionTransaction::Commit() {
   if (timestamp_ != INVALID_TIMESTAMP) {
-    auto* header = reinterpret_cast<WalHeader*>(arc_.GetBuffer());
-    header->length = 0;
-    header->timestamp = timestamp_;
-    header->type = 1;
-
-    if (!wal_writer_.append(arc_.GetBuffer(), arc_.GetSize())) {
-      LOG(ERROR) << "Failed to append wal log";
-      Abort();
-      return false;
-    }
-    arc_.Clear();
-
-    LOG(INFO) << "before compact - " << timestamp_;
-    {
-      // In-place compact. Keep borrowed snapshot references scoped before the
-      // timestamp is released.
+    ValidateWalFrameArguments(timestamp_, WalRecordKind::kCompact, nullptr, 0);
+    try {
+      if (!wal_writer_.append_frame(timestamp_, WalRecordKind::kCompact,
+                                    nullptr, 0))
+        LOG(FATAL) << "Compact WAL append failed";
       auto& slot = guard_.get();
       slot.mutable_graph()->Compact();
       slot.mutable_view().Rebuild(*slot.mutable_graph());
+      guard_.release();
+      vm_.release_compact_timestamp(timestamp_);
+      timestamp_ = INVALID_TIMESTAMP;
+    } catch (const std::exception& e) {
+      LOG(FATAL) << "Compact commit failed after WAL append began: "
+                 << e.what();
+    } catch (...) {
+      LOG(FATAL) << "Compact commit failed after WAL append began";
     }
-    LOG(INFO) << "after compact - " << timestamp_;
-
-    guard_.release();
-    vm_.release_compact_timestamp(timestamp_);
-    timestamp_ = INVALID_TIMESTAMP;
   }
   guard_.release();
   return true;
@@ -76,7 +66,6 @@ bool InPlaceCompactionTransaction::Commit() {
 
 void InPlaceCompactionTransaction::Abort() {
   if (timestamp_ != INVALID_TIMESTAMP) {
-    arc_.Clear();
     guard_.release();
     vm_.revert_compact_timestamp(timestamp_);
     timestamp_ = INVALID_TIMESTAMP;

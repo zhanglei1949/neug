@@ -14,163 +14,156 @@
  */
 
 #include "neug/transaction/wal/local_wal_writer.h"
-
-#include "neug/utils/exception/exception.h"
-
-#include <errno.h>
 #include <fcntl.h>
 #include <glog/logging.h>
-#include <string.h>
+#include <algorithm>
+#include <cerrno>
+#include <cstring>
+#include <filesystem>
+#include <limits>
 #ifdef _WIN32
 #include <io.h>
+#include <sys/stat.h>
 #else
 #include <unistd.h>
 #endif
-#include <exception>
-#include <filesystem>
-#include <ostream>
-
-#include "neug/transaction/wal/wal.h"
-#include "neug/utils/likely.h"
-
+#include "neug/utils/exception/exception.h"
+#include "neug/utils/io/file/file_utils.h"
 namespace neug {
-
-std::unique_ptr<IWalWriter> LocalWalWriter::Make(const std::string& wal_uri,
-                                                 int slot_id) {
-  return std::unique_ptr<IWalWriter>(new LocalWalWriter(wal_uri, slot_id));
+std::unique_ptr<IWalWriter> LocalWalWriter::Make(const std::string& uri,
+                                                 int slot) {
+  return std::make_unique<LocalWalWriter>(uri, slot);
 }
-
 LocalWalWriter::~LocalWalWriter() noexcept {
   try {
     close();
-  } catch (const std::exception& e) {
-    LOG(ERROR) << "Failed to close WAL writer during destruction: " << e.what();
-  } catch (...) {
-    LOG(ERROR) << "Failed to close WAL writer during destruction.";
-  }
+  } catch (const std::exception& e) { LOG(ERROR) << e.what(); }
 }
-
-void LocalWalWriter::open(const std::string& wal_uri) {
+void LocalWalWriter::open(const std::string& uri, uint64_t id) {
   close();
-  wal_uri_ = wal_uri;
-  auto prefix = get_wal_uri_path(wal_uri_);
-  if (!std::filesystem::exists(prefix)) {
-    std::filesystem::create_directories(prefix);
-  }
-  const int max_version = 65536;
-  for (int version = 0; version != max_version; ++version) {
-    // Keep the historical on-disk prefix for WAL replay compatibility. The
-    // numeric component now identifies a logical execution slot, not a
-    // physical pthread.
-    std::string path = prefix + "/thread_" + std::to_string(slot_id_) + "_" +
-                       std::to_string(version) + ".wal";
-    if (std::filesystem::exists(path)) {
-      continue;
-    }
-#ifdef _WIN32
-    fd_ = _open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC, _S_IREAD | _S_IWRITE);
-#else
-    fd_ = ::open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
-#endif
-    break;
-  }
-  if (fd_ == -1) {
-    THROW_IO_EXCEPTION("Failed to open wal file " +
-                       std::string(strerror(errno)));
-  }
-#ifdef _WIN32
-  const errno_t trunc_err = _chsize_s(fd_, TRUNC_SIZE);
-  if (trunc_err != 0) {
-    errno = static_cast<int>(trunc_err);
-#else
-  if (ftruncate(fd_, TRUNC_SIZE) != 0) {
-#endif
-    THROW_IO_EXCEPTION("Failed to truncate wal file " +
-                       std::string(strerror(errno)));
-  }
-  file_size_ = TRUNC_SIZE;
-  file_used_ = 0;
+  wal_uri_ = uri;
+  checkpoint_id_ = id;
+  opened_ = true;
 }
-
 void LocalWalWriter::close() {
+  opened_ = false;
+  durable_offset_ = 0;
+  directory_syncs_.clear();
+  path_.clear();
   if (fd_ != -1) {
-    // Retire the descriptor before calling close(). Retrying close() after an
-    // error is unsafe because the descriptor may already have been released
-    // and reused by another thread.
     const int fd = fd_;
     fd_ = -1;
-    file_size_ = 0;
-    file_used_ = 0;
 #ifdef _WIN32
-    if (_close(fd) != 0) {
+    if (::_close(fd) != 0)
 #else
-    if (::close(fd) != 0) {
+    if (::close(fd) != 0)
 #endif
-      THROW_IO_EXCEPTION("Failed to close file" + std::string(strerror(errno)));
-    }
-  }
-}
-
-bool LocalWalWriter::append(const char* data, size_t length) {
-  if (NEUG_UNLIKELY(fd_ == -1)) {
-    return false;
-  }
-  size_t expected_size = file_used_ + length;
-  if (expected_size > file_size_) {
-    size_t new_file_size = (expected_size / TRUNC_SIZE + 1) * TRUNC_SIZE;
-#ifdef _WIN32
-    const errno_t resize_err = _chsize_s(fd_, new_file_size);
-    if (resize_err != 0) {
-      errno = static_cast<int>(resize_err);
-#else
-    if (ftruncate(fd_, new_file_size) != 0) {
-#endif
-      THROW_IO_EXCEPTION("Failed to truncate wal file " +
+      THROW_IO_EXCEPTION("Failed to close WAL: " +
                          std::string(strerror(errno)));
-    }
-    file_size_ = new_file_size;
   }
-
-  file_used_ += length;
-
-#ifdef _WIN32
-  if (static_cast<size_t>(_write(fd_, data, length)) != length) {
-#else
-  if (static_cast<size_t>(write(fd_, data, length)) != length) {
-#endif
-    THROW_IO_EXCEPTION("Failed to write wal file " +
-                       std::string(strerror(errno)));
-  }
-
-#if 1
-#ifdef _WIN32
-  if (_commit(fd_) != 0) {
-    THROW_IO_EXCEPTION("Failed to fsync wal file " +
-                       std::string(strerror(errno)));
-  }
-#elif defined(F_FULLFSYNC)
-  if (fcntl(fd_, F_FULLFSYNC) != 0) {
-#ifdef __APPLE__
-    THROW_IO_EXCEPTION("Failed to fcntl sync wal file " +
-                       std::string(strerror(errno)));
-#else
-    THROW_IO_EXCEPTION("Failed to fcntl sync wal file " +
-                       std::string(strerror(errno)));
-#endif
-  }
-#else
-  // if (fsync(fd_) != 0) {
-  if (fdatasync(fd_) != 0) {
-    THROW_IO_EXCEPTION("Failed to fsync wal file " +
-                       std::string(strerror(errno)));
-  }
-#endif
-#endif
-  return true;
 }
-
-const bool LocalWalWriter::registered_ = WalWriterFactory::RegisterWalWriter(
-    "file", static_cast<WalWriterFactory::wal_writer_initializer_t>(
-                &LocalWalWriter::Make));
-
+void LocalWalWriter::write_all(const void* data, size_t length) {
+  const char* p = static_cast<const char*>(data);
+  while (length) {
+    const size_t chunk =
+        std::min(length, static_cast<size_t>(std::numeric_limits<int>::max()));
+    ptrdiff_t n;
+    if (write_hook_)
+      n = write_hook_(fd_, p, chunk);
+    else {
+#ifdef _WIN32
+      n = ::_write(fd_, p, static_cast<unsigned int>(chunk));
+#else
+      n = ::write(fd_, p, chunk);
+#endif
+    }
+    if (n < 0 && errno == EINTR)
+      continue;
+    if (n <= 0 || static_cast<size_t>(n) > chunk)
+      THROW_IO_EXCEPTION("Failed or zero-progress WAL write: " + path_);
+    p += n;
+    length -= static_cast<size_t>(n);
+  }
+}
+void LocalWalWriter::sync_file() {
+  int ret;
+  do {
+    if (sync_hook_)
+      ret = sync_hook_(fd_);
+    else {
+#ifdef _WIN32
+      ret = ::_commit(fd_);
+#elif defined(F_FULLFSYNC)
+      ret = ::fcntl(fd_, F_FULLFSYNC);
+#else
+      ret = ::fdatasync(fd_);
+#endif
+    }
+  } while (ret != 0 && errno == EINTR);
+  if (ret != 0)
+    THROW_IO_EXCEPTION("Failed to sync WAL: " + path_ + ": " + strerror(errno));
+}
+void LocalWalWriter::create_file() {
+  namespace fs = std::filesystem;
+  fs::path dir = fs::absolute(get_wal_uri_path(wal_uri_));
+  for (auto p = dir; !fs::exists(p); p = p.parent_path())
+    directory_syncs_.push_back(p.parent_path().string());
+  fs::create_directories(dir);
+  for (int version = 0; version < 65536; ++version) {
+    path_ = (dir / ("thread_" + std::to_string(slot_id_) + "_" +
+                    std::to_string(version) + ".wal"))
+                .string();
+#ifdef _WIN32
+    fd_ = ::_open(path_.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_BINARY,
+                  _S_IREAD | _S_IWRITE);
+#else
+    fd_ = ::open(path_.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
+#endif
+    if (fd_ != -1)
+      break;
+    if (errno != EEXIST)
+      THROW_IO_EXCEPTION("Failed to create WAL: " + path_ + ": " +
+                         strerror(errno));
+  }
+  if (fd_ == -1)
+    THROW_IO_EXCEPTION("WAL file versions exhausted: " + wal_uri_);
+  directory_syncs_.insert(directory_syncs_.begin(), dir.string());
+  const auto header = EncodeWalFileHeader(checkpoint_id_);
+  write_all(header.data(), header.size());
+}
+bool LocalWalWriter::append_frame(uint32_t ts, WalRecordKind kind,
+                                  const char* payload, size_t length) {
+  // Validation and checksum computation precede all file mutations.
+  const auto header = EncodeWalFrameHeader(ts, kind, payload, length);
+  if (!opened_)
+    return false;
+  try {
+    const bool first = fd_ == -1;
+    if (first)
+      create_file();
+    write_all(header.data(), header.size());
+    if (length)
+      write_all(payload, length);
+    sync_file();
+    for (const auto& dir : directory_syncs_) {
+      bool synced;
+      do {
+        errno = 0;
+        synced = directory_sync_hook_ ? directory_sync_hook_(dir)
+                                      : file_utils::fsync_directory(dir);
+      } while (!synced && errno == EINTR);
+      if (!synced)
+        THROW_IO_EXCEPTION("Failed to sync WAL directory: " + dir);
+    }
+    directory_syncs_.clear();
+    durable_offset_ +=
+        (first ? kWalFileHeaderSize : 0) + header.size() + length;
+    return true;
+  } catch (const std::exception& e) {
+    LOG(FATAL) << "WAL append durability unknown: " << e.what();
+  } catch (...) { LOG(FATAL) << "WAL append durability unknown"; }
+  return false;
+}
+const bool LocalWalWriter::registered_ =
+    WalWriterFactory::RegisterWalWriter("file", &LocalWalWriter::Make);
 }  // namespace neug

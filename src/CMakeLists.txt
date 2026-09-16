@@ -35,6 +35,7 @@ if (ENABLE_GCOV)
 endif()
 target_link_libraries(neug PUBLIC OpenSSL::SSL OpenSSL::Crypto)
 target_link_libraries(neug PRIVATE ${GFLAGS_LIBRARIES} ${YAML_CPP_LIBRARIES} ${COMPILER_LIBRARIES})
+target_link_libraries(neug PRIVATE absl::crc32c)
 target_link_libraries(neug PUBLIC ${GLOG_LIBRARIES})
 # Protobuf is PRIVATE to avoid double-initialization of global statics when
 # downstream shared libraries (e.g. neug_py_bind.so) also load libneug.dylib.
@@ -79,6 +80,7 @@ if(WIN32 AND BUILD_TEST)
     # Dependencies are PUBLIC so test executables inherit them automatically.
     target_link_libraries(neug_static PUBLIC OpenSSL::SSL OpenSSL::Crypto)
     target_link_libraries(neug_static PUBLIC ${GFLAGS_LIBRARIES} ${YAML_CPP_LIBRARIES} ${COMPILER_LIBRARIES})
+    target_link_libraries(neug_static PUBLIC absl::crc32c)
     target_link_libraries(neug_static PUBLIC ${GLOG_LIBRARIES})
     target_link_libraries(neug_static PUBLIC ${Protobuf_LIBRARIES})
     if (BUILD_HTTP_SERVER)

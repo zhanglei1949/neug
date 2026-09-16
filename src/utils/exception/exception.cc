@@ -24,6 +24,12 @@
 namespace neug {
 namespace exception {
 
+WalRecoveryException::WalRecoveryException(WalRecoveryErrorKind kind,
+                                           const std::string& message)
+    : Exception("[" + WalRecoveryErrorKindName(kind) + "] " + message,
+                neug::StatusCode::ERR_IO_ERROR),
+      kind_(kind) {}
+
 Exception::Exception(std::string msg, neug::StatusCode error_code)
     : exception(), exception_message_(std::move(msg)) {
 #ifdef NEUG_BACKTRACE

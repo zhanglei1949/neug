@@ -38,6 +38,7 @@
 
 #include "neug/storages/checkpoint.h"
 #include "neug/storages/module/module_factory.h"
+#include "neug/transaction/wal/local_wal_parser.h"
 #include "neug/utils/exception/exception.h"
 #include "neug/utils/io/file/file_utils.h"
 #include "neug/utils/uuid.h"
@@ -313,7 +314,8 @@ std::filesystem::path import_object(const std::filesystem::path& source,
 }
 
 void import_wal(const std::filesystem::path& source_dir,
-                const std::filesystem::path& destination_dir) {
+                const std::filesystem::path& destination_dir,
+                bool copy_frames) {
   remove_tree(destination_dir);
   std::error_code ec;
   std::filesystem::create_directories(destination_dir, ec);
@@ -334,7 +336,8 @@ void import_wal(const std::filesystem::path& source_dir,
       THROW_CHECKPOINT_EXCEPTION("Legacy WAL contains a non-file entry: " +
                                  entry.path().string());
     }
-    import_file(entry.path(), destination_dir / entry.path().filename());
+    if (copy_frames)
+      import_file(entry.path(), destination_dir / entry.path().filename());
   }
 }
 
@@ -417,6 +420,16 @@ void LegacyCheckpointMigrator::Import(
     THROW_CHECKPOINT_EXCEPTION("Legacy migration target ID does not match");
   }
 
+  // Validate before publishing CURRENT or retiring the legacy checkpoint.
+  bool copy_frames = false;
+  try {
+    ValidateLegacyWalEpochEmpty((candidate.root / "wal").string());
+  } catch (const exception::WalRecoveryException&) {
+    // A directory-layout migration may contain new-format frames (e.g. an
+    // offline layout conversion); legacy payload framing is never accepted.
+    LocalWalParser parser((candidate.root / "wal").string(), candidate.id);
+    copy_frames = true;
+  }
   CheckpointManifest manifest = candidate.manifest;
   std::unordered_map<std::string, std::string> imported_objects;
   for (const auto& module : manifest.Modules()) {
@@ -443,7 +456,7 @@ void LegacyCheckpointMigrator::Import(
     }
   }
 
-  import_wal(candidate.root / "wal", target.wal_dir());
+  import_wal(candidate.root / "wal", target.wal_dir(), copy_frames);
   target.SetManifest(std::move(manifest));
 }
 

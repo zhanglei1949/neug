@@ -25,6 +25,7 @@
 #include "neug/storages/graph_snapshot_store.h"
 #include "neug/transaction/timestamp_lease.h"
 #include "neug/transaction/version_manager.h"
+#include "neug/transaction/wal/local_wal_parser.h"
 #include "neug/transaction/wal/wal.h"
 
 #ifndef _WIN32
@@ -81,14 +82,16 @@ TEST(WalWriterTest, ReopensSameInstanceOnNewTimeline) {
   {
     auto writer = neug::WalWriterFactory::CreateWalWriter(old_wal_dir, 0);
     auto* const identity = writer.get();
-    writer->open(old_wal_dir);
-    ASSERT_TRUE(writer->append(reinterpret_cast<const char*>(&old_marker),
-                               sizeof(old_marker)));
+    writer->open(old_wal_dir, 0);
+    ASSERT_TRUE(writer->append_frame(1, neug::WalRecordKind::kInsert,
+                                     reinterpret_cast<const char*>(&old_marker),
+                                     sizeof(old_marker)));
 
-    writer->open(new_wal_dir);
+    writer->open(new_wal_dir, 0);
     EXPECT_EQ(writer.get(), identity);
-    ASSERT_TRUE(writer->append(reinterpret_cast<const char*>(&new_marker),
-                               sizeof(new_marker)));
+    ASSERT_TRUE(writer->append_frame(1, neug::WalRecordKind::kInsert,
+                                     reinterpret_cast<const char*>(&new_marker),
+                                     sizeof(new_marker)));
     writer->close();
   }
 
@@ -96,9 +99,10 @@ TEST(WalWriterTest, ReopensSameInstanceOnNewTimeline) {
     const auto begin = std::filesystem::directory_iterator(wal_dir);
     const auto end = std::filesystem::directory_iterator();
     EXPECT_NE(begin, end);
-    std::ifstream wal_file(begin->path(), std::ios::binary);
+    neug::LocalWalParser parser(wal_dir, 0);
     uint32_t marker = 0;
-    wal_file.read(reinterpret_cast<char*>(&marker), sizeof(marker));
+    const auto& payload = parser.replay_units().at(0).payload;
+    std::memcpy(&marker, payload.data(), sizeof(marker));
     return marker;
   };
   EXPECT_EQ(read_marker(old_wal_dir), old_marker);
@@ -115,22 +119,24 @@ TEST(WalWriterSetTest, DirectWriterStaysStableAcrossTpActivation) {
 
   {
     neug::WalWriterSet writers(/*slot_num=*/3, neug::DBMode::READ_WRITE,
-                               ap_wal_dir);
+                               ap_wal_dir, 0);
     auto* const direct_writer = &writers.DirectWriter();
-    ASSERT_TRUE(direct_writer->append(reinterpret_cast<const char*>(&marker),
-                                      sizeof(marker)));
+    ASSERT_TRUE(direct_writer->append_frame(
+        1, neug::WalRecordKind::kInsert, reinterpret_cast<const char*>(&marker),
+        sizeof(marker)));
 
-    writers.ActivateTransactional(ap_wal_dir);
+    writers.ActivateTransactional(ap_wal_dir, 0);
     auto* const first_tp_writer = &writers.WriterFor(1);
     auto* const second_tp_writer = &writers.WriterFor(2);
     EXPECT_EQ(&writers.DirectWriter(), direct_writer);
 
-    writers.RotateActive(tp_wal_dir);
+    writers.RotateActive(tp_wal_dir, 0);
     EXPECT_EQ(&writers.DirectWriter(), direct_writer);
     EXPECT_EQ(&writers.WriterFor(1), first_tp_writer);
     EXPECT_EQ(&writers.WriterFor(2), second_tp_writer);
-    ASSERT_TRUE(direct_writer->append(reinterpret_cast<const char*>(&marker),
-                                      sizeof(marker)));
+    ASSERT_TRUE(direct_writer->append_frame(
+        1, neug::WalRecordKind::kInsert, reinterpret_cast<const char*>(&marker),
+        sizeof(marker)));
 
     writers.DeactivateTransactional();
     EXPECT_EQ(&writers.DirectWriter(), direct_writer);
@@ -659,11 +665,12 @@ TEST(CheckpointCoordinatorTest,
   const auto old_wal_dir =
       (std::filesystem::path(test_dir) / "old-wal").string();
   auto wal_writer = neug::WalWriterFactory::CreateWalWriter(old_wal_dir, 0);
-  wal_writer->open(old_wal_dir);
+  wal_writer->open(old_wal_dir, 0);
   constexpr uint32_t before_marker = 17;
   constexpr uint32_t after_marker = 29;
-  ASSERT_TRUE(wal_writer->append(reinterpret_cast<const char*>(&before_marker),
-                                 sizeof(before_marker)));
+  ASSERT_TRUE(wal_writer->append_frame(
+      1, neug::WalRecordKind::kInsert,
+      reinterpret_cast<const char*>(&before_marker), sizeof(before_marker)));
 
   neug::CheckpointCoordinator coordinator(
       checkpoint_manager, snapshot_store, neug::MemoryLevel::kInMemory,
@@ -673,7 +680,7 @@ TEST(CheckpointCoordinatorTest,
       },
       [&](const std::string& wal_uri) {
         wal_writer->close();
-        wal_writer->open(wal_uri);
+        wal_writer->open(wal_uri, 0);
         cache_invalidated = true;
       });
 
@@ -692,8 +699,9 @@ TEST(CheckpointCoordinatorTest,
   EXPECT_FALSE(allocator_reopened);
   EXPECT_EQ(allocators[0]->allocated_memory(), allocator_marker_size);
   EXPECT_FALSE(cache_invalidated);
-  EXPECT_TRUE(wal_writer->append(reinterpret_cast<const char*>(&after_marker),
-                                 sizeof(after_marker)));
+  EXPECT_TRUE(wal_writer->append_frame(
+      2, neug::WalRecordKind::kInsert,
+      reinterpret_cast<const char*>(&after_marker), sizeof(after_marker)));
 
   {
     auto read = version_manager.acquire_read_operation();
@@ -1226,4 +1234,141 @@ TEST_F(WalReplayTest, RepeatedCopyToSameTableRecovers) {
     }
     db.Close();
   }
+}
+
+namespace {
+struct V2CheckpointFixture {
+  uint64_t id;
+  std::string manifest;
+  std::string wal;
+};
+V2CheckpointFixture downgrade_checkpoint_manifest(const std::string& dir) {
+  neug::NeugDB db;
+  auto config = make_config(dir);
+  config.checkpoint_on_recovery = false;
+  if (!db.Open(config))
+    throw std::runtime_error("open fixture failed");
+  const auto ckp = db.graph().checkpoint_ptr();
+  V2CheckpointFixture result{ckp->id(), ckp->manifest_path(), ckp->wal_dir()};
+  db.Close();
+  std::ifstream in(result.manifest);
+  std::string bytes((std::istreambuf_iterator<char>(in)), {});
+  in.close();
+  const auto marker = bytes.find("\"v\":3");
+  if (marker == std::string::npos)
+    throw std::runtime_error("missing v3 marker");
+  bytes.replace(marker, 5, "\"v\":2");
+  std::ofstream out(result.manifest);
+  out << bytes;
+  out.close();
+  return result;
+}
+}  // namespace
+TEST_F(WalReplayTest, V2CheckpointUpgradesBeforeFirstFramedWal) {
+  create_checkpointed_base_graph(db_dir_);
+  const auto fixture = downgrade_checkpoint_manifest(db_dir_);
+  neug::NeugDB db;
+  auto config = make_config(db_dir_);
+  config.checkpoint_on_recovery = false;
+  ASSERT_TRUE(db.Open(config));
+  EXPECT_EQ(db.graph().checkpoint().id(), fixture.id + 1);
+  EXPECT_EQ(db.graph().checkpoint().manifest().format_version(), 3);
+  const auto epoch = db.graph().checkpoint().id();
+  const auto wal = db.graph().checkpoint().wal_dir();
+  {
+    neug::NeugDBService service(db);
+    EXPECT_TRUE(read_has_person(service, 1));
+    insert_person(service, 2, "upgrade");
+  }
+  db.Close();
+  neug::LocalWalParser parser(wal, epoch);
+  ASSERT_EQ(parser.replay_units().size(), 1);
+  ASSERT_TRUE(db.Open(config));
+  {
+    neug::NeugDBService service(db);
+    EXPECT_TRUE(read_has_person(service, 2));
+  }
+  db.Close();
+}
+TEST_F(WalReplayTest, OverNestedWalPayloadIsRejectedBeforeCommit) {
+  auto config = make_config(db_dir_);
+  {
+    neug::NeugDB db;
+    ASSERT_TRUE(db.Open(config));
+    auto conn = db.Connect();
+    std::string type = "INT64";
+    for (int i = 0; i < 64; ++i)
+      type += "[]";
+    auto result = conn->Query("CREATE NODE TABLE deep(id INT64, val " + type +
+                              ", PRIMARY KEY(id));");
+    EXPECT_FALSE(result);
+    conn->Close();
+    db.Close();
+  }
+  neug::NeugDB reopened;
+  EXPECT_TRUE(reopened.Open(config));
+  reopened.Close();
+}
+TEST_F(WalReplayTest, V2ReadOnlyOpenLeavesManifestAndCurrentUnchanged) {
+  create_checkpointed_base_graph(db_dir_);
+  const auto fixture = downgrade_checkpoint_manifest(db_dir_);
+  auto config = make_config(db_dir_);
+  config.mode = neug::DBMode::READ_ONLY;
+  config.checkpoint_on_recovery = false;
+  neug::NeugDB db;
+  ASSERT_TRUE(db.Open(config));
+  EXPECT_EQ(db.graph().checkpoint().id(), fixture.id);
+  EXPECT_EQ(db.graph().checkpoint().manifest().format_version(), 2);
+  db.Close();
+  neug::CheckpointManifest m;
+  m.Load(fixture.manifest);
+  EXPECT_EQ(m.format_version(), 2);
+}
+TEST_F(WalReplayTest, NonemptyV2WalRejectsWithoutPublishingUpgrade) {
+  create_checkpointed_base_graph(db_dir_);
+  const auto fixture = downgrade_checkpoint_manifest(db_dir_);
+  std::filesystem::create_directories(fixture.wal);
+  std::ofstream wal(fixture.wal + "/thread_0_0.wal", std::ios::binary);
+  std::string bytes(128, '\0');
+  bytes[100] = 1;
+  wal.write(bytes.data(), bytes.size());
+  wal.close();
+  neug::NeugDB db;
+  EXPECT_THROW(db.Open(make_config(db_dir_)),
+               neug::exception::WalRecoveryException);
+  neug::CheckpointManifest m;
+  m.Load(fixture.manifest);
+  EXPECT_EQ(m.format_version(), 2);
+  std::ifstream current(db_dir_ + "/checkpoint/CURRENT");
+  uint64_t id;
+  current >> id;
+  EXPECT_EQ(id, fixture.id);
+}
+TEST_F(WalReplayTest, FailedV2UpgradeNeverEnablesNewWal) {
+  create_checkpointed_base_graph(db_dir_);
+  const auto fixture = downgrade_checkpoint_manifest(db_dir_);
+  const std::string manifests = db_dir_ + "/checkpoint/manifests";
+  std::filesystem::permissions(
+      manifests,
+      std::filesystem::perms::owner_read | std::filesystem::perms::owner_exec);
+  // Verify permissions are enforced on this filesystem before testing failure.
+  std::ofstream probe(manifests + "/probe");
+  if (probe) {
+    probe.close();
+    std::filesystem::permissions(manifests, std::filesystem::perms::owner_all);
+    std::filesystem::remove(manifests + "/probe");
+    GTEST_SKIP() << "Directory permissions not enforced";
+  }
+  neug::NeugDB db;
+  EXPECT_THROW(db.Open(make_config(db_dir_)), std::exception);
+  std::filesystem::permissions(manifests, std::filesystem::perms::owner_all);
+  std::ifstream current(db_dir_ + "/checkpoint/CURRENT");
+  uint64_t id;
+  current >> id;
+  EXPECT_EQ(id, fixture.id);
+  const auto failed_epoch = db_dir_ + "/wal/" + std::to_string(fixture.id + 1);
+  EXPECT_TRUE(!std::filesystem::exists(failed_epoch) ||
+              std::filesystem::is_empty(failed_epoch));
+  EXPECT_TRUE(db.Open(make_config(db_dir_)));
+  db.Close();
 }

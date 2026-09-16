@@ -43,10 +43,12 @@ class CheckpointManifest {
   /// fields, changed value semantics).  Additive changes (new optional
   /// fields) do not require a bump.  Readers must reject unknown versions.
   ///
-  /// Version 1 belongs to the legacy checkpoint-N meta format. This immutable
-  /// objects + complete manifest layout starts at version 2.
-  static constexpr int kFormatVersion = 2;
+  /// Version 2 introduced immutable objects + complete manifests. Version 3
+  /// keeps that layout and requires framed WAL, so v2 binaries reject it.
+  static constexpr int kFormatVersion = 3;
 
+  void UpgradeFormatVersion() { format_version_ = kFormatVersion; }
+  int format_version() const { return format_version_; }
   CheckpointManifest() = default;
   explicit CheckpointManifest(uint64_t base_timestamp)
       : base_timestamp_(base_timestamp) {}
@@ -128,6 +130,7 @@ class CheckpointManifest {
 
   Schema schema_;
   bool has_schema_ = false;
+  int format_version_{kFormatVersion};
   uint64_t base_timestamp_ = 0;
   std::unordered_map<std::string, ModuleDescriptor> modules_;
   std::unordered_map<std::string, std::string> scalars_;

@@ -209,14 +209,16 @@ TEST_F(ConnectionTest, ExplicitReadWriteTransactionReplaysSingleWalCommit) {
   config.checkpoint_on_close = false;
 
   std::string wal_dir;
+  uint64_t wal_epoch = 0;
   size_t update_wal_count_before = 0;
   {
     NeugDB db;
     ASSERT_TRUE(db.Open(config));
     wal_dir = db.graph().checkpoint().wal_dir();
+    wal_epoch = db.graph().checkpoint().id();
     {
-      LocalWalParser parser_before(wal_dir);
-      update_wal_count_before = parser_before.get_update_wals().size();
+      LocalWalParser parser_before(wal_dir, wal_epoch);
+      update_wal_count_before = parser_before.replay_units().size();
     }
 
     auto conn = db.Connect();
@@ -229,8 +231,8 @@ TEST_F(ConnectionTest, ExplicitReadWriteTransactionReplaysSingleWalCommit) {
     db.Close();
   }
 
-  LocalWalParser parser_after(wal_dir);
-  EXPECT_EQ(parser_after.get_update_wals().size(), update_wal_count_before + 1)
+  LocalWalParser parser_after(wal_dir, wal_epoch);
+  EXPECT_EQ(parser_after.replay_units().size(), update_wal_count_before + 1)
       << "One explicit transaction must append exactly one update WAL unit.";
 
   {

@@ -77,27 +77,19 @@ Status CurrentCowWriteTransaction::Commit() {
     return prepare_status;
   }
 
-  logical_redo.finalize(timestamp());
+  ValidateWalFrameArguments(timestamp(), WalRecordKind::kCowRedo,
+                            logical_redo.data(), logical_redo.size());
 
-  // The current WAL API cannot distinguish a pre-write failure from an
-  // uncertain partial append. Until W1 framing supplies that decision, any
-  // append failure must fail-stop instead of reopening the AP gate and
-  // reporting an ordinary rollback.
+  // Once append begins, a failure has an uncertain durable outcome.
   try {
-    if (!wal_writer_.append(logical_redo.data(), logical_redo.size())) {
-      LOG(FATAL) << "AP WAL append failed after commit append began; "
-                    "terminating with the current slot unchanged";
-    }
+    if (!wal_writer_.append_frame(timestamp(), WalRecordKind::kCowRedo,
+                                  logical_redo.data(), logical_redo.size()))
+      LOG(FATAL) << "AP WAL append failed";
+    replaceCurrentSnapshot(committed_planning_generation);
+    release(true);
   } catch (const std::exception& e) {
-    LOG(FATAL) << "AP WAL append failed after commit append began: " << e.what()
-               << "; terminating with the current slot unchanged";
-  } catch (...) {
-    LOG(FATAL) << "AP WAL append failed after commit append began; "
-                  "terminating with the current slot unchanged";
-  }
-
-  replaceCurrentSnapshot(committed_planning_generation);
-  release(true);
+    LOG(FATAL) << "AP commit failed after WAL append began: " << e.what();
+  } catch (...) { LOG(FATAL) << "AP commit failed after WAL append began"; }
   return Status::OK();
 }
 

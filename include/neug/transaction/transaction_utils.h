@@ -89,7 +89,7 @@ Status deleteVertexIndexData(PropertyGraph& graph, label_t label,
                              const std::vector<vid_t>& vids,
                              const IndexDetachFn& detach_index = nullptr);
 
-void ReplayCowGraphWal(PropertyGraph& graph, uint32_t timestamp, char* data,
-                       size_t length, Allocator& alloc);
+void ReplayCowGraphWal(PropertyGraph& graph, uint32_t timestamp,
+                       const char* data, size_t length, Allocator& alloc);
 
 }  // namespace neug

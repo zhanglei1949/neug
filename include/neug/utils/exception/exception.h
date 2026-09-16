@@ -18,6 +18,7 @@
 #include <exception>
 #include <string>
 
+#include "neug/transaction/wal/wal_codec.h"
 #include "neug/utils/api.h"
 
 namespace neug {
@@ -137,6 +138,15 @@ class NEUG_API ExtensionException : public Exception {
   explicit ExtensionException(const std::string& msg);
 
   ExtensionException(const std::string& msg, const std::string& file_line);
+};
+
+class NEUG_API WalRecoveryException : public Exception {
+ public:
+  WalRecoveryException(WalRecoveryErrorKind kind, const std::string& message);
+  WalRecoveryErrorKind kind() const { return kind_; }
+
+ private:
+  WalRecoveryErrorKind kind_;
 };
 
 class NEUG_API InternalException : public Exception {

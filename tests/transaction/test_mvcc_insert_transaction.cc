@@ -250,24 +250,19 @@ class LocalWalParserTest : public ::testing::Test {
   // Write a single WAL entry (header + payload) into a buffer.
   void AppendWalEntry(std::vector<char>& buf, uint32_t ts, uint8_t type,
                       const std::string& payload) {
-    neug::WalHeader header;
-    header.timestamp = ts;
-    header.type = type;
-    header.length = static_cast<int32_t>(payload.size());
-    const char* hdr = reinterpret_cast<const char*>(&header);
-    buf.insert(buf.end(), hdr, hdr + sizeof(neug::WalHeader));
+    if (buf.empty()) {
+      const auto file_header = neug::EncodeWalFileHeader(0);
+      buf.insert(buf.end(), file_header.begin(), file_header.end());
+    }
+    const auto encoded =
+        neug::EncodeWalFrameHeader(ts, static_cast<neug::WalRecordKind>(type),
+                                   payload.data(), payload.size());
+    buf.insert(buf.end(), encoded.begin(), encoded.end());
     buf.insert(buf.end(), payload.begin(), payload.end());
   }
 
   // Append a terminator entry (timestamp=0) to mark end of WAL stream.
-  void AppendWalTerminator(std::vector<char>& buf) {
-    neug::WalHeader terminator;
-    terminator.timestamp = 0;
-    terminator.type = 0;
-    terminator.length = 0;
-    const char* hdr = reinterpret_cast<const char*>(&terminator);
-    buf.insert(buf.end(), hdr, hdr + sizeof(neug::WalHeader));
-  }
+  void AppendWalTerminator(std::vector<char>& buf) {}
 
   // Write buffer contents to a .wal file in the WAL directory.
   void WriteWalFile(const std::string& filename, const std::vector<char>& buf) {
@@ -289,21 +284,21 @@ TEST_F(LocalWalParserTest, OpenAndParseValidWalFile) {
   AppendWalTerminator(buf);
   WriteWalFile("thread_0_0.wal", buf);
 
-  neug::LocalWalParser parser(wal_dir_);
+  neug::LocalWalParser parser(wal_dir_, 0);
   EXPECT_EQ(parser.last_ts(), 1);
-  const auto& unit = parser.get_insert_wal(1);
-  EXPECT_EQ(unit.size, payload.size());
+  const auto& unit = parser.replay_units().at(0);
+  EXPECT_EQ(unit.payload.size(), payload.size());
   // The ptr should point to the payload data within the mmap region.
-  EXPECT_NE(unit.ptr, nullptr);
-  EXPECT_EQ(std::string(unit.ptr, unit.size), payload);
+  EXPECT_NE(unit.payload.data(), nullptr);
+  EXPECT_EQ(std::string(unit.payload.data(), unit.payload.size()), payload);
 }
 
 #ifndef _WIN32
-// Test: LocalWalParser throws IOException when ::open() on a WAL file fails
-// (e.g. permission denied). This covers the fd == -1 check.
-// Note: running as root or on permission-ignoring filesystems bypasses
-// chmod(0000), so we pre-flight the open() and skip when it still succeeds.
-TEST_F(LocalWalParserTest, OpenUnreadableWalFileThrowsIOException) {
+// Test: LocalWalParser throws WalRecoveryException when ::open() on a WAL file
+// fails (e.g. permission denied). This covers the fd == -1 check. Note: running
+// as root or on permission-ignoring filesystems bypasses chmod(0000), so we
+// pre-flight the open() and skip when it still succeeds.
+TEST_F(LocalWalParserTest, OpenUnreadableWalFileReportsRecoveryError) {
   // Root (euid 0) bypasses file-permission checks; skip early.
   if (::geteuid() == 0) {
     GTEST_SKIP() << "Running as root; chmod(0000) does not block open()";
@@ -330,11 +325,11 @@ TEST_F(LocalWalParserTest, OpenUnreadableWalFileThrowsIOException) {
   }
 
   try {
-    neug::LocalWalParser parser(wal_dir_);
-    FAIL() << "Expected IOException but none was thrown";
-  } catch (const neug::exception::IOException& e) {
-    EXPECT_NE(std::string(e.what()).find("Failed to open wal file"),
-              std::string::npos);
+    neug::LocalWalParser parser(wal_dir_, 0);
+    FAIL() << "Expected WalRecoveryException but none was thrown";
+  } catch (const neug::exception::WalRecoveryException& e) {
+    EXPECT_EQ(e.kind(), neug::WalRecoveryErrorKind::kIoError);
+    EXPECT_NE(std::string(e.what()).find("unreadable.wal"), std::string::npos);
   }
 
   chmod(file_path.c_str(), 0644);
@@ -342,12 +337,12 @@ TEST_F(LocalWalParserTest, OpenUnreadableWalFileThrowsIOException) {
 #endif
 
 #ifndef _WIN32
-// Test: LocalWalParser throws IOException when mmap() fails.
+// Test: LocalWalParser throws WalRecoveryException when mmap() fails.
 // Uses RLIMIT_AS to deterministically exhaust the virtual-address space
 // so mmap() reliably returns MAP_FAILED, avoiding the flakiness of the
 // sparse-file approach (many kernels accept such mappings via overcommit
 // and only fault on first access).
-TEST_F(LocalWalParserTest, MmapFailureThrowsIOException) {
+TEST_F(LocalWalParserTest, MmapFailureReportsRecoveryError) {
   // Create a small but non-empty WAL file so mmap() is genuinely attempted.
   auto file_path = wal_dir_ + "/mmap_fail_test.wal";
   {
@@ -372,24 +367,24 @@ TEST_F(LocalWalParserTest, MmapFailureThrowsIOException) {
   bool threw = false;
   bool msg_ok = false;
   try {
-    neug::LocalWalParser parser(wal_dir_);
-  } catch (const neug::exception::IOException& e) {
+    neug::LocalWalParser parser(wal_dir_, 0);
+  } catch (const neug::exception::WalRecoveryException& e) {
     threw = true;
     // Use strstr (no heap allocation) while RLIMIT_AS is still clamped.
-    msg_ok = (std::strstr(e.what(), "Failed to mmap wal file") != nullptr);
+    msg_ok = (std::strstr(e.what(), "Failed to mmap WAL") != nullptr);
   }
 
   // Restore RLIMIT_AS before any GTEST assertions that may heap-allocate.
   ::setrlimit(RLIMIT_AS, &old_rlimit);
 
-  EXPECT_TRUE(threw) << "Expected IOException but none was thrown";
+  EXPECT_TRUE(threw) << "Expected WalRecoveryException but none was thrown";
   EXPECT_TRUE(msg_ok)
-      << "Exception message did not contain 'Failed to mmap wal file'";
+      << "Exception message did not contain 'Failed to mmap WAL'";
 }
 #endif
 
 // Test: Opening an empty WAL directory does not throw and last_ts is 0.
 TEST_F(LocalWalParserTest, OpenEmptyWalDirNoThrow) {
-  neug::LocalWalParser parser(wal_dir_);
+  neug::LocalWalParser parser(wal_dir_, 0);
   EXPECT_EQ(parser.last_ts(), 0);
 }

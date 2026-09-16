@@ -29,7 +29,8 @@ Both deployment modes provide the same user-visible ACID guarantees:
 | **Durability** | Once a transaction commits in a persistent database, NeuG can recover it after restart. In-memory databases are not durable. |
 
 For the different transaction models behind these guarantees, see
-[Transaction Model](transaction_model.md).
+[Transaction Model](transaction_model.md). For the on-disk format, recovery
+rules and upgrade steps, see [WAL Protocol](wal_protocol.md).
 
 ## Choose a deployment mode
 

@@ -14,143 +14,258 @@
  */
 
 #include "neug/transaction/wal/local_wal_parser.h"
-
 #include <fcntl.h>
-#ifndef _WIN32
+#include <glog/logging.h>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
 #include <sys/mman.h>
 #include <unistd.h>
-#else
-#include <io.h>
 #endif
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <cstring>
 #include <filesystem>
-#include <ostream>
-
-#include "neug/transaction/wal/wal.h"
+#include <fstream>
 #include "neug/utils/exception/exception.h"
-#include "neug/utils/io/file/file_utils.h"
-
 namespace neug {
-
-LocalWalParser::LocalWalParser(const std::string& wal_uri) {
-  LocalWalParser::open(wal_uri);
+namespace {
+std::vector<std::string> WalPaths(const std::string& uri) {
+  std::vector<std::string> paths;
+  const auto dir = get_wal_uri_path(uri);
+  std::error_code error;
+  if (dir.empty() || !std::filesystem::exists(dir, error)) {
+    if (error)
+      throw exception::WalRecoveryException(
+          WalRecoveryErrorKind::kIoError,
+          "Failed to inspect WAL directory " + dir + ": " + error.message());
+    return paths;
+  }
+  std::filesystem::directory_iterator iterator(dir, error), end;
+  while (!error && iterator != end) {
+    const auto& entry = *iterator;
+    const bool regular = entry.is_regular_file(error);
+    if (!error && regular && entry.path().extension() == ".wal")
+      paths.push_back(entry.path().string());
+    iterator.increment(error);
+  }
+  if (error)
+    throw exception::WalRecoveryException(
+        WalRecoveryErrorKind::kIoError,
+        "Failed to enumerate WAL directory " + dir + ": " + error.message());
+  std::sort(paths.begin(), paths.end());
+  return paths;
+}
+bool IsZeroFile(const std::string& path) {
+  std::array<char, 65536> buffer{};
+  std::ifstream input(path, std::ios::binary);
+  if (!input)
+    throw exception::WalRecoveryException(WalRecoveryErrorKind::kIoError,
+                                          "Failed to read WAL: " + path);
+  while (input) {
+    input.read(buffer.data(), buffer.size());
+    if (std::any_of(buffer.begin(), buffer.begin() + input.gcount(),
+                    [](char c) { return c != 0; }))
+      return false;
+  }
+  if (!input.eof())
+    throw exception::WalRecoveryException(WalRecoveryErrorKind::kIoError,
+                                          "Failed to read WAL: " + path);
+  return true;
+}
+std::string Location(const std::string& path, uint64_t off) {
+  return path + " at offset " + std::to_string(off);
+}
+}  // namespace
+void ValidateLegacyWalEpochEmpty(const std::string& uri) {
+  for (const auto& path : WalPaths(uri)) {
+    if (!IsZeroFile(path))
+      throw exception::WalRecoveryException(
+          WalRecoveryErrorKind::kUnsupportedFormat,
+          Location(path, 0) +
+              ": legacy/experimental WAL has records; recover and checkpoint "
+              "with the old binary, close it, then upgrade");
+  }
 }
 
-void LocalWalParser::open(const std::string& wal_uri) {
-  close();
-  auto wal_dir = get_wal_uri_path(wal_uri);
-  if (!std::filesystem::exists(wal_dir)) {
-    std::filesystem::create_directory(wal_dir);
-  }
-
-  std::vector<std::string> paths;
-  for (const auto& entry : std::filesystem::directory_iterator(wal_dir)) {
-    paths.push_back(entry.path().string());
-  }
-  for (auto path : paths) {
-    size_t file_size = std::filesystem::file_size(path);
-    if (file_size == 0) {
-      continue;
-    }
+struct LocalWalParser::MappedFile {
+  std::string path;
+  size_t size{0};
 #ifdef _WIN32
-    int fd = _open(path.c_str(), O_RDONLY, 0);
+  HANDLE file{INVALID_HANDLE_VALUE};
+  HANDLE mapping{nullptr};
+  void* data{nullptr};
 #else
-    int fd = ::open(path.c_str(), O_RDONLY);
+  int fd{-1};
+  void* data{MAP_FAILED};
 #endif
-    if (fd == -1) {
-      close();
-      THROW_IO_EXCEPTION("Failed to open wal file: " + path + ": " +
-                         strerror(errno));
-    }
-    void* mmapped_buffer =
-        ::mmap(NULL, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
-    if (mmapped_buffer == MAP_FAILED) {
+  explicit MappedFile(const std::string& p) : path(p) {
+    std::error_code error;
+    size = std::filesystem::file_size(path, error);
+    if (error)
+      throw exception::WalRecoveryException(
+          WalRecoveryErrorKind::kIoError,
+          "Failed to inspect WAL " + path + ": " + error.message());
 #ifdef _WIN32
-      _close(fd);
+    file = ::CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE)
+      throw exception::WalRecoveryException(WalRecoveryErrorKind::kIoError,
+                                            "Failed to open WAL: " + path);
+    mapping = ::CreateFileMappingA(file, nullptr, PAGE_READONLY, 0, 0, nullptr);
+    if (!mapping) {
+      ::CloseHandle(file);
+      file = INVALID_HANDLE_VALUE;
+      throw exception::WalRecoveryException(WalRecoveryErrorKind::kIoError,
+                                            "Failed to map WAL: " + path);
+    }
+    data = ::MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
+    if (!data) {
+      ::CloseHandle(mapping);
+      ::CloseHandle(file);
+      mapping = nullptr;
+      file = INVALID_HANDLE_VALUE;
+      throw exception::WalRecoveryException(WalRecoveryErrorKind::kIoError,
+                                            "Failed to map WAL: " + path);
+    }
 #else
+    fd = ::open(path.c_str(), O_RDONLY);
+    if (fd == -1)
+      throw exception::WalRecoveryException(
+          WalRecoveryErrorKind::kIoError,
+          "Failed to open WAL: " + path + ": " + strerror(errno));
+    data = ::mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (data == MAP_FAILED) {
+      ::close(fd);
+      fd = -1;
+      throw exception::WalRecoveryException(
+          WalRecoveryErrorKind::kIoError,
+          "Failed to mmap WAL: " + path + ": " + strerror(errno));
+    }
+#endif
+  }
+  ~MappedFile() {
+#ifdef _WIN32
+    if (data)
+      ::UnmapViewOfFile(data);
+    if (mapping)
+      ::CloseHandle(mapping);
+    if (file != INVALID_HANDLE_VALUE)
+      ::CloseHandle(file);
+#else
+    if (data != MAP_FAILED)
+      ::munmap(data, size);
+    if (fd != -1)
       ::close(fd);
 #endif
-      close();
-      THROW_IO_EXCEPTION("Failed to mmap wal file: " + path + ": " +
-                         strerror(errno));
-    }
-
-    fds_.push_back(fd);
-    mmapped_ptrs_.push_back(mmapped_buffer);
-    mmapped_size_.push_back(file_size);
   }
-
-  insert_wal_list_.resize(4096);
-  for (size_t i = 0; i < mmapped_ptrs_.size(); ++i) {
-    char* ptr = static_cast<char*>(mmapped_ptrs_[i]);
-    while (true) {
-      const WalHeader* header = reinterpret_cast<const WalHeader*>(ptr);
-      ptr += sizeof(WalHeader);
-      uint32_t ts = header->timestamp;
-      if (ts == 0) {
-        break;
-      }
-      int length = header->length;
-      if (header->type) {
-        UpdateWalUnit unit;
-        unit.timestamp = ts;
-        unit.ptr = ptr;
-        unit.size = length;
-        update_wal_list_.push_back(unit);
-      } else {
-        if (ts >= insert_wal_list_.size()) {
-          insert_wal_list_.resize(ts + 1);
-        }
-        insert_wal_list_[ts].ptr = ptr;
-        insert_wal_list_[ts].size = length;
-      }
-      ptr += length;
-      last_ts_ = std::max(ts, last_ts_);
-    }
-  }
-
-  if (!update_wal_list_.empty()) {
-    std::sort(update_wal_list_.begin(), update_wal_list_.end(),
-              [](const UpdateWalUnit& lhs, const UpdateWalUnit& rhs) {
-                return lhs.timestamp < rhs.timestamp;
-              });
-  }
+};
+LocalWalParser::LocalWalParser(const std::string& uri, uint64_t id) {
+  open(uri, id);
 }
-
+LocalWalParser::~LocalWalParser() { close(); }
+std::string_view LocalWalParser::source_path(size_t i) const {
+  return files_.at(i)->path;
+}
 void LocalWalParser::close() {
-  insert_wal_list_.clear();
-  size_t ptr_num = mmapped_ptrs_.size();
-  for (size_t i = 0; i < ptr_num; ++i) {
-    munmap(mmapped_ptrs_[i], mmapped_size_[i]);
-  }
-  for (auto fd : fds_) {
-#ifdef _WIN32
-    _close(fd);
-#else
-    ::close(fd);
-#endif
-  }
-  fds_.clear();
-  mmapped_ptrs_.clear();
-  mmapped_size_.clear();
-  update_wal_list_.clear();
+  replay_units_.clear();
+  files_.clear();
   last_ts_ = 0;
 }
-
-uint32_t LocalWalParser::last_ts() const { return last_ts_; }
-
-const WalContentUnit& LocalWalParser::get_insert_wal(uint32_t ts) const {
-  return insert_wal_list_[ts];
+void LocalWalParser::open(const std::string& uri, uint64_t id) {
+  close();
+  std::vector<std::unique_ptr<MappedFile>> files;
+  std::vector<WalReplayUnit> units;
+  for (const auto& path : WalPaths(uri)) {
+    std::error_code file_error;
+    const auto file_size = std::filesystem::file_size(path, file_error);
+    if (file_error)
+      throw exception::WalRecoveryException(
+          WalRecoveryErrorKind::kIoError,
+          "Failed to inspect WAL " + path + ": " + file_error.message());
+    if (file_size == 0)
+      continue;
+    // Check a possible legacy zero-filled preallocation before mmap so a huge
+    // empty file cannot consume address space during compatibility handling.
+    std::ifstream prefix(path, std::ios::binary);
+    char first;
+    if (!prefix.get(first))
+      throw exception::WalRecoveryException(WalRecoveryErrorKind::kIoError,
+                                            "Failed to read WAL: " + path);
+    if (first == 0 && IsZeroFile(path))
+      continue;
+    auto file = std::make_unique<MappedFile>(path);
+    auto* bytes = static_cast<const uint8_t*>(file->data);
+    size_t offset = 0;
+    uint32_t timestamp = 0;
+    try {
+      if (file->size < kWalFileHeaderSize) {
+        const auto expected = EncodeWalFileHeader(id);
+        if (!std::equal(bytes, bytes + file->size, expected.begin()))
+          throw exception::WalRecoveryException(
+              WalRecoveryErrorKind::kUnsupportedFormat,
+              "invalid partial file header");
+        LOG(WARNING) << "Ignoring incomplete WAL file header: " << path;
+        continue;
+      }
+      ValidateWalFileHeader(bytes, file->size, id);
+      offset = kWalFileHeaderSize;
+      while (offset < file->size) {
+        const size_t remaining = file->size - offset;
+        if (remaining < kWalFrameHeaderSize) {
+          LOG(WARNING) << "Ignoring incomplete WAL header: "
+                       << Location(path, offset);
+          break;
+        }
+        timestamp = 0;
+        const auto frame = DecodeWalFrameHeader(bytes + offset, remaining);
+        timestamp = frame.timestamp;
+        if (frame.payload_length > remaining - kWalFrameHeaderSize) {
+          LOG(WARNING) << "Ignoring incomplete WAL payload: "
+                       << Location(path, offset)
+                       << ", timestamp=" << frame.timestamp;
+          break;
+        }
+        const char* payload =
+            reinterpret_cast<const char*>(bytes + offset + kWalFrameHeaderSize);
+        ValidateWalFrame(bytes + offset, payload, frame);
+        units.push_back({frame.timestamp, frame.kind,
+                         std::string_view(payload, frame.payload_length),
+                         files.size(), offset});
+        offset +=
+            kWalFrameHeaderSize + static_cast<size_t>(frame.payload_length);
+      }
+    } catch (const exception::WalRecoveryException& e) {
+      throw exception::WalRecoveryException(
+          e.kind(),
+          Location(path, offset) +
+              (timestamp ? ", timestamp=" + std::to_string(timestamp) : "") +
+              ": " + e.what());
+    }
+    files.push_back(std::move(file));
+  }
+  std::sort(units.begin(), units.end(), [](const auto& a, const auto& b) {
+    return a.timestamp < b.timestamp;
+  });
+  for (size_t i = 1; i < units.size(); ++i)
+    if (units[i - 1].timestamp == units[i].timestamp)
+      throw exception::WalRecoveryException(
+          WalRecoveryErrorKind::kDuplicateTimestamp,
+          "timestamp=" + std::to_string(units[i].timestamp) + " in " +
+              Location(files[units[i - 1].file_index]->path,
+                       units[i - 1].source_offset) +
+              " and " +
+              Location(files[units[i].file_index]->path,
+                       units[i].source_offset));
+  if (!units.empty())
+    last_ts_ = units.back().timestamp;
+  files_ = std::move(files);
+  replay_units_ = std::move(units);
 }
-
-const std::vector<UpdateWalUnit>& LocalWalParser::get_update_wals() const {
-  return update_wal_list_;
-}
-
-const bool LocalWalParser::registered_ = WalParserFactory::RegisterWalParser(
-    "file", static_cast<WalParserFactory::wal_parser_initializer_t>(
-                &LocalWalParser::Make));
-
+const bool LocalWalParser::registered_ =
+    WalParserFactory::RegisterWalParser("file", &LocalWalParser::Make);
 }  // namespace neug

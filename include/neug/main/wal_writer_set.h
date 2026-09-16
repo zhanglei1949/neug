@@ -36,7 +36,8 @@ class IWalWriter;
  */
 class WalWriterSet {
  public:
-  WalWriterSet(size_t slot_num, DBMode mode, const std::string& wal_uri);
+  WalWriterSet(size_t slot_num, DBMode mode, const std::string& wal_uri,
+               uint64_t checkpoint_id);
   ~WalWriterSet() noexcept;
 
   WalWriterSet(const WalWriterSet&) = delete;
@@ -46,17 +47,19 @@ class WalWriterSet {
   IWalWriter& WriterFor(size_t slot_id);
 
   /// Activate the writers borrowed by TP execution slots.
-  void ActivateTransactional(const std::string& wal_uri);
+  void ActivateTransactional(const std::string& wal_uri,
+                             uint64_t checkpoint_id);
 
   /// Retain direct slot 0 and retire all TP-only writers.
   void DeactivateTransactional() noexcept;
 
   /// Rotate every currently active writer while checkpoint admission is held.
-  void RotateActive(const std::string& wal_uri);
+  void RotateActive(const std::string& wal_uri, uint64_t checkpoint_id);
 
  private:
   std::unique_ptr<IWalWriter> CreateWriter(size_t slot_id,
-                                           const std::string& wal_uri) const;
+                                           const std::string& wal_uri,
+                                           uint64_t checkpoint_id) const;
 
   DBMode mode_;
   std::vector<std::unique_ptr<IWalWriter>> writers_;

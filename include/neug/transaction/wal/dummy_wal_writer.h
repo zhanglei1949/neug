@@ -31,9 +31,10 @@ class DummyWalWriter : public IWalWriter {
 
   std::string type() const override;
 
-  void open(const std::string& wal_uri) override;
+  void open(const std::string& wal_uri, uint64_t checkpoint_id) override;
 
   void close() override;
-  bool append(const char* data, size_t length) override;
+  bool append_frame(uint32_t timestamp, WalRecordKind kind, const char* data,
+                    size_t length) override;
 };
 }  // namespace neug

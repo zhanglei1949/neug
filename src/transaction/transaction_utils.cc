@@ -155,8 +155,8 @@ Status deleteVertexIndexData(PropertyGraph& graph, label_t label,
   return Status::OK();
 }
 
-void ReplayCowGraphWal(PropertyGraph& graph, uint32_t timestamp, char* data,
-                       size_t length, Allocator& alloc) {
+void ReplayCowGraphWal(PropertyGraph& graph, uint32_t timestamp,
+                       const char* data, size_t length, Allocator& alloc) {
   OutArchive arc;
   arc.SetSlice(data, length);
   while (!arc.Empty()) {
@@ -227,8 +227,10 @@ void ReplayCowGraphWal(PropertyGraph& graph, uint32_t timestamp, char* data,
       const auto dst_label = schema.get_vertex_label_id(redo.dst_type);
       const auto edge_label = schema.get_edge_label_id(redo.edge_type);
       vid_t src_vid, dst_vid;
-      CHECK(graph.get_lid(src_label, redo.src, src_vid, timestamp));
-      CHECK(graph.get_lid(dst_label, redo.dst, dst_vid, timestamp));
+      if (!(graph.get_lid(src_label, redo.src, src_vid, timestamp)))
+        THROW_IO_EXCEPTION("Missing vertex during WAL replay");
+      if (!(graph.get_lid(dst_label, redo.dst, dst_vid, timestamp)))
+        THROW_IO_EXCEPTION("Missing vertex during WAL replay");
       int32_t oe_offset_unused = 0;
       const void* prop_unused = nullptr;
       graph.MarkEdgeTableDirty(src_label, dst_label, edge_label);
@@ -244,7 +246,8 @@ void ReplayCowGraphWal(PropertyGraph& graph, uint32_t timestamp, char* data,
       const auto prop_id = redo.prop_id;
       const auto& value = redo.value;
       vid_t vid;
-      CHECK(graph.get_lid(label, oid, vid, timestamp));
+      if (!(graph.get_lid(label, oid, vid, timestamp)))
+        THROW_IO_EXCEPTION("Missing vertex during WAL replay");
       graph.MarkVertexTableDirty(label);
       auto ret =
           graph.UpdateVertexProperty(label, vid, prop_id, value, timestamp);
@@ -271,8 +274,10 @@ void ReplayCowGraphWal(PropertyGraph& graph, uint32_t timestamp, char* data,
       const auto dst_label = schema.get_vertex_label_id(redo.dst_type);
       const auto edge_label = schema.get_edge_label_id(redo.edge_type);
       vid_t src_vid, dst_vid;
-      CHECK(graph.get_lid(src_label, redo.src, src_vid, timestamp));
-      CHECK(graph.get_lid(dst_label, redo.dst, dst_vid, timestamp));
+      if (!(graph.get_lid(src_label, redo.src, src_vid, timestamp)))
+        THROW_IO_EXCEPTION("Missing vertex during WAL replay");
+      if (!(graph.get_lid(dst_label, redo.dst, dst_vid, timestamp)))
+        THROW_IO_EXCEPTION("Missing vertex during WAL replay");
       graph.MarkEdgeTableDirty(src_label, dst_label, edge_label);
       auto ret = graph.UpdateEdgeProperty(
           src_label, src_vid, dst_label, dst_vid, edge_label, redo.oe_offset,
@@ -285,7 +290,8 @@ void ReplayCowGraphWal(PropertyGraph& graph, uint32_t timestamp, char* data,
       const auto label = graph.schema().get_vertex_label_id(redo.vertex_type);
       const auto& oid = redo.oid;
       vid_t vid;
-      CHECK(graph.get_lid(label, oid, vid, timestamp));
+      if (!(graph.get_lid(label, oid, vid, timestamp)))
+        THROW_IO_EXCEPTION("Missing vertex during WAL replay");
       graph.MarkVertexTableDirty(label);
       // Cascade: DeleteVertex physically writes incident edge tables.
       for (const auto& [_, es] : graph.schema().get_all_edge_schemas()) {
@@ -315,8 +321,10 @@ void ReplayCowGraphWal(PropertyGraph& graph, uint32_t timestamp, char* data,
       const auto oe_offset = redo.oe_offset;
       const auto ie_offset = redo.ie_offset;
       vid_t src_vid, dst_vid;
-      CHECK(graph.get_lid(src_label, src, src_vid, timestamp));
-      CHECK(graph.get_lid(dst_label, dst, dst_vid, timestamp));
+      if (!(graph.get_lid(src_label, src, src_vid, timestamp)))
+        THROW_IO_EXCEPTION("Missing vertex during WAL replay");
+      if (!(graph.get_lid(dst_label, dst, dst_vid, timestamp)))
+        THROW_IO_EXCEPTION("Missing vertex during WAL replay");
       graph.MarkEdgeTableDirty(src_label, dst_label, edge_label);
       auto ret = graph.DeleteEdge(src_label, src_vid, dst_label, dst_vid,
                                   edge_label, oe_offset, ie_offset, timestamp);

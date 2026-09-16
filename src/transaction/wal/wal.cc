@@ -105,12 +105,12 @@ void WalParserFactory::Init() {}
 void WalParserFactory::Finalize() {}
 
 std::unique_ptr<IWalParser> WalParserFactory::CreateWalParser(
-    const std::string& wal_uri) {
+    const std::string& wal_uri, uint64_t checkpoint_id) {
   auto& know_parsers_ = getKnownWalParsers();
   auto scheme = get_wal_uri_scheme(wal_uri);
   auto iter = know_parsers_.find(scheme);
   if (iter != know_parsers_.end()) {
-    return iter->second(wal_uri);
+    return iter->second(wal_uri, checkpoint_id);
   } else {
     std::stringstream ss;
     for (const auto& parser : know_parsers_) {
@@ -343,10 +343,14 @@ void InsertVertexRedo::Deserialize(OutArchive& arc, InsertVertexRedo& redo) {
   arc >> redo.vertex_type >> redo.oid;
   uint32_t prop_size;
   arc >> prop_size;
-  redo.props.resize(prop_size);
-  for (auto& prop : redo.props) {
+  arc.RequireCount(prop_size, sizeof(DataTypeId));
+  std::vector<Value> props;
+  for (uint32_t i = 0; i < prop_size; ++i) {
+    Value prop;
     arc >> prop;
+    props.push_back(std::move(prop));
   }
+  redo.props = std::move(props);
 }
 
 void InsertEdgeRedo::Serialize(InArchive& arc, const std::string& src_type,
@@ -366,10 +370,14 @@ void InsertEdgeRedo::Deserialize(OutArchive& arc, InsertEdgeRedo& redo) {
       redo.edge_type;
   uint32_t prop_size;
   arc >> prop_size;
-  redo.properties.resize(prop_size);
-  for (auto& prop : redo.properties) {
-    arc >> prop;
+  arc.RequireCount(prop_size, sizeof(DataTypeId));
+  std::vector<Value> properties;
+  for (uint32_t i = 0; i < prop_size; ++i) {
+    Value property;
+    arc >> property;
+    properties.push_back(std::move(property));
   }
+  redo.properties = std::move(properties);
 }
 
 void UpdateVertexPropRedo::Serialize(InArchive& arc,

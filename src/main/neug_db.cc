@@ -52,6 +52,7 @@
 #include "neug/transaction/timestamp_lease.h"
 #include "neug/transaction/transaction_utils.h"
 #include "neug/transaction/version_manager.h"
+#include "neug/transaction/wal/local_wal_parser.h"
 #include "neug/transaction/wal/wal.h"
 #include "neug/utils/exception/exception.h"
 #include "neug/utils/io/file/file_utils.h"
@@ -106,28 +107,6 @@ inline std::string allocator_prefix(const std::string& allocator_dir,
 }
 
 class Connection;
-static void IngestWalRange(PropertyGraph& graph,
-                           std::vector<std::shared_ptr<Allocator>>& allocators,
-                           const IWalParser& parser, uint32_t from,
-                           uint32_t to) {
-  if (from >= to) {
-    return;
-  }
-  // Build a single writable GraphView covering the whole replay range.
-  // read_ts = MAX_TIMESTAMP so vertices inserted earlier in the loop are
-  // visible to later edge-resolution lookups regardless of the per-unit
-  // commit timestamp.
-  GraphView view(graph);
-  for (size_t j = from; j < to; ++j) {
-    const auto& unit = parser.get_insert_wal(j);
-    MvccInsertTransaction::IngestWal(view, j, unit.ptr, unit.size,
-                                     *allocators[0]);
-    if (j % 1000000 == 0) {
-      LOG(INFO) << "Ingested " << j << " WALs";
-    }
-  }
-}
-
 NeugDB::NeugDB() : closed_(true), is_pure_memory_(false), max_thread_num_(1) {}
 
 NeugDB::~NeugDB() {
@@ -202,7 +181,8 @@ bool NeugDB::Open(const NeugDBConfig& config) {
         },
         [this](const std::string& wal_uri) {
           if (wal_writers_) {
-            wal_writers_->RotateActive(wal_uri);
+            wal_writers_->RotateActive(wal_uri,
+                                       checkpoint_mgr_.Current()->id());
           }
         });
     if (initial_visibility_ts > 0 && config.checkpoint_on_recovery &&
@@ -217,7 +197,8 @@ bool NeugDB::Open(const NeugDBConfig& config) {
       checkpoint_mgr_.CollectGarbage();
     }
     wal_writers_ = std::make_unique<WalWriterSet>(
-        allocators_.size(), config_.mode, graph().checkpoint().wal_dir());
+        allocators_.size(), config_.mode, graph().checkpoint().wal_dir(),
+        graph().checkpoint().id());
     initVersionManager(initial_visibility_ts);
     extension_manager_ = std::make_unique<ExtensionManager>();
     initPlanner();
@@ -356,7 +337,8 @@ void NeugDB::registerService(NeugDBService* svc) {
   try {
     closeAllConnections();
     CHECK(wal_writers_ != nullptr);
-    wal_writers_->ActivateTransactional(graph().checkpoint().wal_dir());
+    wal_writers_->ActivateTransactional(graph().checkpoint().wal_dir(),
+                                        graph().checkpoint().id());
     active_service_ = svc;
   } catch (...) {
     if (wal_writers_) {
@@ -541,6 +523,16 @@ timestamp_t NeugDB::openGraphAndIngestWals() {
       LOG(INFO) << "No checkpoint found, created initial checkpoint: "
                 << ckp->manifest_path();
     }
+    if (ckp->manifest().format_version() == 2) {
+      ValidateLegacyWalEpochEmpty(ckp->wal_dir());
+      if (config_.mode == DBMode::READ_WRITE) {
+        auto staging = checkpoint_mgr_.CreateStaging();
+        CheckpointManifest upgraded = ckp->manifest();
+        upgraded.UpgradeFormatVersion();
+        staging.checkpoint()->SetManifest(std::move(upgraded));
+        ckp = staging.Publish();
+      }
+    }
     LOG(INFO) << "Opening graph from checkpoint " << ckp->manifest_path();
     auto graph = std::make_shared<PropertyGraph>();
     graph->Open(ckp, config_.memory_level);
@@ -549,7 +541,10 @@ timestamp_t NeugDB::openGraphAndIngestWals() {
     initAllocators(ckp->allocator_dir());
 
     neug::WalParserFactory::Init();
-    auto wal_parser = WalParserFactory::CreateWalParser(ckp->wal_dir());
+    auto wal_parser =
+        ckp->manifest().format_version() == 2
+            ? WalParserFactory::CreateWalParser("", ckp->id())
+            : WalParserFactory::CreateWalParser(ckp->wal_dir(), ckp->id());
     const timestamp_t recovered_wal_timestamp =
         ingestWals(*wal_parser, *graph,
                    static_cast<timestamp_t>(ckp->manifest().base_timestamp()));
@@ -559,6 +554,8 @@ timestamp_t NeugDB::openGraphAndIngestWals() {
         std::make_unique<GraphSnapshotStore>(config_.storage_slot_num, graph);
     return recovered_wal_timestamp;
 
+  } catch (const exception::WalRecoveryException&) {
+    throw;
   } catch (const neug::exception::NoCheckpointException&) {
     throw;
   } catch (std::exception& e) {
@@ -569,33 +566,45 @@ timestamp_t NeugDB::openGraphAndIngestWals() {
 
 timestamp_t NeugDB::ingestWals(IWalParser& parser, PropertyGraph& graph,
                                timestamp_t base_timestamp) {
-  uint32_t from_ts = base_timestamp + 1;
-  LOG(INFO) << "Ingesting update wals size: "
-            << parser.get_update_wals().size();
-
-  for (auto& update_wal : parser.get_update_wals()) {
-    uint32_t to_ts = update_wal.timestamp;
-    // A checkpoint already contains every change through base_timestamp.
-    // Normally its WAL epoch is fresh, but ignore stale records defensively
-    // so recovery never re-applies a checkpointed update.
-    if (to_ts <= base_timestamp) {
+  const auto& units = parser.replay_units();
+  size_t i = 0;
+  while (i < units.size()) {
+    const auto& unit = units[i];
+    if (unit.timestamp <= base_timestamp) {
+      ++i;
       continue;
     }
-    if (from_ts < to_ts) {
-      IngestWalRange(graph, allocators_, parser, from_ts, to_ts);
+    size_t replay_index = i;
+    try {
+      if (unit.kind == WalRecordKind::kInsert) {
+        GraphView view(graph);
+        do {
+          replay_index = i;
+          const auto& insert = units[i];
+          MvccInsertTransaction::IngestWal(
+              view, insert.timestamp, insert.payload.data(),
+              insert.payload.size(), *allocators_[0]);
+          ++i;
+        } while (i < units.size() && units[i].kind == WalRecordKind::kInsert);
+      } else {
+        replay_index = i;
+        if (unit.kind == WalRecordKind::kCompact)
+          graph.Compact();
+        else
+          ReplayCowGraphWal(graph, unit.timestamp, unit.payload.data(),
+                            unit.payload.size(), *allocators_[0]);
+        ++i;
+      }
+    } catch (const std::exception& e) {
+      throw exception::WalRecoveryException(
+          WalRecoveryErrorKind::kCorruptedFrame,
+          "payload replay failed: " +
+              std::string(parser.source_path(units[replay_index].file_index)) +
+              ", offset=" + std::to_string(units[replay_index].source_offset) +
+              ", timestamp=" + std::to_string(units[replay_index].timestamp) +
+              ": " + e.what());
     }
-    if (update_wal.size == 0) {
-      graph.Compact();
-    } else {
-      ReplayCowGraphWal(graph, to_ts, update_wal.ptr, update_wal.size,
-                        *allocators_[0]);
-    }
-    from_ts = to_ts + 1;
   }
-  if (from_ts <= parser.last_ts()) {
-    IngestWalRange(graph, allocators_, parser, from_ts, parser.last_ts() + 1);
-  }
-  LOG(INFO) << "Finish ingesting wals up to timestamp: " << parser.last_ts();
   return std::max(base_timestamp, parser.last_ts());
 }
 

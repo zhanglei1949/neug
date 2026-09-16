@@ -18,8 +18,10 @@
 #include <stdint.h>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
+#include "neug/transaction/wal/wal_codec.h"
 
 #include "neug/common/types/value.h"
 #include "neug/storages/graph/graph_entry.h"
@@ -32,21 +34,13 @@
 
 namespace neug {
 
-struct WalHeader {
+/// Payload views remain valid until parser close/destruction.
+struct WalReplayUnit {
   uint32_t timestamp;
-  uint8_t type : 1;
-  int32_t length : 31;
-};
-
-struct WalContentUnit {
-  char* ptr{NULL};
-  size_t size{0};
-};
-
-struct UpdateWalUnit {
-  uint32_t timestamp{0};
-  char* ptr{NULL};
-  size_t size{0};
+  WalRecordKind kind;
+  std::string_view payload;
+  size_t file_index;
+  uint64_t source_offset;
 };
 
 std::string get_wal_uri_scheme(const std::string& uri);
@@ -70,7 +64,7 @@ class IWalWriter {
    * writer for the full transaction.
    * The uri could be a file_path or a remote connection string.
    */
-  virtual void open(const std::string& wal_uri) = 0;
+  virtual void open(const std::string& wal_uri, uint64_t checkpoint_id) = 0;
 
   /**
    * Close the wal writer. If a remote connection is hold by the wal writer,
@@ -79,9 +73,10 @@ class IWalWriter {
   virtual void close() = 0;
 
   /**
-   * Append data to the wal file.
+   * Append one checksummed transaction frame to the WAL.
    */
-  virtual bool append(const char* data, size_t length) = 0;
+  virtual bool append_frame(uint32_t timestamp, WalRecordKind kind,
+                            const char* payload, size_t length) = 0;
 };
 
 /**
@@ -94,21 +89,17 @@ class IWalParser {
   /**
    * Open wals from a uri and parse the wal files.
    */
-  virtual void open(const std::string& wal_uri) = 0;
+  virtual void open(const std::string& wal_uri, uint64_t checkpoint_id) = 0;
 
   virtual void close() = 0;
 
   virtual uint32_t last_ts() const = 0;
+  virtual std::string_view source_path(size_t file_index) const = 0;
 
   /*
-   * Get the insert wal unit with the given timestamp.
+   * Validated units in global timestamp order.
    */
-  virtual const WalContentUnit& get_insert_wal(uint32_t ts) const = 0;
-
-  /**
-   * Get all the update wal units.
-   */
-  virtual const std::vector<UpdateWalUnit>& get_update_wals() const = 0;
+  virtual const std::vector<WalReplayUnit>& replay_units() const = 0;
 };
 
 class WalWriterFactory {
@@ -136,15 +127,15 @@ class WalWriterFactory {
 class WalParserFactory {
  public:
   using wal_writer_initializer_t = std::unique_ptr<IWalWriter> (*)();
-  using wal_parser_initializer_t =
-      std::unique_ptr<IWalParser> (*)(const std::string& wal_dir);
+  using wal_parser_initializer_t = std::unique_ptr<IWalParser> (*)(
+      const std::string& wal_dir, uint64_t checkpoint_id);
 
   static void Init();
 
   static void Finalize();
 
-  static std::unique_ptr<IWalParser> CreateWalParser(
-      const std::string& wal_uri);
+  static std::unique_ptr<IWalParser> CreateWalParser(const std::string& wal_uri,
+                                                     uint64_t checkpoint_id);
 
   static bool RegisterWalParser(const std::string& wal_parser_type,
                                 wal_parser_initializer_t initializer);
