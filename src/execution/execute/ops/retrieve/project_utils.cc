@@ -74,6 +74,10 @@ struct VertexPropertyExpr : public ProjectExprBase {
     builder.reserve(chunk.row_num());
     foreach_vertex(vertex_col, [&](size_t idx, label_t label, vid_t vid) {
       auto prop_col = property_columns[label];
+      if (prop_col->is_null(vid)) {
+        builder.push_back_null();
+        return;
+      }
       if constexpr (std::is_same_v<T, std::string_view>) {
         builder.push_back_opt(std::string(prop_col->get_view(vid)));
       } else {

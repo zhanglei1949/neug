@@ -1366,6 +1366,71 @@ TEST_F(ConnectionTest, ExplicitTransactionCopiesVerticesBeforeEdges) {
   EXPECT_EQ(rows.value().response().row_count(), 1);
 }
 
+TEST_F(ConnectionTest,
+       ExplicitCopyRollbackPreservesDeletedParallelEdgePayload) {
+  const auto nodes =
+      std::filesystem::path(DB_DIR) / "explicit-copy-rollback-nodes.csv";
+  const auto edges =
+      std::filesystem::path(DB_DIR) / "explicit-copy-rollback-edges.csv";
+  {
+    std::ofstream out(nodes);
+    out << "id,name\n1,one\n2,two\n";
+  }
+  {
+    std::ofstream out(edges);
+    out << "from,to,kind,line\n1,2,calls,10\n1,2,references,20\n";
+  }
+
+  NeugDB db;
+  NeugDBConfig config;
+  config.data_dir = DB_DIR;
+  config.mode = DBMode::READ_WRITE;
+  config.checkpoint_on_close = false;
+  ASSERT_TRUE(db.Open(config));
+  auto conn = db.Connect();
+  ASSERT_TRUE(conn->Query(
+      "CREATE NODE TABLE CopyRollbackNode(id INT64, name STRING, PRIMARY "
+      "KEY(id));",
+      "schema"));
+  ASSERT_TRUE(conn->Query(
+      "CREATE REL TABLE CopyRollbackEdge(FROM CopyRollbackNode TO "
+      "CopyRollbackNode, kind STRING, line INT32);",
+      "schema"));
+  ASSERT_TRUE(conn->Query("COPY CopyRollbackNode FROM '" + nodes.string() +
+                          "' (HEADER=true, DELIMITER=',');"));
+  ASSERT_TRUE(conn->Query(
+      "COPY CopyRollbackEdge FROM '" + edges.string() +
+      "' (FROM='CopyRollbackNode', TO='CopyRollbackNode', HEADER=true, "
+      "DELIMITER=',');"));
+
+  ASSERT_TRUE(conn->BeginTransaction(TransactionMode::kReadWrite).ok());
+  ASSERT_TRUE(conn->Query("MATCH (n:CopyRollbackNode) DETACH DELETE n;"));
+  ASSERT_TRUE(conn->Query("COPY CopyRollbackNode FROM '" + nodes.string() +
+                          "' (HEADER=true, DELIMITER=',');"));
+  ASSERT_TRUE(conn->Query(
+      "COPY CopyRollbackEdge FROM '" + edges.string() +
+      "' (FROM='CopyRollbackNode', TO='CopyRollbackNode', HEADER=true, "
+      "DELIMITER=',');"));
+  ASSERT_TRUE(conn->Rollback().ok());
+
+  auto rows = conn->Query(
+      "MATCH (a:CopyRollbackNode)-[r:CopyRollbackEdge]->"
+      "(b:CopyRollbackNode) RETURN a.id, b.id, r.kind, r.line ORDER BY r.line;",
+      "read");
+  ASSERT_TRUE(rows) << rows.error().ToString();
+  const auto& response = rows.value().response();
+  ASSERT_EQ(response.row_count(), 2);
+  ASSERT_EQ(response.arrays_size(), 4);
+  EXPECT_EQ(response.arrays(0).int64_array().values(0), 1);
+  EXPECT_EQ(response.arrays(0).int64_array().values(1), 1);
+  EXPECT_EQ(response.arrays(1).int64_array().values(0), 2);
+  EXPECT_EQ(response.arrays(1).int64_array().values(1), 2);
+  EXPECT_EQ(response.arrays(2).string_array().values(0), "calls");
+  EXPECT_EQ(response.arrays(2).string_array().values(1), "references");
+  EXPECT_EQ(response.arrays(3).int32_array().values(0), 10);
+  EXPECT_EQ(response.arrays(3).int32_array().values(1), 20);
+}
+
 TEST_F(ConnectionTest, ExplicitTransactionSkipsCheckpointForNoOpEdgeCopy) {
   const auto vertices =
       std::filesystem::path(DB_DIR) / "explicit-copy-noop-edge-vertices.csv";

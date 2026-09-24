@@ -59,6 +59,8 @@ class NEUG_API EdgeTable {
 
   void DetachOutCsr();
   void DetachInCsr();
+  void DetachOutCsrForBatchWrite();
+  void DetachInCsrForBatchWrite();
 
   void SetEdgeSchema(std::shared_ptr<const EdgeSchema> meta);
 

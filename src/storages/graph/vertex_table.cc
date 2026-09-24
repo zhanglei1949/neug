@@ -82,6 +82,15 @@ std::vector<vid_t> VertexTable::insert_vertices(
         << ") does not match the number of properties ("
         << property_names.size() + 1 << ").";
     auto ind = std::get<2>(vertex_schema_->primary_keys[0]);
+    const auto& input_pk_col = columns[ind];
+    for (size_t row_idx = 0; row_idx < input_pk_col->size(); ++row_idx) {
+      if (NEUG_UNLIKELY(input_pk_col->get_elem(row_idx).IsNull())) {
+        THROW_INVALID_ARGUMENT_EXCEPTION(
+            "COPY into vertex table [" + vertex_schema_->label_name +
+            "] contains NULL primary key at row " +
+            std::to_string(row_idx));
+      }
+    }
     auto pk_col = columns[ind];
 
     // Build a list of property columns excluding the PK column.

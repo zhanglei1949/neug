@@ -1066,6 +1066,42 @@ Status CowGraphStorage::detachEdgeTableForInsert(uint32_t edge_triplet_id) {
   return Status::OK();
 }
 
+Status CowGraphStorage::detachEdgeTableForBatchInsert(
+    uint32_t edge_triplet_id) {
+  if (!graph_.HasEdgeTable(edge_triplet_id)) {
+    return Status(StatusCode::ERR_INVALID_ARGUMENT,
+                  "Edge table for edge label triplet not found");
+  }
+  auto& state = detach_state_.edge_tables[edge_triplet_id];
+  auto& edge_table = graph_.get_edge_table_by_index(edge_triplet_id);
+  bool did_detach = false;
+  if (!state.out_csr_batch_detached) {
+    edge_table.DetachOutCsrForBatchWrite();
+    state.out_csr_detached = true;
+    state.out_csr_batch_detached = true;
+    did_detach = true;
+  }
+  if (!state.in_csr_batch_detached) {
+    edge_table.DetachInCsrForBatchWrite();
+    state.in_csr_detached = true;
+    state.in_csr_batch_detached = true;
+    did_detach = true;
+  }
+  if (edge_table.table()) {
+    for (size_t i = 0; i < state.columns_detached.size(); ++i) {
+      if (!state.columns_detached[i]) {
+        edge_table.table()->DetachColumn(i, ckp_, graph_.memory_level());
+        state.columns_detached[i] = true;
+        did_detach = true;
+      }
+    }
+  }
+  if (did_detach) {
+    mut_view_.Rebuild(graph_);
+  }
+  return Status::OK();
+}
+
 Status CowGraphStorage::detachEdgeTableForDelete(uint32_t edge_triplet_id) {
   if (!graph_.HasEdgeTable(edge_triplet_id)) {
     return Status(StatusCode::ERR_INVALID_ARGUMENT,
@@ -1271,7 +1307,7 @@ Status BulkCowGraphStorage::BatchAddEdgesImpl(
   RETURN_IF_NOT_OK(validateTargetPersistence(is_temporary));
   const uint32_t edge_triplet_id =
       graph_.schema().generate_edge_label(src_label, dst_label, edge_label);
-  RETURN_IF_NOT_OK(detachEdgeTableForInsert(edge_triplet_id));
+  RETURN_IF_NOT_OK(detachEdgeTableForBatchInsert(edge_triplet_id));
   auto& edge_table = graph_.get_edge_table_by_index(edge_triplet_id);
   const size_t edge_num_before = edge_table.EdgeNum();
   RETURN_IF_NOT_OK(graph_.BatchAddEdges(src_label, dst_label, edge_label,

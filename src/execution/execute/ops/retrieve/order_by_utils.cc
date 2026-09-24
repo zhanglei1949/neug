@@ -42,7 +42,11 @@ bool vertex_property_topN_impl(bool asc, size_t limit,
     TopNGenerator<T, TopNAscCmp<T>> gen(limit);
     foreach_vertex(*col, [&](size_t idx, label_t label, vid_t v) {
       if (!(property_columns[label] == nullptr)) {
-        gen.push(property_columns[label]->get_view(v), idx);
+        if (property_columns[label]->is_null(v)) {
+          success = false;
+        } else {
+          gen.push(property_columns[label]->get_view(v), idx);
+        }
       } else {
         success = false;
       }
@@ -54,7 +58,11 @@ bool vertex_property_topN_impl(bool asc, size_t limit,
     TopNGenerator<T, TopNDescCmp<T>> gen(limit);
     foreach_vertex(*col, [&](size_t idx, label_t label, vid_t v) {
       if (!(property_columns[label] == nullptr)) {
-        gen.push(property_columns[label]->get_view(v), idx);
+        if (property_columns[label]->is_null(v)) {
+          success = false;
+        } else {
+          gen.push(property_columns[label]->get_view(v), idx);
+        }
       } else {
         success = false;
       }

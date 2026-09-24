@@ -1,3 +1,4 @@
+add_neug_test(test_c_api test_c_api.cc)
 add_neug_test(test_request test_query_request.cc)
 add_neug_test(test_execution_slot test_execution_slot.cc)
 add_neug_test(test_file_lock test_file_lock.cc)

@@ -313,6 +313,9 @@ class EdgeExpand {
           auto v = vertices[idx];
           auto es0 = csr0.get_edges(v);
           for (auto it0 = es0.begin(); it0 != es0.end(); ++it0) {
+            if (ed_accessor0.is_null(it0)) {
+              continue;
+            }
             auto ed0 = ed_accessor0.get_typed_data<T1>(it0);
             if (ed0 < param) {
               auto nbr0 = it0.get_vertex();
@@ -329,6 +332,9 @@ class EdgeExpand {
           auto v = vertices[idx];
           auto es0 = csr0.get_edges(v);
           for (auto it0 = es0.begin(); it0 != es0.end(); ++it0) {
+            if (ed_accessor0.is_null(it0)) {
+              continue;
+            }
             auto ed0 = ed_accessor0.get_typed_data<T1>(it0);
             if (param < ed0) {
               auto nbr0 = it0.get_vertex();

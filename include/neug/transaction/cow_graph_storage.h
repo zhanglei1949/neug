@@ -130,6 +130,7 @@ class CowGraphStorage : public StorageUpdateInterface,
   Status detachVertexTableForDelete(label_t label);
   Status detachVertexColumn(label_t label, int32_t col_id);
   Status detachEdgeTableForInsert(uint32_t edge_triplet_id);
+  Status detachEdgeTableForBatchInsert(uint32_t edge_triplet_id);
   Status detachEdgeTableForDelete(uint32_t edge_triplet_id);
   Status detachEdgeColumn(uint32_t edge_triplet_id, int32_t col_id);
   Status detachAdjlists(uint32_t edge_triplet_id, vid_t src_lid, vid_t dst_lid,

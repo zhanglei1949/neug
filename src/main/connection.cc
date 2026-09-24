@@ -31,7 +31,11 @@ Connection::Connection(std::unique_ptr<ExecutionSlot> execution_slot,
   CHECK(execution_slot_ != nullptr);
 }
 
-Connection::~Connection() { Close(); }
+Connection::~Connection() {
+  if (!IsClosed()) {
+    Close();
+  }
+}
 
 std::string Connection::GetSchema() const {
   if (IsClosed()) {

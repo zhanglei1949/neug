@@ -36,6 +36,8 @@ struct VertexTableDetachState {
 struct EdgeTableDetachState {
   bool out_csr_detached{false};
   bool in_csr_detached{false};
+  bool out_csr_batch_detached{false};
+  bool in_csr_batch_detached{false};
   std::vector<bool> columns_detached;
   // Per-vertex adjlist detachment tracking (sparse, lazily populated).
   // Ensures each adjlist is only detached once per transaction.

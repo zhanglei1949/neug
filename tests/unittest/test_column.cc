@@ -341,6 +341,119 @@ TYPED_TEST(TypedColumnStringCowTest, CowIsolationAndDumpOpenMatrix) {
   expect_signature_eq(reopened_sig, cow_after);
 }
 
+TEST(TypedColumnNullTest, FixedLengthNullSurvivesCowAndCheckpoint) {
+  auto temp_dir =
+      std::filesystem::temp_directory_path() /
+      ("typed_column_null_int_" +
+       std::to_string(
+           std::chrono::steady_clock::now().time_since_epoch().count()));
+  std::filesystem::remove_all(temp_dir);
+  std::filesystem::create_directories(temp_dir);
+  CheckpointManager checkpoint_mgr;
+  checkpoint_mgr.Open(temp_dir.string());
+  auto ckp = make_checkpoint(checkpoint_mgr);
+
+  TypedColumn<int32_t> column;
+  column.Open(*ckp, ModuleDescriptor{}, MemoryLevel::kInMemory);
+  column.resize(3);
+  column.set_value(0, 10);
+  column.set_any(1, Value(DataType::INT32), false);
+  column.set_value(2, 30);
+  EXPECT_FALSE(column.is_null(0));
+  EXPECT_TRUE(column.is_null(1));
+  EXPECT_TRUE(column.get_any(1).IsNull());
+
+  auto clone_module = column.Clone();
+  auto* clone = dynamic_cast<TypedColumn<int32_t>*>(clone_module.get());
+  ASSERT_NE(clone, nullptr);
+  clone->Detach(*ckp, MemoryLevel::kInMemory);
+  clone->set_value(1, 20);
+  EXPECT_TRUE(column.is_null(1));
+  EXPECT_FALSE(clone->is_null(1));
+
+  auto dump_ckp = make_checkpoint(checkpoint_mgr);
+  auto desc = dump_module_descriptor(column, *dump_ckp, "nullable_int");
+  TypedColumn<int32_t> reopened;
+  reopened.Open(*dump_ckp, desc, MemoryLevel::kInMemory);
+  EXPECT_EQ(reopened.get_any(0).GetValue<int32_t>(), 10);
+  EXPECT_TRUE(reopened.get_any(1).IsNull());
+  EXPECT_EQ(reopened.get_any(2).GetValue<int32_t>(), 30);
+
+  auto ref = CreateRefColumn(reopened);
+  EXPECT_TRUE(ref->is_null(1));
+  EXPECT_TRUE(ref->get_any(1).IsNull());
+  std::filesystem::remove_all(temp_dir);
+}
+
+TEST(TypedColumnNullTest, StringNullAndEmptyStringRemainDistinct) {
+  auto temp_dir =
+      std::filesystem::temp_directory_path() /
+      ("typed_column_null_string_" +
+       std::to_string(
+           std::chrono::steady_clock::now().time_since_epoch().count()));
+  std::filesystem::remove_all(temp_dir);
+  std::filesystem::create_directories(temp_dir);
+  CheckpointManager checkpoint_mgr;
+  checkpoint_mgr.Open(temp_dir.string());
+  auto ckp = make_checkpoint(checkpoint_mgr);
+
+  StringColumn column;
+  column.Open(*ckp, ModuleDescriptor{}, MemoryLevel::kInMemory);
+  column.resize(3);
+  column.set_value(0, "value");
+  column.set_value(1, "");
+  column.set_any(2, Value(DataType::VARCHAR), true);
+  EXPECT_FALSE(column.get_any(1).IsNull());
+  EXPECT_EQ(column.get_any(1).GetValue<std::string>(), "");
+  EXPECT_TRUE(column.get_any(2).IsNull());
+
+  auto dump_ckp = make_checkpoint(checkpoint_mgr);
+  auto desc = dump_module_descriptor(column, *dump_ckp, "nullable_string");
+  StringColumn reopened;
+  reopened.Open(*dump_ckp, desc, MemoryLevel::kInMemory);
+  EXPECT_EQ(reopened.get_any(0).GetValue<std::string>(), "value");
+  EXPECT_FALSE(reopened.get_any(1).IsNull());
+  EXPECT_EQ(reopened.get_any(1).GetValue<std::string>(), "");
+  EXPECT_TRUE(reopened.get_any(2).IsNull());
+
+  reopened.copy_item(0, 2);
+  EXPECT_TRUE(reopened.get_any(0).IsNull());
+  std::filesystem::remove_all(temp_dir);
+}
+
+TEST(TypedColumnNullTest, MissingValidityObjectMeansAllRowsValid) {
+  auto temp_dir =
+      std::filesystem::temp_directory_path() /
+      ("typed_column_legacy_validity_" +
+       std::to_string(
+           std::chrono::steady_clock::now().time_since_epoch().count()));
+  std::filesystem::remove_all(temp_dir);
+  std::filesystem::create_directories(temp_dir);
+  CheckpointManager checkpoint_mgr;
+  checkpoint_mgr.Open(temp_dir.string());
+  auto ckp = make_checkpoint(checkpoint_mgr);
+
+  TypedColumn<int32_t> column;
+  column.Open(*ckp, ModuleDescriptor{}, MemoryLevel::kInMemory);
+  column.resize(2);
+  column.set_value(0, 7);
+  column.set_value(1, 9);
+  auto dump_ckp = make_checkpoint(checkpoint_mgr);
+  auto desc = dump_module_descriptor(column, *dump_ckp, "legacy_source");
+
+  ModuleDescriptor legacy_desc;
+  legacy_desc.module_type = desc.module_type;
+  legacy_desc.set_path(ModuleDescriptor::kDataPath,
+                       *desc.get_path(ModuleDescriptor::kDataPath));
+  TypedColumn<int32_t> reopened;
+  reopened.Open(*dump_ckp, legacy_desc, MemoryLevel::kInMemory);
+  EXPECT_FALSE(reopened.is_null(0));
+  EXPECT_FALSE(reopened.is_null(1));
+  EXPECT_EQ(reopened.get_any(0).GetValue<int32_t>(), 7);
+  EXPECT_EQ(reopened.get_any(1).GetValue<int32_t>(), 9);
+  std::filesystem::remove_all(temp_dir);
+}
+
 TEST(StringColumnTest, CopyItemDoesNotAppendPayload) {
   auto temp_dir =
       std::filesystem::temp_directory_path() /

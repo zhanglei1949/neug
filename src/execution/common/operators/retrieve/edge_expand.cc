@@ -349,6 +349,9 @@ void expand_vertex_ep_cmp_impl(const StorageReadInterface& graph,
         vid_t v = vertices[idx];
         auto es = view.get_edges(v);
         for (auto it = es.begin(); it != es.end(); ++it) {
+          if (ed_accessor.is_null(it)) {
+            continue;
+          }
           auto nbr = it.get_vertex();
           auto ed = ed_accessor.get_typed_data<T>(it);
           if (cmp_val < ed) {
@@ -363,6 +366,9 @@ void expand_vertex_ep_cmp_impl(const StorageReadInterface& graph,
         vid_t v = vertices[idx];
         auto es = view.get_edges(v);
         for (auto it = es.begin(); it != es.end(); ++it) {
+          if (ed_accessor.is_null(it)) {
+            continue;
+          }
           auto nbr = it.get_vertex();
           auto ed = ed_accessor.get_typed_data<T>(it);
           if (ed < cmp_val) {

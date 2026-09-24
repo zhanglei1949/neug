@@ -327,6 +327,16 @@ struct EdgeDataAccessor {
                      *reinterpret_cast<const size_t*>(data_ptr));
   }
 
+  inline bool is_null(const NbrIterator& it) const {
+    return is_null_from_ptr(it.get_data_ptr());
+  }
+
+  inline bool is_null_from_ptr(const void* data_ptr) const {
+    return data_column_ != nullptr &&
+           data_column_->is_null(
+               *reinterpret_cast<const size_t*>(data_ptr));
+  }
+
   inline void set_data(const NbrIterator& it, const Value& value,
                        timestamp_t ts) {
     if (data_column_ != nullptr) {

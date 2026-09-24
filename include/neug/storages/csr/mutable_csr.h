@@ -228,6 +228,13 @@ class MutableCsr : public TypedCsrBase<EDATA_T> {
     // nbr_list_ need no deep copy
   }
 
+  void DetachForBatchWrite(Checkpoint& ckp, MemoryLevel level) override {
+    adj_list_buffer_ = adj_list_buffer_->Fork(ckp, level);
+    degree_list_ = degree_list_->Fork(ckp, level);
+    cap_list_ = cap_list_->Fork(ckp, level);
+    nbr_list_ = nbr_list_->Fork(ckp, level);
+  }
+
   std::string ModuleTypeName() const override { return type_name(); }
 
   static std::string type_name() {

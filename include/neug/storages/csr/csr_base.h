@@ -92,6 +92,13 @@ class CsrBase : public Module {
   /// (e.g. CowDetachState) is responsible for tracking which
   /// adjlists have been detached.
   virtual void DetachVertex(vid_t vid, Allocator& alloc) = 0;
+
+  /// Detach every buffer that batch insertion may resize or rewrite.
+  /// Point mutations may keep the packed neighbor payload shared and detach
+  /// only touched adjacency lists, but batch_put_edges rebuilds that payload.
+  virtual void DetachForBatchWrite(Checkpoint& ckp, MemoryLevel level) {
+    Detach(ckp, level);
+  }
 };
 
 template <typename EDATA_T>

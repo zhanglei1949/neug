@@ -73,6 +73,11 @@ class SLEdgePropertyGetter {
     return ed_accessor_.get_typed_data_from_ptr<T>(data_ptr);
   }
 
+  inline bool is_null(label_t, vid_t, label_t, vid_t, label_t, Direction,
+                      const void* data_ptr) const {
+    return ed_accessor_.is_null_from_ptr(data_ptr);
+  }
+
  private:
   EdgeDataAccessor ed_accessor_;
 };
@@ -110,6 +115,15 @@ class MLEdgePropertyGetter {
         .template get_typed_data_from_ptr<T>(data_ptr);
   }
 
+  inline bool is_null(label_t v_label, vid_t, label_t nbr_label, vid_t,
+                      label_t edge_label, Direction dir,
+                      const void* data_ptr) const {
+    auto label_triplet = (dir == Direction::kOut)
+                             ? LabelTriplet{v_label, nbr_label, edge_label}
+                             : LabelTriplet{nbr_label, v_label, edge_label};
+    return ed_accessors_.at(label_triplet).is_null_from_ptr(data_ptr);
+  }
+
  private:
   std::map<LabelTriplet, EdgeDataAccessor> ed_accessors_;
 };
@@ -127,6 +141,8 @@ class SLVertexPropertyGetter {
   ~SLVertexPropertyGetter() = default;
 
   inline T get(label_t label, vid_t v) const { return column_->get_view(v); }
+
+  inline bool is_null(label_t, vid_t v) const { return column_->is_null(v); }
 
  private:
   std::shared_ptr<StorageReadInterface::vertex_column_t<T>> column_;
@@ -151,6 +167,10 @@ class MLVertexPropertyGetter {
 
   inline T get(label_t label, vid_t v) const {
     return columns_[label]->get_view(v);
+  }
+
+  inline bool is_null(label_t label, vid_t v) const {
+    return columns_[label]->is_null(v);
   }
 
  private:
@@ -281,6 +301,10 @@ class EdgePropertyCmpPredicate {
   bool operator()(label_t v_label, vid_t v, label_t nbr_label, vid_t nbr,
                   label_t edge_label, Direction dir,
                   const void* data_ptr) const {
+    if (getter_.is_null(v_label, v, nbr_label, nbr, edge_label, dir,
+                        data_ptr)) {
+      return false;
+    }
     T val = getter_.get(v_label, v, nbr_label, nbr, edge_label, dir, data_ptr);
     return cmp_(val);
   }
@@ -300,6 +324,9 @@ class VertexPropertyCmpPredicate {
       : getter_(getter), cmp_(cmp) {}
 
   bool operator()(label_t label, vid_t v) const {
+    if (getter_.is_null(label, v)) {
+      return false;
+    }
     T val = getter_.get(label, v);
     return cmp_(val);
   }

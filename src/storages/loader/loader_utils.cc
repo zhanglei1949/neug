@@ -1625,11 +1625,18 @@ void set_column_from_value_column(
       if (vids[k] >= std::numeric_limits<vid_t>::max())
         continue;
       if (value_col) {
-        write(vids[k], value_col->data()[k]);
+        if (value_col->has_value(k)) {
+          write(vids[k], value_col->data()[k]);
+        } else {
+          typed->set_null(vids[k]);
+        }
       } else {
         auto val = ctx_col->get_elem(k);
-        if (!val.IsNull())
+        if (!val.IsNull()) {
           write(vids[k], val.GetValue<std::string>());
+        } else {
+          typed->set_null(vids[k]);
+        }
       }
     }
   } else {
@@ -1637,11 +1644,18 @@ void set_column_from_value_column(
       if (vids[k] >= std::numeric_limits<vid_t>::max())
         continue;
       if (value_col) {
-        typed->set_value(vids[k], value_col->data()[k]);
+        if (value_col->has_value(k)) {
+          typed->set_value(vids[k], value_col->data()[k]);
+        } else {
+          typed->set_null(vids[k]);
+        }
       } else {
         auto val = ctx_col->get_elem(k);
-        if (!val.IsNull())
+        if (!val.IsNull()) {
           typed->set_value(vids[k], val.GetValue<COL_T>());
+        } else {
+          typed->set_null(vids[k]);
+        }
       }
     }
   }
@@ -1685,9 +1699,7 @@ void set_properties_from_context_column(
         continue;
       }
       auto value = ctx_col->get_elem(k);
-      if (!value.IsNull()) {
-        col->set_any(vids[k], value, true);
-      }
+      col->set_any(vids[k], value, true);
     }
     break;
   }

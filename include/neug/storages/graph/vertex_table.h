@@ -310,7 +310,10 @@ class NEUG_API VertexTable {
         continue;
       }
       if (NEUG_UNLIKELY(v_ts_->IsVertexValid(vids[j], MAX_TIMESTAMP))) {
-        vids[j] = std::numeric_limits<vid_t>::max();
+        THROW_INVALID_ARGUMENT_EXCEPTION(
+            "COPY into vertex table [" + vertex_schema_->label_name +
+            "] contains duplicate active primary key " +
+            pk_col->get_elem(j).to_string());
       } else {
         v_ts_->InsertVertex(vids[j], 0);
       }

@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <memory>
 #include <mutex>
@@ -72,6 +73,84 @@ class ColumnBase : public Module {
   virtual void set_any(size_t index, const Value& value, bool insert_safe) = 0;
 
   virtual Value get_any(size_t index) const = 0;
+
+  virtual bool is_null(size_t index) const {
+    if (!validity_buffer_) {
+      return false;
+    }
+    if (index >= validity_buffer_->GetDataSize()) {
+      THROW_RUNTIME_ERROR("Index out of range");
+    }
+    return reinterpret_cast<const uint8_t*>(validity_buffer_->GetData())
+               [index] == 0;
+  }
+
+  virtual void set_null(size_t index) {
+    if (!validity_buffer_) {
+      THROW_NOT_SUPPORTED_EXCEPTION("NULL is not supported for column type " +
+                                    DataType(type()).ToString());
+    }
+    set_validity(index, false);
+  }
+
+ protected:
+  void open_validity(Checkpoint& ckp, const ModuleDescriptor& desc,
+                     MemoryLevel level, size_t size) {
+    const auto path = desc.get_path(ModuleDescriptor::kValidityPath);
+    validity_buffer_ = ckp.OpenFile(path.value_or(""), level);
+    if (path.has_value()) {
+      if (validity_buffer_->GetDataSize() != size) {
+        THROW_STORAGE_EXCEPTION(
+            "Column validity size does not match column row count");
+      }
+      return;
+    }
+    validity_buffer_->Resize(size);
+    if (size > 0) {
+      std::memset(validity_buffer_->GetData(), 1, size);
+    }
+  }
+
+  void dump_validity(Checkpoint& ckp, ModuleDescriptor& desc) const {
+    if (!validity_buffer_) {
+      THROW_RUNTIME_ERROR("Validity buffer is not initialized");
+    }
+    desc.set_path(ModuleDescriptor::kValidityPath,
+                  ckp.Commit(*validity_buffer_));
+  }
+
+  void resize_validity(size_t size, bool new_rows_valid = false) {
+    if (!validity_buffer_) {
+      THROW_RUNTIME_ERROR("Validity buffer is not initialized");
+    }
+    const size_t old_size = validity_buffer_->GetDataSize();
+    validity_buffer_->Resize(size);
+    if (size > old_size) {
+      std::memset(reinterpret_cast<uint8_t*>(validity_buffer_->GetData()) +
+                      old_size,
+                  new_rows_valid ? 1 : 0, size - old_size);
+    }
+  }
+
+  void set_validity(size_t index, bool valid) {
+    if (!validity_buffer_ || index >= validity_buffer_->GetDataSize()) {
+      THROW_RUNTIME_ERROR("Index out of range");
+    }
+    reinterpret_cast<uint8_t*>(validity_buffer_->GetData())[index] =
+        valid ? 1 : 0;
+  }
+
+  void clone_validity_to(ColumnBase& other) const {
+    other.validity_buffer_ = validity_buffer_;
+  }
+
+  void detach_validity(Checkpoint& ckp, MemoryLevel level) {
+    if (validity_buffer_) {
+      validity_buffer_ = validity_buffer_->Fork(ckp, level);
+    }
+  }
+
+  std::shared_ptr<IDataContainer> validity_buffer_;
 };
 
 template <typename T>
@@ -86,6 +165,7 @@ class TypedColumn : public ColumnBase {
     buffer_ = ckp.OpenFile(
         desc.get_path(ModuleDescriptor::kDataPath).value_or(""), level);
     size_ = buffer_->GetDataSize() / sizeof(T);
+    open_validity(ckp, desc, level, size_);
   }
 
   void Close() { buffer_.reset(); }
@@ -94,6 +174,7 @@ class TypedColumn : public ColumnBase {
             const std::string& key) override {
     ModuleDescriptor desc;
     desc.set_path(ModuleDescriptor::kDataPath, ckp.Commit(*buffer_));
+    dump_validity(ckp, desc);
     desc.module_type = ModuleTypeName();
     meta.SetModule(key, std::move(desc));
   }
@@ -101,6 +182,7 @@ class TypedColumn : public ColumnBase {
   size_t size() const override { return size_; }
 
   void resize(size_t size) override {
+    resize_validity(size);
     size_ = size;
     buffer_->Resize(size_ * sizeof(T));
   }
@@ -108,12 +190,16 @@ class TypedColumn : public ColumnBase {
   // Assume it is safe to insert the default value even if it is reserving,
   // since user could always override
   void resize(size_t size, const Value& default_value) override {
-    if (default_value.type().id() != type()) {
+    if (!default_value.IsNull() && default_value.type().id() != type()) {
       THROW_RUNTIME_ERROR("Default value type does not match column type");
     }
     size_t old_size = size_;
     size_ = size;
     buffer_->Resize(size_ * sizeof(T));
+    resize_validity(size_);
+    if (default_value.IsNull()) {
+      return;
+    }
     auto default_typed_value = default_value.GetValue<T>();
     for (size_t i = old_size; i < size_; ++i) {
       set_value(i, default_typed_value);
@@ -125,6 +211,7 @@ class TypedColumn : public ColumnBase {
   void set_value(size_t index, const T& val) {
     if (index < size_) {
       reinterpret_cast<T*>(buffer_->GetData())[index] = val;
+      set_validity(index, true);
     } else {
       THROW_RUNTIME_ERROR("Index out of range");
     }
@@ -133,6 +220,7 @@ class TypedColumn : public ColumnBase {
   void set_any(size_t index, const Value& value, bool insert_safe) override {
     if (value.IsNull()) {
       set_value(index, T());
+      set_null(index);
       return;
     }
     // allow resize is ignored for fixed-length types
@@ -145,6 +233,9 @@ class TypedColumn : public ColumnBase {
   }
 
   Value get_any(size_t index) const override {
+    if (is_null(index)) {
+      return Value(DataType(type()));
+    }
     return Value::CreateValue<T>(get_view(index));
   }
 
@@ -163,11 +254,13 @@ class TypedColumn : public ColumnBase {
     auto new_col = std::make_unique<TypedColumn<T>>();
     new_col->buffer_ = buffer_;
     new_col->size_ = size_;
+    clone_validity_to(*new_col);
     return new_col;
   }
 
   void Detach(Checkpoint& ckp, MemoryLevel level) override {
     buffer_ = buffer_->Fork(ckp, level);
+    detach_validity(ckp, level);
   }
 
   std::string ModuleTypeName() const override { return type_name(); }
@@ -252,6 +345,7 @@ class TypedColumn<std::string_view> : public ColumnBase {
     size_ = rhs.size_;
     pos_ = rhs.pos_.load();
     width_ = rhs.width_;
+    validity_buffer_ = std::move(rhs.validity_buffer_);
   }
 
   ~TypedColumn() = default;
@@ -266,6 +360,7 @@ class TypedColumn<std::string_view> : public ColumnBase {
     data_buffer_ = ckp.OpenFile(
         desc.get_path(ModuleDescriptor::kDataPath).value_or(""), level);
     size_ = items_buffer_->GetDataSize() / sizeof(string_item);
+    open_validity(ckp, desc, level, size_);
     pos_.store(std::stoull(desc.get("pos").value_or("0")));
     assert(pos_.load() <= data_buffer_->GetDataSize());
   }
@@ -273,6 +368,7 @@ class TypedColumn<std::string_view> : public ColumnBase {
   void Close() {
     items_buffer_.reset();
     data_buffer_.reset();
+    validity_buffer_.reset();
   }
 
   bool is_data_unmodified() const {
@@ -308,6 +404,7 @@ class TypedColumn<std::string_view> : public ColumnBase {
                     ckp.MaterializeObject(items_buffer_->GetPath()));
       desc.set_path(ModuleDescriptor::kDataPath,
                     ckp.MaterializeObject(data_buffer_->GetPath()));
+      dump_validity(ckp, desc);
       meta.SetModule(key, std::move(desc));
       return;
     }
@@ -393,12 +490,14 @@ class TypedColumn<std::string_view> : public ColumnBase {
                   ckp.CommitRuntimeFile(std::move(item_runtime_file)));
     desc.set_path(ModuleDescriptor::kDataPath,
                   ckp.CommitRuntimeFile(std::move(data_runtime_file)));
+    dump_validity(ckp, desc);
     meta.SetModule(key, std::move(desc));
   }
 
   size_t size() const override { return size_; }
 
   void resize(size_t size) override {
+    resize_validity(size);
     if (items_buffer_->GetDataSize() == 0) {
       items_buffer_->Resize(size * sizeof(string_item));
       data_buffer_->Resize(
@@ -420,24 +519,34 @@ class TypedColumn<std::string_view> : public ColumnBase {
     if (data_bytes > data_buffer_->GetDataSize()) {
       data_buffer_->Resize(data_bytes);
     }
+    resize_validity(std::max(size_, size));
     size_ = std::max(size_, size);
   }
 
   void resize(size_t size, const Value& default_value) override {
-    if (default_value.type().id() != type()) {
+    if (!default_value.IsNull() && default_value.type().id() != type()) {
       THROW_RUNTIME_ERROR("Default value type does not match column type");
     }
     size_t old_size = size_;
     size_ = size;
-    auto default_str = default_value.GetValue<std::string>();
-    default_str = truncate_utf8(default_str, width_);
 
     size_t new_items = (size > old_size) ? (size - old_size) : 0;
     items_buffer_->Resize(size * sizeof(string_item));
     size_t needed = pos_.load() + new_items * static_cast<size_t>(width_);
     data_buffer_->Resize(std::max(needed, size * string_avg_size()));
+    resize_validity(size_);
+
+    if (default_value.IsNull()) {
+      return;
+    }
+
+    auto default_str = default_value.GetValue<std::string>();
+    default_str = truncate_utf8(default_str, width_);
 
     if (default_str.size() == 0) {
+      for (size_t i = old_size; i < size_; ++i) {
+        set_value(i, std::string_view());
+      }
       return;
     }
 
@@ -446,6 +555,7 @@ class TypedColumn<std::string_view> : public ColumnBase {
       const auto& string_item = get_string_item(old_size);
       for (size_t i = old_size + 1; i < size_; ++i) {
         set_string_item(i, string_item);
+        set_validity(i, true);
       }
     }
   }
@@ -471,6 +581,7 @@ class TypedColumn<std::string_view> : public ColumnBase {
       assert(offset + copied_val.size() <= data_buffer_->GetDataSize());
       auto raw_data = reinterpret_cast<char*>(data_buffer_->GetData());
       memcpy(raw_data + offset, copied_val.data(), copied_val.size());
+      set_validity(idx, true);
     } else {
       std::stringstream ss;
       ss << "Not enough space in buffer for new value. "
@@ -489,6 +600,7 @@ class TypedColumn<std::string_view> : public ColumnBase {
     }
     if (value.IsNull()) {
       set_value(idx, std::string_view());
+      set_null(idx);
       return;
     }
     auto dst_value = value.GetValue<std::string>();
@@ -519,6 +631,9 @@ class TypedColumn<std::string_view> : public ColumnBase {
   }
 
   Value get_any(size_t index) const override {
+    if (is_null(index)) {
+      return Value(DataType::VARCHAR);
+    }
     return Value::STRING(std::string(get_view(index)));
   }
 
@@ -528,6 +643,7 @@ class TypedColumn<std::string_view> : public ColumnBase {
     new_col->data_buffer_ = data_buffer_;
     new_col->size_ = size_;
     new_col->pos_ = pos_.load();
+    clone_validity_to(*new_col);
     return new_col;
   }
 
@@ -535,6 +651,7 @@ class TypedColumn<std::string_view> : public ColumnBase {
   void Detach(Checkpoint& ckp, MemoryLevel level) override {
     items_buffer_ = items_buffer_->Fork(ckp, level);
     data_buffer_ = data_buffer_->Fork(ckp, level);
+    detach_validity(ckp, level);
   }
 
   size_t available_space() const {
@@ -549,6 +666,7 @@ class TypedColumn<std::string_view> : public ColumnBase {
   // are compacted by Dump, so relocating a row does not append to data_buffer_.
   void copy_item(size_t dst, size_t src) {
     set_string_item(dst, get_string_item(src));
+    set_validity(dst, !is_null(src));
   }
 
   // Shrink the logical rows and their metadata without resizing the string
@@ -556,6 +674,7 @@ class TypedColumn<std::string_view> : public ColumnBase {
   void shrink_items(size_t size) {
     assert(size <= size_);
     items_buffer_->Resize(size * sizeof(string_item));
+    resize_validity(size);
     size_ = size;
   }
 
@@ -613,6 +732,7 @@ class RefColumnBase {
   };
   virtual ~RefColumnBase() {}
   virtual Value get_any(size_t index) const = 0;
+  virtual bool is_null(size_t index) const { return false; }
   virtual DataTypeId type() const = 0;
   virtual ColType col_type() const = 0;
 };
@@ -624,7 +744,8 @@ class TypedRefColumn : public RefColumnBase {
   using value_type = T;
 
   explicit TypedRefColumn(const TypedColumn<T>& column)
-      : basic_buffer(reinterpret_cast<const T*>(column.buffer().GetData())),
+      : column_(column),
+        basic_buffer(reinterpret_cast<const T*>(column.buffer().GetData())),
         basic_size(column.buffer_size()) {}
   ~TypedRefColumn() {}
 
@@ -634,14 +755,17 @@ class TypedRefColumn : public RefColumnBase {
   }
 
   Value get_any(size_t index) const override {
-    return Value::CreateValue<T>(get_view(index));
+    return column_.get_any(index);
   }
+
+  bool is_null(size_t index) const override { return column_.is_null(index); }
 
   DataTypeId type() const override { return ValueConverter<T>::type().id(); }
 
   ColType col_type() const override { return ColType::kInternal; }
 
  private:
+  const TypedColumn<T>& column_;
   const T* basic_buffer;
   size_t basic_size;
 };
@@ -661,8 +785,10 @@ class TypedRefColumn<std::string_view> : public RefColumnBase {
   }
 
   Value get_any(size_t index) const override {
-    return Value::STRING(std::string(get_view(index)));
+    return column_.get_any(index);
   }
+
+  bool is_null(size_t index) const override { return column_.is_null(index); }
 
   DataTypeId type() const override { return DataTypeId::kVarchar; }
 

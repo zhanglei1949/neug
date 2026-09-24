@@ -39,6 +39,7 @@ struct ModuleDescriptor {
   // High-frequency path key constants
   static constexpr const char* kDataPath = "data";
   static constexpr const char* kItemsPath = "items";
+  static constexpr const char* kValidityPath = "validity";
   static constexpr const char* kNbrListPath = "nbr_list";
   static constexpr const char* kDegreeListPath = "degree_list";
   static constexpr const char* kCapacityListPath = "capacity_list";

@@ -220,6 +220,10 @@ void insert_edges_bundled_typed_impl(
     if (value_col) {
       for (size_t i = 0; i < value_col->size(); ++i) {
         if (valid_flags[cur_index++]) {
+          if (!value_col->has_value(i)) {
+            THROW_NOT_SUPPORTED_EXCEPTION(
+                "NULL is not supported for bundled edge properties");
+          }
           edge_data.push_back(value_col->get_value(i));
         }
       }
@@ -228,6 +232,10 @@ void insert_edges_bundled_typed_impl(
       for (size_t i = 0; i < col->size(); ++i) {
         if (valid_flags[cur_index++]) {
           auto val = col->get_elem(i);
+          if (val.IsNull()) {
+            THROW_NOT_SUPPORTED_EXCEPTION(
+                "NULL is not supported for bundled edge properties");
+          }
           edge_data.push_back(val.template GetValue<EDATA_T>());
         }
       }
@@ -264,14 +272,17 @@ struct TypedColumnInserter {
 };
 
 /// Fixed-length types: direct set_value, no Value, no virtual dispatch.
-/// Null entries already have T() in data_, so set_value writes the same
-/// default that set_any would write for null.
+/// Null entries update the destination validity buffer.
 template <typename T>
 void insert_typed_impl(const TypedColumnInserter& ins, size_t dst_idx,
                        size_t src_idx, bool /*insert_safe*/) {
   auto* typed_dst = static_cast<TypedColumn<T>*>(ins.dst);
   auto vc = static_cast<const ValueColumn<T>*>(ins.src);
-  typed_dst->set_value(dst_idx, vc->get_value(src_idx));
+  if (vc->has_value(src_idx)) {
+    typed_dst->set_value(dst_idx, vc->get_value(src_idx));
+  } else {
+    typed_dst->set_null(dst_idx);
+  }
 }
 
 /// Varchar: source is ValueColumn<std::string>, dest is
@@ -281,17 +292,19 @@ void insert_varchar_impl(const TypedColumnInserter& ins, size_t dst_idx,
                          size_t src_idx, bool insert_safe) {
   auto* typed_dst = static_cast<TypedColumn<std::string_view>*>(ins.dst);
   auto vc = static_cast<const ValueColumn<std::string>*>(ins.src);
-  typed_dst->set_any(dst_idx,
-                     Value::CreateValue<std::string>(vc->get_value(src_idx)),
-                     insert_safe);
+  if (vc->has_value(src_idx)) {
+    typed_dst->set_any(dst_idx,
+                       Value::CreateValue<std::string>(vc->get_value(src_idx)),
+                       insert_safe);
+  } else {
+    typed_dst->set_null(dst_idx);
+  }
 }
 
 void insert_nested_impl(const TypedColumnInserter& ins, size_t dst_idx,
                         size_t src_idx, bool insert_safe) {
   auto value = ins.src->get_elem(src_idx);
-  if (!value.IsNull()) {
-    ins.dst->set_any(dst_idx, value, insert_safe);
-  }
+  ins.dst->set_any(dst_idx, value, insert_safe);
 }
 
 TypedColumnInserter make_inserter(const DataType& type,
@@ -541,6 +554,16 @@ void EdgeTable::DetachOutCsr() {
 void EdgeTable::DetachInCsr() {
   CHECK(ckp_ != nullptr) << "Checkpoint is null, cannot detach in CSR";
   in_csr_->Detach(*ckp_, memory_level_);
+}
+
+void EdgeTable::DetachOutCsrForBatchWrite() {
+  CHECK(ckp_ != nullptr) << "Checkpoint is null, cannot detach out CSR";
+  out_csr_->DetachForBatchWrite(*ckp_, memory_level_);
+}
+
+void EdgeTable::DetachInCsrForBatchWrite() {
+  CHECK(ckp_ != nullptr) << "Checkpoint is null, cannot detach in CSR";
+  in_csr_->DetachForBatchWrite(*ckp_, memory_level_);
 }
 
 void EdgeTable::DetachOutAdjlist(vid_t vid, Allocator& alloc) {
@@ -849,7 +872,7 @@ void EdgeTable::BatchAddEdges(const IndexerType& src_indexer,
   std::vector<std::shared_ptr<IContextColumn>> bundled_data_cols;
   std::vector<std::shared_ptr<DataChunk>> unbundled_data_chunks;
   // Track edges whose src/dst ID does not resolve to an existing vertex so
-  // the user gets a clear warning instead of a silent drop (issue #166).
+  // COPY fails instead of silently dropping rows (issue #166).
   // Report detailed samples for the first kMaxDanglingEdgeSamples dangling
   // edges; beyond that only count them.
   constexpr size_t kMaxDanglingEdgeSamples = 20;
@@ -860,6 +883,20 @@ void EdgeTable::BatchAddEdges(const IndexerType& src_indexer,
     auto chunk = supplier->GetNextChunk();
     if (chunk == nullptr) {
       break;
+    }
+    for (size_t column_idx = 0;
+         column_idx < std::min<size_t>(2, chunk->col_num()); ++column_idx) {
+      const auto& input_col = chunk->get(static_cast<int>(column_idx));
+      for (size_t row_idx = 0; row_idx < input_col->size(); ++row_idx) {
+        if (NEUG_UNLIKELY(input_col->get_elem(row_idx).IsNull())) {
+          THROW_INVALID_ARGUMENT_EXCEPTION(
+              "COPY into edge table [" + meta_->src_label_name + "]-[" +
+              meta_->edge_label_name + "]->[" + meta_->dst_label_name +
+              "] contains NULL at row " + std::to_string(row_idx) +
+              ", column " + std::to_string(column_idx) +
+              "; edge endpoints cannot be NULL");
+        }
+      }
     }
     auto src_col = chunk->get(0);
     auto dst_col = chunk->get(1);
@@ -920,7 +957,7 @@ void EdgeTable::BatchAddEdges(const IndexerType& src_indexer,
     std::ostringstream oss;
     oss << "COPY into edge table [" << meta_->src_label_name << "]-["
         << meta_->edge_label_name << "]->[" << meta_->dst_label_name
-        << "] dropped " << dangling_edge_count
+        << "] contains " << dangling_edge_count
         << " edge(s) referencing missing vertices";
     if (!dangling_edge_samples.empty()) {
       oss << ". First " << dangling_edge_samples.size() << " sample(s): ";
@@ -935,7 +972,7 @@ void EdgeTable::BatchAddEdges(const IndexerType& src_indexer,
             << " more not shown)";
       }
     }
-    LOG(WARNING) << oss.str();
+    THROW_INVALID_ARGUMENT_EXCEPTION(oss.str());
   }
   EnsureCapacity(
       edge_capacity_with_headroom(table_idx_.load() + src_lid.size()));
